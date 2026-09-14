@@ -44,6 +44,35 @@ class CreateRoute(StrictModel):
         return stripped
 
 
+class IntentExtraction(StrictModel):
+    """LLM output. Only preferences: the model cannot supply provider place IDs or coordinates."""
+
+    cityText: str | None
+    durationMinutes: int | None
+    interests: list[str] = Field(max_length=12)
+    includeFood: bool | None
+    withChildren: bool | None
+    unusualPlaces: bool | None
+
+    @field_validator("interests")
+    @classmethod
+    def valid_interests(cls, values: list[str]) -> list[str]:
+        if any(not item.strip() or len(item) > 80 for item in values):
+            raise ValueError("Invalid interest")
+        return values
+
+
+class QueryPreview(StrictModel):
+    cityId: str
+    durationMinutes: int
+    durationSource: Literal["text", "filter", "default"]
+    interests: list[str]
+    includeFood: bool
+    withChildren: bool
+    unusualPlaces: bool
+    warnings: list[str]
+
+
 class RoutePoint(StrictModel):
     order: int
     placeId: str

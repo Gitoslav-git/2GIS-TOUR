@@ -2,7 +2,6 @@ package ru.gulyay.app;
 
 import android.app.Activity;
 import android.os.Bundle;
-import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -32,11 +31,11 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.1");
+        title.setText("Гуляй · версия 0.2");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
-        intro.setText("Расскажите, как хотите провести прогулку. Первые города: Тула и Владимир.");
+        intro.setText("Расскажите, как хотите провести прогулку. Проверим пожелания для Тулы или Владимира.");
         intro.setTextSize(17);
         column.addView(intro);
         city = new Spinner(this);
@@ -49,7 +48,7 @@ public final class MainActivity extends Activity {
         query.setGravity(android.view.Gravity.TOP);
         column.addView(query, new LinearLayout.LayoutParams(-1, -2));
         submit = new Button(this);
-        submit.setText("Построить маршрут");
+        submit.setText("Проверить пожелания");
         column.addView(submit);
         result = new TextView(this);
         result.setTextSize(17);
@@ -61,7 +60,7 @@ public final class MainActivity extends Activity {
             query.setText(savedInstanceState.getString("query", ""));
             result.setText(savedInstanceState.getString("result", ""));
         } else {
-            result.setText("Подключите backend по HTTPS. Версия 0.1 проверяет ввод и обработку ошибок; маршрут появится в следующем этапе.");
+            result.setText("В версии 0.2 backend разбирает запрос через LLM. Для проверки запустите backend с ключом LLM; карту и маршрут подключим на следующих этапах.");
         }
         submit.setOnClickListener(view -> generate());
     }
@@ -75,7 +74,7 @@ public final class MainActivity extends Activity {
         if (requestInFlight) return;
         requestInFlight = true;
         submit.setEnabled(false);
-        result.setText("Проверяем запрос…");
+        result.setText("Разбираем пожелания…");
         String cityId = city.getSelectedItemPosition() == 0 ? "tula" : "vladimir";
         String sessionId = getPreferences(MODE_PRIVATE).getString("deviceSessionId", null);
         if (sessionId == null) {
@@ -86,9 +85,9 @@ public final class MainActivity extends Activity {
         network.execute(() -> {
             String message;
             try {
-                message = ApiClient.createRoute(cityId, text, owner);
+                message = ApiClient.interpret(cityId, text, owner);
             } catch (Exception exception) {
-                message = "Не удалось связаться с сервером. Проверьте интернет и адрес backend.";
+                message = "Нет ответа от backend. Проверьте адрес сервера и доступность сети.";
             }
             String finalMessage = message;
             runOnUiThread(() -> {

@@ -45,6 +45,7 @@ jobs:
       - name: Build debug APK
         env:
           BACKEND_BASE_URL: ${{ vars.BACKEND_BASE_URL || 'https://example.invalid' }}
+          DEBUG_BACKEND_BASE_URL: ${{ vars.DEBUG_BACKEND_BASE_URL || vars.BACKEND_BASE_URL || 'https://example.invalid' }}
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:

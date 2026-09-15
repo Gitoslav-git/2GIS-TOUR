@@ -1,9 +1,12 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from gulyay.models import (CreateRoute, PlaceCandidate, QueryPreview, RouteLeg,
                            SearchArea)
-from gulyay.route_builder import build_route, city_timezone, schedule_status_at
+from gulyay.route_builder import (TimeBudgetExceeded, build_route, city_timezone,
+                                  rebuild_route_with_points, schedule_status_at)
 
 
 class FakeGeo:
@@ -85,3 +88,34 @@ def test_large_unused_budget_is_explained_instead_of_hidden():
                         FakeGeo([candidate("Кремль", "2gis-1", schedule={"is_24x7": True})]),
                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
     assert any("Осталось 130 мин." in warning for warning in route.warnings)
+
+
+def test_manual_point_order_is_preserved_and_all_legs_are_rebuilt():
+    first = candidate("Первое", "2gis-1", schedule={"is_24x7": True})
+    second = candidate("Второе", "2gis-2", schedule={"is_24x7": True})
+    geo = FakeGeo([first, second])
+    source_payload = CreateRoute(cityId="tula", query="История 3 часа")
+    source = build_route(source_payload, preferences(), geo,
+                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    changed = rebuild_route_with_points(
+        source, source_payload, [second, first], geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert [point.placeId for point in changed.points] == ["2gis-2", "2gis-1"]
+    assert [(leg.fromOrder, leg.toOrder) for leg in changed.legs] == [(0, 1), (1, 2)]
+    assert changed.totalMinutes == 100
+
+
+def test_manual_edit_over_budget_does_not_publish_partial_route():
+    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True})
+              for index in range(1, 5)]
+    geo = FakeGeo(places)
+    payload = CreateRoute(cityId="tula", query="История 3 часа")
+    source = build_route(payload, preferences(), geo,
+                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    with pytest.raises(TimeBudgetExceeded) as error:
+        rebuild_route_with_points(
+            source, payload, places, geo,
+            datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+        )
+    assert error.value.minimum_minutes == 200

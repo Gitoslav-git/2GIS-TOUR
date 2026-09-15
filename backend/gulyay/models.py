@@ -95,6 +95,14 @@ class PlaceCandidate(StrictModel):
     isFood: bool
 
 
+class PlaceSummary(StrictModel):
+    placeId: str
+    name: str
+    lat: float
+    lon: float
+    isFood: bool
+
+
 class RoutePoint(StrictModel):
     order: int
     placeId: str
@@ -133,9 +141,10 @@ class Route(StrictModel):
 
 class RouteRevision(StrictModel):
     baseVersion: int = Field(ge=1)
-    mode: Literal["CHANGE_QUERY"]
+    mode: Literal["CHANGE_QUERY", "EDIT_POINTS"]
     query: str | None = Field(default=None, min_length=3, max_length=1000)
     filters: Filters | None = None
+    pointIds: list[str] | None = Field(default=None, min_length=1, max_length=8)
 
     @field_validator("query")
     @classmethod
@@ -146,3 +155,15 @@ class RouteRevision(StrictModel):
         if len(stripped) < 3:
             raise ValueError("Введите не менее трёх символов")
         return stripped
+
+    @field_validator("pointIds")
+    @classmethod
+    def unique_point_ids(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        cleaned = [value.strip() for value in values]
+        if any(not value or len(value) > 200 or "," in value for value in cleaned):
+            raise ValueError("Некорректный идентификатор точки")
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("Точки маршрута не должны повторяться")
+        return cleaned

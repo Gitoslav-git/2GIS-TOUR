@@ -6,20 +6,23 @@ import threading
 import time
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .geo import (DgisGeoProvider, GeoAuthenticationError, GeoConstraintNotFound,
-                  GeoInvalidResponse, GeoRateLimited, GeoUnavailable)
+                  GeoInvalidResponse, GeoPlaceNotFound, GeoRateLimited,
+                  GeoUnavailable)
 from .intent import (IntentAuthenticationError, IntentInvalidResponse,
                      IntentNeedsClarification, IntentUnavailable,
                      OpenAIIntentProvider, interpret)
-from .models import City, CreateRoute, QueryPreview, Route, RouteRevision
+from .models import (City, CreateRoute, PlaceSummary, QueryPreview, Route,
+                     RouteRevision)
 from .repository import RouteRepository
-from .route_builder import RouteNotFound, TimeBudgetExceeded, build_route
+from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
+                            rebuild_route_with_points)
 
-app = FastAPI(title="Гуляй API", version="0.4.1")
+app = FastAPI(title="Гуляй API", version="0.4.2")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"))
 ROUTE_REPOSITORY = RouteRepository()
 IDEMPOTENT_ROUTES: dict[tuple[UUID, UUID], Route] = {}
@@ -55,12 +58,40 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.4.1"}
+    return {"status": "ok", "version": "0.4.2"}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])
 def cities() -> dict[str, list[City]]:
     return {"cities": list(CITIES)}
+
+
+@app.get("/v1/places", response_model=dict[str, list[PlaceSummary]])
+def places(cityId: str, q: str = Query(min_length=2, max_length=120),
+           x_device_session: UUID | None = Header(default=None),
+           x_request_id: UUID | None = Header(default=None),
+           geo: DgisGeoProvider = Depends(get_geo_provider)) -> dict | JSONResponse:
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None:
+        return failure("UNAUTHORIZED", "Укажите гостевую сессию", 401, request_id)
+    if cityId not in {city.cityId for city in CITIES} or len(q.strip()) < 2:
+        return failure("VALIDATION_ERROR", "Проверьте город и строку поиска", 400, request_id)
+    try:
+        candidates = geo.search_candidates(cityId, q.strip())
+        return {"items": [PlaceSummary(
+            placeId=item.placeId, name=item.name, lat=item.lat, lon=item.lon,
+            isFood=item.isFood,
+        ) for item in candidates]}
+    except GeoAuthenticationError:
+        return failure("GEO_UNAVAILABLE", "Ключ 2ГИС не принят сервером", 503, request_id,
+                       {"reason": "authentication"})
+    except GeoRateLimited as exc:
+        return failure("RATE_LIMITED", f"Лимит запросов 2ГИС. Повторите через {exc.retry_after_seconds} сек.",
+                       429, request_id, {"retryAfterSeconds": exc.retry_after_seconds,
+                                         "dependency": "2gis"},
+                       {"Retry-After": str(exc.retry_after_seconds)})
+    except (GeoInvalidResponse, GeoUnavailable):
+        return failure("GEO_UNAVAILABLE", "Поиск мест 2ГИС недоступен", 503, request_id)
 
 
 @app.post("/v1/routes/interpret", response_model=QueryPreview)
@@ -152,20 +183,53 @@ def revise_route(route_id: UUID, revision: RouteRevision,
     if revision.baseVersion != current.routeVersion:
         return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
                        {"currentVersion": current.routeVersion})
-    if revision.query is None:
-        return failure("VALIDATION_ERROR", "Для изменения маршрута нужен новый текст", 400, request_id,
-                       {"fields": ["query"]})
-    payload = CreateRoute(
-        cityId=source.cityId, query=revision.query,
-        filters=revision.filters if revision.filters is not None else source.filters,
-        startLocation=source.startLocation, deviceSessionId=x_device_session,
-    )
-    route_or_error = _build(payload, intent_provider, geo, request_id)
-    if isinstance(route_or_error, JSONResponse):
-        return route_or_error
-    replacement = route_or_error.model_copy(update={
-        "routeId": route_id, "routeVersion": revision.baseVersion + 1,
-    })
+    if revision.mode == "CHANGE_QUERY":
+        if revision.query is None or revision.pointIds is not None:
+            return failure("VALIDATION_ERROR", "Для изменения маршрута нужен новый текст", 400,
+                           request_id, {"fields": ["query"]})
+        payload = CreateRoute(
+            cityId=source.cityId, query=revision.query,
+            filters=revision.filters if revision.filters is not None else source.filters,
+            startLocation=source.startLocation, deviceSessionId=x_device_session,
+        )
+        route_or_error = _build(payload, intent_provider, geo, request_id)
+        if isinstance(route_or_error, JSONResponse):
+            return route_or_error
+        replacement = route_or_error.model_copy(update={
+            "routeId": route_id, "routeVersion": revision.baseVersion + 1,
+        })
+    else:
+        if revision.pointIds is None or revision.query is not None or revision.filters is not None:
+            return failure("VALIDATION_ERROR", "Передайте итоговый порядок точек", 400,
+                           request_id, {"fields": ["pointIds"]})
+        payload = source
+        try:
+            candidates = geo.resolve_places(current.cityId, revision.pointIds)
+            replacement = rebuild_route_with_points(current, source, candidates, geo).model_copy(
+                update={"routeVersion": revision.baseVersion + 1}
+            )
+        except GeoPlaceNotFound:
+            return failure("ROUTE_NOT_FOUND", "Одна из точек не найдена в выбранном городе", 422,
+                           request_id)
+        except GeoAuthenticationError:
+            return failure("GEO_UNAVAILABLE", "Ключ 2ГИС не принят сервером", 503, request_id,
+                           {"reason": "authentication"})
+        except GeoRateLimited as exc:
+            return failure("RATE_LIMITED",
+                           f"Лимит запросов 2ГИС. Повторите через {exc.retry_after_seconds} сек.",
+                           429, request_id, {"retryAfterSeconds": exc.retry_after_seconds,
+                                             "dependency": "2gis"},
+                           {"Retry-After": str(exc.retry_after_seconds)})
+        except (GeoInvalidResponse, GeoUnavailable):
+            return failure("GEO_UNAVAILABLE", "Сервис мест или пеших маршрутов 2ГИС недоступен",
+                           503, request_id)
+        except TimeBudgetExceeded as exc:
+            details = {"minimumMinutes": exc.minimum_minutes} if exc.minimum_minutes else {}
+            return failure("TIME_BUDGET_EXCEEDED", "Точки не помещаются в выбранное время", 422,
+                           request_id, details)
+        except RouteNotFound:
+            return failure("ROUTE_NOT_FOUND", "Нельзя построить маршрут в выбранном порядке", 422,
+                           request_id)
     if not repository.replace(replacement, x_device_session, payload, revision.baseVersion):
         latest = repository.get(route_id, x_device_session)
         current_version = latest[0].routeVersion if latest else revision.baseVersion

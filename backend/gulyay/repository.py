@@ -31,6 +31,7 @@ class RouteRepository:
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(resolved, check_same_thread=False, timeout=10)
         self._connection.execute("PRAGMA busy_timeout = 10000")
+        self._connection.execute("PRAGMA foreign_keys = ON")
         if resolved != ":memory:":
             self._connection.execute("PRAGMA journal_mode = WAL")
         self._connection.execute("""
@@ -42,6 +43,20 @@ class RouteRepository:
                 input_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
+        """)
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS route_versions (
+                route_id TEXT NOT NULL,
+                route_version INTEGER NOT NULL,
+                route_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (route_id, route_version),
+                FOREIGN KEY (route_id) REFERENCES routes(route_id) ON DELETE CASCADE
+            )
+        """)
+        self._connection.execute("""
+            INSERT OR IGNORE INTO route_versions (route_id, route_version, route_json, created_at)
+            SELECT route_id, route_version, route_json, updated_at FROM routes
         """)
         self._connection.commit()
         self.purge_expired()
@@ -55,6 +70,11 @@ class RouteRepository:
                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
                 (str(route.routeId), str(owner), route.routeVersion,
                  route.model_dump_json(), payload.model_dump_json()),
+            )
+            self._connection.execute(
+                """INSERT INTO route_versions (route_id, route_version, route_json)
+                   VALUES (?, ?, ?)""",
+                (str(route.routeId), route.routeVersion, route.model_dump_json()),
             )
 
     def get(self, route_id: UUID, owner: UUID) -> tuple[Route, CreateRoute] | None:
@@ -82,10 +102,36 @@ class RouteRepository:
                 (route.routeVersion, route.model_dump_json(), payload.model_dump_json(),
                  str(route.routeId), str(owner), base_version),
             )
-            return cursor.rowcount == 1
+            if cursor.rowcount != 1:
+                return False
+            self._connection.execute(
+                """INSERT INTO route_versions (route_id, route_version, route_json)
+                   VALUES (?, ?, ?)""",
+                (str(route.routeId), route.routeVersion, route.model_dump_json()),
+            )
+            return True
+
+    def get_version(self, route_id: UUID, owner: UUID, version: int) -> Route | None:
+        self.purge_expired()
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT versions.route_json
+                   FROM route_versions AS versions
+                   JOIN routes ON routes.route_id = versions.route_id
+                   WHERE versions.route_id = ? AND routes.owner_session = ?
+                         AND versions.route_version = ?""",
+                (str(route_id), str(owner), version),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return Route.model_validate_json(row[0])
+        except ValueError:
+            return None
 
     def clear(self) -> None:
         with self._lock, self._connection:
+            self._connection.execute("DELETE FROM route_versions")
             self._connection.execute("DELETE FROM routes")
 
     def purge_expired(self) -> None:
@@ -93,6 +139,9 @@ class RouteRepository:
         with self._lock, self._connection:
             self._connection.execute(
                 "DELETE FROM routes WHERE updated_at < datetime('now', ?)", (modifier,)
+            )
+            self._connection.execute(
+                "DELETE FROM route_versions WHERE route_id NOT IN (SELECT route_id FROM routes)"
             )
 
     def close(self) -> None:

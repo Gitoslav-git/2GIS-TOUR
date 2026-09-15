@@ -102,6 +102,82 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     )
 
 
+def rebuild_route_with_points(source: Route, payload: CreateRoute,
+                              candidates: list[PlaceCandidate], geo: GeoProvider,
+                              now: datetime | None = None) -> Route:
+    """Recalculate an explicitly ordered point list without silently optimizing it."""
+    if not 1 <= len(candidates) <= 8:
+        raise RouteNotFound()
+    if len({candidate.placeId for candidate in candidates}) != len(candidates):
+        raise RouteNotFound()
+
+    if payload.startLocation:
+        current = payload.startLocation.lat, payload.startLocation.lon
+    else:
+        current = source.searchArea.lat, source.searchArea.lon
+    local_now = now or datetime.now(city_timezone())
+    elapsed_seconds = 0
+    route_points, legs = [], []
+    previous = {point.placeId: point for point in source.points}
+
+    for candidate in candidates:
+        old = previous.get(candidate.placeId)
+        visit_minutes = old.visitMinutes if old else (60 if candidate.isFood else 40)
+        try:
+            leg = geo.walking_leg(current, (candidate.lat, candidate.lon),
+                                  len(route_points), len(route_points) + 1)
+        except GeoRouteNotFound as exc:
+            raise RouteNotFound() from exc
+        projected_seconds = elapsed_seconds + leg.durationSeconds + visit_minutes * 60
+        arrival = local_now + timedelta(seconds=elapsed_seconds + leg.durationSeconds)
+        schedule_status = schedule_status_at(candidate.schedule, arrival, visit_minutes)
+        if schedule_status == "CLOSED":
+            raise RouteNotFound()
+        route_points.append(RoutePoint(
+            order=len(route_points) + 1, placeId=candidate.placeId, name=candidate.name,
+            lat=candidate.lat, lon=candidate.lon, visitMinutes=visit_minutes,
+            scheduleStatus=schedule_status, isFood=candidate.isFood,
+        ))
+        legs.append(leg)
+        current = candidate.lat, candidate.lon
+        elapsed_seconds = projected_seconds
+
+    total_minutes = math.ceil(elapsed_seconds / 60)
+    if total_minutes > source.requestedMinutes:
+        raise TimeBudgetExceeded(total_minutes)
+    unused_minutes = source.requestedMinutes - total_minutes
+    food_required = (any(point.isFood for point in source.points)
+                     or any("место для еды" in warning for warning in source.warnings))
+    warnings = _route_warnings(
+        source.requestedMinutes, unused_minutes, source.approximateStart,
+        source.searchArea.label, source.searchArea.label != "Весь город",
+        food_required, any(point.isFood for point in route_points),
+        any(point.scheduleStatus == "UNKNOWN" for point in route_points),
+    )
+    return source.model_copy(update={
+        "points": route_points, "legs": legs, "totalMinutes": total_minutes,
+        "unusedMinutes": unused_minutes, "warnings": warnings,
+    })
+
+
+def _route_warnings(requested_minutes: int, unused_minutes: int,
+                    approximate_start: bool, area_label: str,
+                    area_is_explicit: bool, food_required: bool, has_food: bool,
+                    has_unknown_schedule: bool) -> list[str]:
+    warnings = ["Время посещения пока оценочное: 40 минут, для еды — 60 минут"]
+    if approximate_start:
+        warnings.append("Время от вашего фактического местоположения не учтено")
+    if area_is_explicit:
+        warnings.append(f"Область поиска: {area_label}")
+    if food_required and not has_food:
+        warnings.append("После ручного редактирования в маршруте нет места для еды")
+    if has_unknown_schedule:
+        warnings.append("Для части мест 2ГИС не вернул расписание")
+    if unused_minutes > max(20, math.ceil(requested_minutes * 0.15)):
+        warnings.append(f"После ручного редактирования осталось {unused_minutes} мин. свободного времени")
+    return warnings
+
+
 def _candidate_order(candidates: list[PlaceCandidate], include_food: bool,
                      start: tuple[float, float]) -> list[PlaceCandidate]:
     """Use a nearest-neighbour shortlist; published legs are still verified by 2GIS Routing."""

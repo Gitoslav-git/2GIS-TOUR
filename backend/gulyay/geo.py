@@ -47,6 +47,10 @@ class GeoRouteNotFound(Exception):
     """No pedestrian path exists between the supplied points."""
 
 
+class GeoPlaceNotFound(Exception):
+    """One or more supplied provider place IDs are missing or outside the city."""
+
+
 class GeoProvider(Protocol):
     def ensure_configured(self) -> None: ...
     def resolve_city_center(self, city_id: str) -> tuple[float, float]: ...
@@ -54,12 +58,15 @@ class GeoProvider(Protocol):
                             city_center: tuple[float, float]) -> SearchArea: ...
     def search_places(self, city_id: str, preview: QueryPreview,
                       area: SearchArea) -> list[PlaceCandidate]: ...
+    def search_candidates(self, city_id: str, query: str) -> list[PlaceCandidate]: ...
+    def resolve_places(self, city_id: str, place_ids: list[str]) -> list[PlaceCandidate]: ...
     def walking_leg(self, start: tuple[float, float], end: tuple[float, float],
                     from_order: int, to_order: int) -> RouteLeg: ...
 
 
 CITY_NAMES = {"tula": "Тула", "vladimir": "Владимир"}
 PLACES_URL = "https://catalog.api.2gis.com/3.0/items"
+PLACES_BY_ID_URL = "https://catalog.api.2gis.com/3.0/items/byid"
 ROUTING_URL = "https://routing.api.2gis.com/routing/7.0.0/global"
 
 
@@ -129,7 +136,7 @@ class DgisGeoProvider:
 
     def _client(self) -> httpx.Client:
         return httpx.Client(timeout=12.0, transport=self.transport,
-                            headers={"User-Agent": "Gulyay-Backend/0.4.1"})
+                            headers={"User-Agent": "Gulyay-Backend/0.4.2"})
 
     def _request(self, method: str, url: str, **kwargs) -> dict:
         global _RATE_LIMITED_UNTIL
@@ -180,12 +187,12 @@ class DgisGeoProvider:
             raise GeoInvalidResponse()
         return data
 
-    def _places(self, **params: str | int | bool) -> list[dict]:
-        cache_key = tuple(sorted((key, str(value)) for key, value in params.items()))
+    def _places_from(self, url: str, **params: str | int | bool) -> list[dict]:
+        cache_key = (url, tuple(sorted((key, str(value)) for key, value in params.items())))
         cached = _PLACES_CACHE.get(cache_key, self.clock())
         if isinstance(cached, list):
             return cached
-        data = self._request("GET", PLACES_URL, params={"key": self.places_key, **params})
+        data = self._request("GET", url, params={"key": self.places_key, **params})
         meta, result = data.get("meta"), data.get("result")
         if not isinstance(meta, dict) or meta.get("code") != 200 or not isinstance(result, dict):
             raise GeoInvalidResponse()
@@ -195,6 +202,9 @@ class DgisGeoProvider:
         clean = [item for item in items if isinstance(item, dict)]
         _PLACES_CACHE.put(cache_key, clean, self.clock() + self.places_ttl)
         return clean
+
+    def _places(self, **params: str | int | bool) -> list[dict]:
+        return self._places_from(PLACES_URL, **params)
 
     def resolve_city_center(self, city_id: str) -> tuple[float, float]:
         city_name = CITY_NAMES[city_id]
@@ -266,27 +276,46 @@ class DgisGeoProvider:
                 page_size=10, search_is_query_text_complete="true",
             )
             for item in items:
-                place_id, name = str(item.get("id", "")).strip(), str(item.get("name", "")).strip()
-                point = item.get("point")
-                rubrics_data = item.get("rubrics")
-                if (not place_id or not name or place_id in seen or item.get("is_routing_available") is False
-                        or not _valid_point(point)):
+                candidate = _candidate_from_item(item, requested_as_food)
+                if candidate is None or candidate.placeId in seen:
                     continue
-                rubrics = ([str(r.get("name", "")).strip() for r in rubrics_data
-                            if isinstance(r, dict) and r.get("name")]
-                           if isinstance(rubrics_data, list) else [])
-                food_words = ("кафе", "ресторан", "кофейн", "столов", "бар", "пицц", "бургер")
-                is_food = requested_as_food or any(any(word in rubric.casefold() for word in food_words)
-                                                   for rubric in rubrics)
-                result.append(PlaceCandidate(
-                    placeId=place_id, name=name, lat=float(point["lat"]), lon=float(point["lon"]),
-                    rubrics=rubrics, schedule=item.get("schedule") if isinstance(item.get("schedule"), dict) else {},
-                    isFood=is_food,
-                ))
-                seen.add(place_id)
+                result.append(candidate)
+                seen.add(candidate.placeId)
         sights = [candidate for candidate in result if not candidate.isFood][:20]
         food = [candidate for candidate in result if candidate.isFood][:4]
         return sights + food
+
+    def search_candidates(self, city_id: str, query: str) -> list[PlaceCandidate]:
+        center = self.resolve_city_center(city_id)
+        items = self._places(
+            q=query, type="attraction,branch", locale="ru_RU",
+            point=f"{center[1]:.7f},{center[0]:.7f}", radius=12000,
+            fields="items.point,items.rubrics,items.schedule,items.is_routing_available,items.adm_div,items.city_alias",
+            page_size=10, search_is_query_text_complete="true",
+        )
+        result: list[PlaceCandidate] = []
+        for item in items:
+            candidate = _candidate_from_item(item)
+            if candidate and _belongs_to_city(item, city_id, center):
+                result.append(candidate)
+        return result[:10]
+
+    def resolve_places(self, city_id: str, place_ids: list[str]) -> list[PlaceCandidate]:
+        if not place_ids or len(set(place_ids)) != len(place_ids):
+            raise GeoPlaceNotFound()
+        center = self.resolve_city_center(city_id)
+        items = self._places_from(
+            PLACES_BY_ID_URL, id=",".join(sorted(place_ids)), locale="ru_RU",
+            fields="items.point,items.rubrics,items.schedule,items.is_routing_available,items.adm_div,items.city_alias",
+        )
+        by_id: dict[str, PlaceCandidate] = {}
+        for item in items:
+            candidate = _candidate_from_item(item)
+            if candidate and _belongs_to_city(item, city_id, center):
+                by_id[candidate.placeId] = candidate
+        if any(place_id not in by_id for place_id in place_ids):
+            raise GeoPlaceNotFound()
+        return [by_id[place_id] for place_id in place_ids]
 
     def walking_leg(self, start: tuple[float, float], end: tuple[float, float],
                     from_order: int, to_order: int) -> RouteLeg:
@@ -349,6 +378,49 @@ def _valid_point(point: object) -> bool:
     return (isinstance(point, dict)
             and isinstance(point.get("lat"), (int, float))
             and isinstance(point.get("lon"), (int, float)))
+
+
+def _candidate_from_item(item: dict, requested_as_food: bool = False) -> PlaceCandidate | None:
+    place_id = str(item.get("id", "")).strip()
+    name = str(item.get("name", "")).strip()
+    point = item.get("point")
+    if (not place_id or not name or item.get("is_routing_available") is False
+            or not _valid_point(point)):
+        return None
+    rubrics_data = item.get("rubrics")
+    rubrics = ([str(r.get("name", "")).strip() for r in rubrics_data
+                if isinstance(r, dict) and r.get("name")]
+               if isinstance(rubrics_data, list) else [])
+    food_words = ("кафе", "ресторан", "кофейн", "столов", "бар", "пицц", "бургер")
+    is_food = requested_as_food or any(
+        any(word in rubric.casefold() for word in food_words) for rubric in rubrics
+    )
+    schedule = item.get("schedule") if isinstance(item.get("schedule"), dict) else {}
+    return PlaceCandidate(
+        placeId=place_id, name=name, lat=float(point["lat"]), lon=float(point["lon"]),
+        rubrics=rubrics, schedule=schedule, isFood=is_food,
+    )
+
+
+def _belongs_to_city(item: dict, city_id: str, center: tuple[float, float]) -> bool:
+    expected = CITY_NAMES[city_id].casefold()
+    alias = str(item.get("city_alias", "")).strip().casefold()
+    if alias:
+        return alias == city_id
+    divisions = item.get("adm_div")
+    if isinstance(divisions, list):
+        saw_city = False
+        for division in divisions:
+            if isinstance(division, dict) and str(division.get("type", "")).casefold() == "city":
+                saw_city = True
+                if str(division.get("name", "")).strip().casefold() == expected:
+                    return True
+        if saw_city:
+            return False
+    point = item.get("point")
+    return _valid_point(point) and _haversine_meters(
+        center, (float(point["lat"]), float(point["lon"]))
+    ) <= 25000
 
 
 def _direction_vector(value: str) -> tuple[int, int] | None:

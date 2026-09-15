@@ -1,8 +1,9 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from gulyay.models import (CreateRoute, PlaceCandidate, QueryPreview, RouteLeg)
-from gulyay.route_builder import build_route, schedule_status_at
+from gulyay.models import (CreateRoute, PlaceCandidate, QueryPreview, RouteLeg,
+                           SearchArea)
+from gulyay.route_builder import build_route, city_timezone, schedule_status_at
 
 
 class FakeGeo:
@@ -11,7 +12,11 @@ class FakeGeo:
 
     def ensure_configured(self): pass
     def resolve_city_center(self, city_id): return 54.193, 37.617
-    def search_places(self, city_id, preview, center): return self.candidates
+    def resolve_search_area(self, city_id, location_hint, center):
+        return SearchArea(label="Центр города" if location_hint else "Весь город",
+                          lat=center[0], lon=center[1], radiusMeters=3500 if location_hint else 12000,
+                          source="city")
+    def search_places(self, city_id, preview, area): return self.candidates
     def walking_leg(self, start, end, from_order, to_order):
         return RouteLeg(fromOrder=from_order, toOrder=to_order, distanceMeters=500,
                         durationSeconds=600, geometry=[[37.617, 54.193], [end[1], end[0]]])
@@ -45,7 +50,8 @@ def test_center_and_food_are_visible_in_route_warnings():
                         FakeGeo([candidate("Кремль", "2gis-1"), candidate("Кафе", "2gis-food", True)]),
                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
     assert any(point.isFood for point in route.points)
-    assert "Поиск мест ограничен центром города" in route.warnings
+    assert "Область поиска: Центр города" in route.warnings
+    assert route.searchArea.label == "Центр города"
 
 
 def test_schedule_checks_whole_visit_not_only_arrival():
@@ -54,3 +60,7 @@ def test_schedule_checks_whole_visit_not_only_arrival():
     assert schedule_status_at(schedule, current, 20) == "OPEN"
     assert schedule_status_at(schedule, current, 40) == "CLOSED"
     assert schedule_status_at({}, current, 40) == "UNKNOWN"
+
+
+def test_pilot_timezone_is_available_on_windows_and_linux():
+    assert datetime(2026, 9, 15, 12, tzinfo=city_timezone()).utcoffset().total_seconds() == 10800

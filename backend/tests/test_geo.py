@@ -4,7 +4,8 @@ import httpx
 import pytest
 
 from gulyay.geo import (DgisGeoProvider, GeoAuthenticationError,
-                        GeoInvalidResponse, GeoRouteNotFound, GeoUnavailable)
+                        GeoInvalidResponse, GeoRateLimited, GeoRouteNotFound,
+                        GeoUnavailable, clear_geo_caches)
 from gulyay.models import QueryPreview
 
 
@@ -13,6 +14,9 @@ def response(request: httpx.Request) -> httpx.Response:
         query = request.url.params.get("q")
         if query == "Тула":
             items = [{"id": "city-2gis", "name": "Тула", "point": {"lat": 54.193, "lon": 37.617}}]
+        elif query == "Заречье, Тула":
+            items = [{"id": "area-2gis", "name": "Заречье", "full_name": "Заречье, Тула",
+                      "point": {"lat": 54.225, "lon": 37.62}}]
         else:
             items = [{
                 "id": "real-2gis-place", "name": "Тульский кремль",
@@ -36,14 +40,23 @@ def response(request: httpx.Request) -> httpx.Response:
 def preview(center=True):
     return QueryPreview(cityId="tula", durationMinutes=180, durationSource="text",
                         interests=["кремль"], includeFood=False, withChildren=False,
-                        unusualPlaces=False, centerOnly=center, warnings=[])
+                        unusualPlaces=False, centerOnly=center,
+                        locationHint="центр" if center else None, warnings=[])
+
+
+@pytest.fixture(autouse=True)
+def clean_caches():
+    clear_geo_caches()
+    yield
+    clear_geo_caches()
 
 
 def test_places_and_walking_route_use_real_provider_payloads():
     provider = DgisGeoProvider("places-secret", "routing-secret", httpx.MockTransport(response))
     center = provider.resolve_city_center("tula")
     assert center == (54.193, 37.617)
-    places = provider.search_places("tula", preview(), center)
+    area = provider.resolve_search_area("tula", "центр", center)
+    places = provider.search_places("tula", preview(), area)
     assert places[0].placeId == "real-2gis-place"
     leg = provider.walking_leg(center, (places[0].lat, places[0].lon), 0, 1)
     assert leg.distanceMeters == 430 and leg.durationSeconds == 330
@@ -57,9 +70,50 @@ def test_center_request_uses_smaller_search_radius():
             radii.append(request.url.params.get("radius"))
         return response(request)
     provider = DgisGeoProvider("p", "r", httpx.MockTransport(capture))
-    provider.search_places("tula", preview(center=True), (54.193, 37.617))
-    provider.search_places("tula", preview(center=False), (54.193, 37.617))
+    center = (54.193, 37.617)
+    provider.search_places("tula", preview(center=True), provider.resolve_search_area("tula", "центр", center))
+    provider.search_places("tula", preview(center=False), provider.resolve_search_area("tula", None, center))
     assert radii == ["3500", "12000"]
+
+
+def test_direction_and_named_area_become_explicit_search_anchors():
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(response))
+    center = (54.193, 37.617)
+    north = provider.resolve_search_area("tula", "север города", center)
+    named = provider.resolve_search_area("tula", "Заречье", center)
+    assert north.source == "direction" and north.lat > center[0]
+    assert north.label == "Север города"
+    assert named.source == "2gis" and named.label == "Заречье, Тула"
+
+
+def test_places_and_routing_results_are_cached():
+    calls = {"places": 0, "routing": 0}
+    def capture(request):
+        calls["places" if request.url.host == "catalog.api.2gis.com" else "routing"] += 1
+        return response(request)
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(capture))
+    provider.resolve_city_center("tula")
+    provider.resolve_city_center("tula")
+    provider.walking_leg((54.193, 37.617), (54.196, 37.619), 0, 1)
+    provider.walking_leg((54.193, 37.617), (54.196, 37.619), 4, 5)
+    assert calls == {"places": 1, "routing": 1}
+
+
+def test_rate_limit_retries_then_opens_circuit(monkeypatch):
+    monkeypatch.setenv("DGIS_MAX_RETRIES", "1")
+    calls, sleeps = [], []
+    def limited(request):
+        calls.append(request)
+        return httpx.Response(429, headers={"Retry-After": "3"}, json={})
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(limited),
+                                sleeper=sleeps.append, clock=lambda: 100.0)
+    with pytest.raises(GeoRateLimited) as first:
+        provider.resolve_city_center("tula")
+    assert first.value.retry_after_seconds == 3
+    assert sleeps == [3] and len(calls) == 2
+    with pytest.raises(GeoRateLimited):
+        provider.resolve_city_center("tula")
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("status,error", [(401, GeoAuthenticationError), (500, GeoUnavailable)])

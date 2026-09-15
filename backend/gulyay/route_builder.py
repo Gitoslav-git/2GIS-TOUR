@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .geo import GeoProvider, GeoRouteNotFound
 from .models import CreateRoute, PlaceCandidate, QueryPreview, Route, RoutePoint
@@ -21,24 +21,27 @@ class TimeBudgetExceeded(Exception):
 def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
                 now: datetime | None = None) -> Route:
     city_center = geo.resolve_city_center(payload.cityId)
+    location_hint = preview.locationHint or ("центр" if preview.centerOnly else None)
+    search_area = geo.resolve_search_area(payload.cityId, location_hint, city_center)
     if payload.startLocation:
         start = (payload.startLocation.lat, payload.startLocation.lon)
         approximate_start = False
     else:
-        start = city_center
+        start = (search_area.lat, search_area.lon)
         approximate_start = True
 
-    candidates = geo.search_places(payload.cityId, preview, city_center)
+    candidates = geo.search_places(payload.cityId, preview, search_area)
     if not candidates:
         raise RouteNotFound()
-    candidates = _candidate_order(candidates, preview.includeFood)
+    candidates = _candidate_order(candidates, preview.includeFood, start)
     current, elapsed_seconds = start, 0
     route_points, legs = [], []
     skipped_for_budget = False
-    local_now = now or datetime.now(ZoneInfo("Europe/Moscow"))
+    local_now = now or datetime.now(city_timezone())
 
-    for candidate in candidates[:12]:
-        if len(route_points) >= 8:
+    # Bounded candidate validation protects the upstream Routing API from bursts.
+    for candidate in candidates[:6]:
+        if len(route_points) >= 6:
             break
         visit_minutes = 60 if candidate.isFood else 40
         try:
@@ -71,29 +74,55 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     warnings = ["Время посещения пока оценочное: 40 минут, для еды — 60 минут"]
     if approximate_start:
         warnings.append("Время от вашего фактического местоположения не учтено")
-    if preview.centerOnly:
-        warnings.append("Поиск мест ограничен центром города")
+    if location_hint:
+        warnings.append(f"Область поиска: {search_area.label}")
     if preview.includeFood and not any(point.isFood for point in route_points):
         warnings.append("Подходящее место для еды не поместилось в маршрут")
     if any(point.scheduleStatus == "UNKNOWN" for point in route_points):
         warnings.append("Для части мест 2ГИС не вернул расписание")
     return Route(
         routeId=uuid4(), routeVersion=1, status="READY", cityId=payload.cityId,
+        query=payload.query, filters=payload.filters, searchArea=search_area,
         approximateStart=approximate_start, totalMinutes=math.ceil(elapsed_seconds / 60),
         points=route_points, legs=legs, warnings=warnings,
     )
 
 
-def _candidate_order(candidates: list[PlaceCandidate], include_food: bool) -> list[PlaceCandidate]:
+def _candidate_order(candidates: list[PlaceCandidate], include_food: bool,
+                     start: tuple[float, float]) -> list[PlaceCandidate]:
+    """Use a nearest-neighbour shortlist; published legs are still verified by 2GIS Routing."""
+    sights = _nearest_order([candidate for candidate in candidates if not candidate.isFood], start)
     if not include_food:
-        return [candidate for candidate in candidates if not candidate.isFood]
-    sights = [candidate for candidate in candidates if not candidate.isFood]
-    food = [candidate for candidate in candidates if candidate.isFood]
+        return sights
+    food = _nearest_order([candidate for candidate in candidates if candidate.isFood], start)
     if not food:
         return sights
-    # Stage 0.3 uses relevance order; full sequence optimization is the boundary of 0.4.
     insertion = min(2, len(sights))
     return sights[:insertion] + food[:1] + sights[insertion:] + food[1:]
+
+
+def _nearest_order(candidates: list[PlaceCandidate], start: tuple[float, float]) -> list[PlaceCandidate]:
+    remaining, ordered, current = list(candidates), [], start
+    while remaining:
+        candidate = min(remaining, key=lambda item: _distance_squared(current, (item.lat, item.lon)))
+        remaining.remove(candidate)
+        ordered.append(candidate)
+        current = candidate.lat, candidate.lon
+    return ordered
+
+
+def _distance_squared(start: tuple[float, float], end: tuple[float, float]) -> float:
+    # Used only to prioritize which real Routing calls to make, never as published route data.
+    lon_scale = math.cos(math.radians((start[0] + end[0]) / 2))
+    return (start[0] - end[0]) ** 2 + ((start[1] - end[1]) * lon_scale) ** 2
+
+
+def city_timezone():
+    """Use bundled IANA data; retain a safe pilot-city fallback on minimal Windows installs."""
+    try:
+        return ZoneInfo("Europe/Moscow")
+    except ZoneInfoNotFoundError:
+        return timezone(timedelta(hours=3), name="MSK")
 
 
 def schedule_status_at(schedule: dict, arrival: datetime, visit_minutes: int) -> str:

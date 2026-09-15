@@ -54,6 +54,7 @@ class IntentExtraction(StrictModel):
     withChildren: bool | None
     unusualPlaces: bool | None
     centerOnly: bool | None
+    locationHint: str | None = Field(max_length=120)
 
     @field_validator("interests")
     @classmethod
@@ -72,7 +73,16 @@ class QueryPreview(StrictModel):
     withChildren: bool
     unusualPlaces: bool
     centerOnly: bool
+    locationHint: str | None = Field(default=None, max_length=120)
     warnings: list[str]
+
+
+class SearchArea(StrictModel):
+    label: str
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    radiusMeters: int = Field(ge=500, le=20000)
+    source: Literal["city", "direction", "2gis"]
 
 
 class PlaceCandidate(StrictModel):
@@ -109,8 +119,28 @@ class Route(StrictModel):
     routeVersion: int
     status: Literal["READY", "ACTIVE", "COMPLETED", "STOPPED"]
     cityId: str
+    query: str
+    filters: Filters
+    searchArea: SearchArea
     approximateStart: bool
     totalMinutes: int
     points: list[RoutePoint]
     legs: list[RouteLeg]
     warnings: list[str]
+
+
+class RouteRevision(StrictModel):
+    baseVersion: int = Field(ge=1)
+    mode: Literal["CHANGE_QUERY"]
+    query: str | None = Field(default=None, min_length=3, max_length=1000)
+    filters: Filters | None = None
+
+    @field_validator("query")
+    @classmethod
+    def nonempty_revision_query(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if len(stripped) < 3:
+            raise ValueError("Введите не менее трёх символов")
+        return stripped

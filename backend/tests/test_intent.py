@@ -26,7 +26,8 @@ class FakeIntentProvider:
 
 def parsed(**updates):
     values = dict(cityText=None, durationMinutes=None, interests=[],
-                  includeFood=None, withChildren=None, unusualPlaces=None, centerOnly=None)
+                  includeFood=None, withChildren=None, unusualPlaces=None, centerOnly=None,
+                  locationHint=None)
     values.update(updates)
     return IntentExtraction.model_validate(values)
 
@@ -55,7 +56,7 @@ def test_extracts_preferences_without_claiming_real_locations():
     assert result.json() == {
         "cityId": "tula", "durationMinutes": 120, "durationSource": "text",
         "interests": ["храмы"], "includeFood": True, "withChildren": False,
-        "unusualPlaces": False, "centerOnly": False, "warnings": [],
+        "unusualPlaces": False, "centerOnly": False, "locationHint": None, "warnings": [],
     }
     assert provider.calls == 1
     assert "placeId" not in result.text and "lat" not in result.text
@@ -88,6 +89,27 @@ def test_center_preference_is_preserved():
     result = request(query="Хочу гулять в ЦЕНТРЕ час с обедом")
     assert result.status_code == 200
     assert result.json()["centerOnly"] is True
+    assert result.json()["locationHint"] == "центр"
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("Хочу гулять на севере города два часа", "север города"),
+    ("Хочу гулять на юго-западе города два часа", "юго-запад города"),
+])
+def test_direction_preference_is_preserved_even_if_llm_misses_it(query, expected):
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
+        parsed(durationMinutes=120, locationHint=None))
+    result = request(query=query)
+    assert result.status_code == 200
+    assert result.json()["locationHint"] == expected
+
+
+def test_named_area_from_llm_is_preserved():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
+        parsed(durationMinutes=120, locationHint="Заречье"))
+    result = request(query="Погулять по Заречью два часа")
+    assert result.status_code == 200
+    assert result.json()["locationHint"] == "Заречье"
 
 
 def test_city_conflict_asks_for_clarification():
@@ -128,6 +150,7 @@ def test_fake_provider_is_schema_checked_too():
         output={"cityText": None, "durationMinutes": 120, "interests": [],
                 "includeFood": False, "withChildren": False, "unusualPlaces": False,
                 "centerOnly": False,
+                "locationHint": None,
                 "madeUpPlaceId": "invented"})
     result = request()
     assert result.status_code == 502

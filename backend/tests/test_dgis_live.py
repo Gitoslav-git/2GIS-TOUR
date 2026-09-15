@@ -18,9 +18,10 @@ def test_live_places_and_walking_route_for_pilot_city(city_id):
     preview = QueryPreview(
         cityId=city_id, durationMinutes=180, durationSource="text",
         interests=["достопримечательности"], includeFood=False, withChildren=False,
-        unusualPlaces=False, centerOnly=True, warnings=[],
+        unusualPlaces=False, centerOnly=True, locationHint="центр", warnings=[],
     )
-    places = provider.search_places(city_id, preview, center)
+    area = provider.resolve_search_area(city_id, preview.locationHint, center)
+    places = provider.search_places(city_id, preview, area)
     assert places
     leg = provider.walking_leg(center, (places[0].lat, places[0].lon), 0, 1)
     assert leg.distanceMeters >= 0

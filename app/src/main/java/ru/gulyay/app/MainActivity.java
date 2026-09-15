@@ -20,6 +20,11 @@ public final class MainActivity extends Activity {
     private TextView result;
     private Button submit;
     private boolean requestInFlight;
+    private String routeId;
+    private int routeVersion;
+    private String routeCityId;
+    private String lastSuccessfulResult;
+    private long retryAllowedAtMillis;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -31,7 +36,7 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.3");
+        title.setText("Гуляй · версия 0.4");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
@@ -59,10 +64,17 @@ public final class MainActivity extends Activity {
             city.setSelection(savedInstanceState.getInt("city"));
             query.setText(savedInstanceState.getString("query", ""));
             result.setText(savedInstanceState.getString("result", ""));
+            routeId = savedInstanceState.getString("routeId");
+            routeVersion = savedInstanceState.getInt("routeVersion", 0);
+            routeCityId = savedInstanceState.getString("routeCityId");
+            lastSuccessfulResult = savedInstanceState.getString("lastSuccessfulResult");
+            retryAllowedAtMillis = savedInstanceState.getLong("retryAllowedAtMillis", 0);
+            if (routeId != null) submit.setText("Изменить маршрут");
         } else {
-            result.setText("Для версии 0.3 запустите backend с ключами LLM, Places API и Routing API 2ГИС. Карта появится на следующем этапе.");
+            result.setText("Версия 0.4 понимает части города и ориентиры. После построения измените текст и нажмите «Изменить маршрут».");
         }
         submit.setOnClickListener(view -> generate());
+        applyCooldown();
     }
 
     private void generate() {
@@ -72,10 +84,16 @@ public final class MainActivity extends Activity {
             return;
         }
         if (requestInFlight) return;
+        if (System.currentTimeMillis() < retryAllowedAtMillis) {
+            applyCooldown();
+            return;
+        }
         requestInFlight = true;
         submit.setEnabled(false);
-        result.setText("Разбираем пожелания и строим маршрут…");
         String cityId = city.getSelectedItemPosition() == 0 ? "tula" : "vladimir";
+        boolean revise = routeId != null && cityId.equals(routeCityId);
+        String previous = lastSuccessfulResult;
+        result.setText(revise ? "Пересчитываем маршрут…" : "Разбираем пожелания и строим маршрут…");
         String sessionId = getPreferences(MODE_PRIVATE).getString("deviceSessionId", null);
         if (sessionId == null) {
             sessionId = UUID.randomUUID().toString();
@@ -83,26 +101,61 @@ public final class MainActivity extends Activity {
         }
         final String owner = sessionId;
         network.execute(() -> {
-            String message;
+            ApiClient.Result response;
             try {
-                message = ApiClient.createRoute(cityId, text, owner);
+                response = revise
+                        ? ApiClient.reviseRoute(routeId, routeVersion, cityId, text, owner)
+                        : ApiClient.createRoute(cityId, text, owner);
             } catch (Exception exception) {
-                message = "Нет ответа от backend. Проверьте адрес сервера и доступность сети.";
+                response = new ApiClient.Result(false,
+                        "Нет ответа от backend. Проверьте адрес сервера и доступность сети.", null, 0);
             }
-            String finalMessage = message;
+            ApiClient.Result finalResponse = response;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
-                result.setText(finalMessage);
+                if (finalResponse.success) {
+                    retryAllowedAtMillis = 0;
+                    routeId = finalResponse.routeId;
+                    routeVersion = finalResponse.routeVersion;
+                    routeCityId = cityId;
+                    lastSuccessfulResult = finalResponse.message;
+                    result.setText(finalResponse.message);
+                    submit.setText("Изменить маршрут");
+                } else if (previous != null) {
+                    result.setText(previous + "\n\nИзменение не применено: " + finalResponse.message);
+                } else {
+                    result.setText(finalResponse.message);
+                }
+                if (finalResponse.retryAfterSeconds > 0) {
+                    retryAllowedAtMillis = System.currentTimeMillis() + finalResponse.retryAfterSeconds * 1000L;
+                }
                 requestInFlight = false;
-                submit.setEnabled(true);
+                applyCooldown();
             });
         });
+    }
+
+    private void applyCooldown() {
+        long remaining = retryAllowedAtMillis - System.currentTimeMillis();
+        if (remaining <= 0) {
+            if (!requestInFlight) submit.setEnabled(true);
+            return;
+        }
+        submit.setEnabled(false);
+        submit.postDelayed(() -> {
+            if (!isFinishing() && !isDestroyed() && !requestInFlight) submit.setEnabled(true);
+        }, remaining + 100);
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
         out.putInt("city", city.getSelectedItemPosition());
         out.putString("query", query.getText().toString());
         out.putString("result", result.getText().toString());
+        out.putString("routeId", routeId);
+        out.putInt("routeVersion", routeVersion);
+        out.putString("routeCityId", routeCityId);
+        out.putString("lastSuccessfulResult", lastSuccessfulResult);
+        out.putLong("retryAllowedAtMillis", retryAllowedAtMillis);
         super.onSaveInstanceState(out);
     }
 

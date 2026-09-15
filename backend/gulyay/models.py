@@ -53,6 +53,7 @@ class IntentExtraction(StrictModel):
     includeFood: bool | None
     withChildren: bool | None
     unusualPlaces: bool | None
+    centerOnly: bool | None
 
     @field_validator("interests")
     @classmethod
@@ -70,7 +71,18 @@ class QueryPreview(StrictModel):
     includeFood: bool
     withChildren: bool
     unusualPlaces: bool
+    centerOnly: bool
     warnings: list[str]
+
+
+class PlaceCandidate(StrictModel):
+    placeId: str
+    name: str
+    lat: float
+    lon: float
+    rubrics: list[str]
+    schedule: dict
+    isFood: bool
 
 
 class RoutePoint(StrictModel):

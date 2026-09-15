@@ -31,11 +31,11 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.2");
+        title.setText("Гуляй · версия 0.3");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
-        intro.setText("Расскажите, как хотите провести прогулку. Проверим пожелания для Тулы или Владимира.");
+        intro.setText("Расскажите, как хотите провести прогулку. Подберём реальные места и пешие переходы 2ГИС.");
         intro.setTextSize(17);
         column.addView(intro);
         city = new Spinner(this);
@@ -48,7 +48,7 @@ public final class MainActivity extends Activity {
         query.setGravity(android.view.Gravity.TOP);
         column.addView(query, new LinearLayout.LayoutParams(-1, -2));
         submit = new Button(this);
-        submit.setText("Проверить пожелания");
+        submit.setText("Построить маршрут");
         column.addView(submit);
         result = new TextView(this);
         result.setTextSize(17);
@@ -60,7 +60,7 @@ public final class MainActivity extends Activity {
             query.setText(savedInstanceState.getString("query", ""));
             result.setText(savedInstanceState.getString("result", ""));
         } else {
-            result.setText("В версии 0.2 backend разбирает запрос через LLM. Для проверки запустите backend с ключом LLM; карту и маршрут подключим на следующих этапах.");
+            result.setText("Для версии 0.3 запустите backend с ключами LLM, Places API и Routing API 2ГИС. Карта появится на следующем этапе.");
         }
         submit.setOnClickListener(view -> generate());
     }
@@ -74,7 +74,7 @@ public final class MainActivity extends Activity {
         if (requestInFlight) return;
         requestInFlight = true;
         submit.setEnabled(false);
-        result.setText("Разбираем пожелания…");
+        result.setText("Разбираем пожелания и строим маршрут…");
         String cityId = city.getSelectedItemPosition() == 0 ? "tula" : "vladimir";
         String sessionId = getPreferences(MODE_PRIVATE).getString("deviceSessionId", null);
         if (sessionId == null) {
@@ -85,7 +85,7 @@ public final class MainActivity extends Activity {
         network.execute(() -> {
             String message;
             try {
-                message = ApiClient.interpret(cityId, text, owner);
+                message = ApiClient.createRoute(cityId, text, owner);
             } catch (Exception exception) {
                 message = "Нет ответа от backend. Проверьте адрес сервера и доступность сети.";
             }

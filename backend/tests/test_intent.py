@@ -26,7 +26,7 @@ class FakeIntentProvider:
 
 def parsed(**updates):
     values = dict(cityText=None, durationMinutes=None, interests=[],
-                  includeFood=None, withChildren=None, unusualPlaces=None)
+                  includeFood=None, withChildren=None, unusualPlaces=None, centerOnly=None)
     values.update(updates)
     return IntentExtraction.model_validate(values)
 
@@ -55,7 +55,7 @@ def test_extracts_preferences_without_claiming_real_locations():
     assert result.json() == {
         "cityId": "tula", "durationMinutes": 120, "durationSource": "text",
         "interests": ["храмы"], "includeFood": True, "withChildren": False,
-        "unusualPlaces": False, "warnings": [],
+        "unusualPlaces": False, "centerOnly": False, "warnings": [],
     }
     assert provider.calls == 1
     assert "placeId" not in result.text and "lat" not in result.text
@@ -80,6 +80,14 @@ def test_default_duration_is_visible():
     assert result.json()["durationMinutes"] == 180
     assert result.json()["durationSource"] == "default"
     assert result.json()["warnings"]
+
+
+def test_center_preference_is_preserved():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
+        parsed(durationMinutes=60, includeFood=True, centerOnly=False))
+    result = request(query="Хочу гулять в ЦЕНТРЕ час с обедом")
+    assert result.status_code == 200
+    assert result.json()["centerOnly"] is True
 
 
 def test_city_conflict_asks_for_clarification():
@@ -119,6 +127,7 @@ def test_fake_provider_is_schema_checked_too():
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
         output={"cityText": None, "durationMinutes": 120, "interests": [],
                 "includeFood": False, "withChildren": False, "unusualPlaces": False,
+                "centerOnly": False,
                 "madeUpPlaceId": "invented"})
     result = request()
     assert result.status_code == 502

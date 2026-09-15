@@ -11,10 +11,12 @@
 Успешный ответ 200:
 
 ```json
-{"cityId":"tula","durationMinutes":120,"durationSource":"text","interests":["храмы"],"includeFood":true,"withChildren":false,"unusualPlaces":false,"warnings":[]}
+{"cityId":"tula","durationMinutes":120,"durationSource":"text","interests":["храмы"],"includeFood":true,"withChildren":false,"unusualPlaces":false,"centerOnly":true,"warnings":[]}
 ```
 
 `durationSource` — `text`, `filter` или `default`; время по умолчанию 180 минут и сопровождается предупреждением. Выбранный фильтр имеет приоритет перед текстом. Для обязательного выбранного города и недопустимой длительности ответ `QUERY_NEEDS_CLARIFICATION` (422) содержит `details.fields` с `cityId` или `durationMinutes`. Выбранный город обязателен; отсутствие длительности в тексте допустимо при значении по умолчанию.
+
+`centerOnly=true`, если пользователь написал «в центре» или «по центру». Начиная с 0.3 это поле не только отображается, но и уменьшает область поиска Places API до центральной зоны.
 
 Все ошибки имеют вид `{"error":{"code":"...","message":"...","details":{},"requestId":"..."}}`. `VALIDATION_ERROR` (400) — ошибочное тело или город, `UNAUTHORIZED` (401) — отсутствие совпадающей гостевой сессии, `LLM_AUTH_ERROR` (503) — неверный ключ или права, `LLM_UNAVAILABLE` (503) — не задан ключ/модель либо недоступен сервис, `LLM_INVALID_RESPONSE` (502) — ответ не прошёл структурную проверку. Секреты или сырой ответ провайдера в теле ошибки не возвращаются.
 

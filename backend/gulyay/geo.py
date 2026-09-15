@@ -129,7 +129,7 @@ class DgisGeoProvider:
 
     def _client(self) -> httpx.Client:
         return httpx.Client(timeout=12.0, transport=self.transport,
-                            headers={"User-Agent": "Gulyay-Backend/0.4"})
+                            headers={"User-Agent": "Gulyay-Backend/0.4.1"})
 
     def _request(self, method: str, url: str, **kwargs) -> dict:
         global _RATE_LIMITED_UNTIL
@@ -243,11 +243,16 @@ class DgisGeoProvider:
 
     def search_places(self, city_id: str, preview: QueryPreview,
                       area: SearchArea) -> list[PlaceCandidate]:
-        queries = list(preview.interests) or ["достопримечательности"]
+        if preview.interests:
+            queries = list(preview.interests)[:2]
+        else:
+            # A generic walk needs schedule diversity: outdoor places remain available
+            # when museums have already closed.
+            queries = ["достопримечательности", "парки и скверы", "памятники"]
         if preview.unusualPlaces:
             queries.append("необычные достопримечательности")
-        # At most two interest searches plus one food search keeps first-build traffic bounded.
-        requests = [(query, False) for query in queries[:2]]
+        # At most three interest searches plus one food search keeps first-build traffic bounded.
+        requests = [(query, False) for query in queries[:3]]
         if preview.includeFood:
             requests.append(("кафе ресторан", True))
 
@@ -258,7 +263,7 @@ class DgisGeoProvider:
                 q=query, type="attraction,branch", locale="ru_RU",
                 point=f"{area.lon:.7f},{area.lat:.7f}", radius=area.radiusMeters,
                 fields="items.point,items.rubrics,items.schedule,items.is_routing_available",
-                page_size=8, search_is_query_text_complete="true",
+                page_size=10, search_is_query_text_complete="true",
             )
             for item in items:
                 place_id, name = str(item.get("id", "")).strip(), str(item.get("name", "")).strip()
@@ -279,9 +284,9 @@ class DgisGeoProvider:
                     isFood=is_food,
                 ))
                 seen.add(place_id)
-                if len(result) >= 12:
-                    return result
-        return result
+        sights = [candidate for candidate in result if not candidate.isFood][:20]
+        food = [candidate for candidate in result if candidate.isFood][:4]
+        return sights + food
 
     def walking_leg(self, start: tuple[float, float], end: tuple[float, float],
                     from_order: int, to_order: int) -> RouteLeg:

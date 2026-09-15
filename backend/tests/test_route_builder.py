@@ -41,6 +41,8 @@ def test_builds_route_only_from_provider_places_and_legs():
     assert route.points[0].placeId == "2gis-1"
     assert route.legs[0].durationSeconds == 600
     assert route.totalMinutes == 50
+    assert route.requestedMinutes == 180
+    assert route.unusedMinutes == 130
     assert route.approximateStart is True
 
 
@@ -64,3 +66,22 @@ def test_schedule_checks_whole_visit_not_only_arrival():
 
 def test_pilot_timezone_is_available_on_windows_and_linux():
     assert datetime(2026, 9, 15, 12, tzinfo=city_timezone()).utcoffset().total_seconds() == 10800
+
+
+def test_route_adds_another_real_place_to_fill_requested_time():
+    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True})
+              for index in range(1, 4)]
+    route = build_route(CreateRoute(cityId="tula", query="История 3 часа"), preferences(),
+                        FakeGeo(places),
+                        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    assert len(route.points) == 3
+    assert route.totalMinutes == 150
+    assert route.requestedMinutes == 180
+    assert route.unusedMinutes == 30
+
+
+def test_large_unused_budget_is_explained_instead_of_hidden():
+    route = build_route(CreateRoute(cityId="tula", query="История 3 часа"), preferences(),
+                        FakeGeo([candidate("Кремль", "2gis-1", schedule={"is_24x7": True})]),
+                        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    assert any("Осталось 130 мин." in warning for warning in route.warnings)

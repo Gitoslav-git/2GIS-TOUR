@@ -16,13 +16,12 @@ from .intent import (IntentAuthenticationError, IntentInvalidResponse,
                      IntentNeedsClarification, IntentUnavailable,
                      OpenAIIntentProvider, interpret)
 from .models import City, CreateRoute, QueryPreview, Route, RouteRevision
+from .repository import RouteRepository
 from .route_builder import RouteNotFound, TimeBudgetExceeded, build_route
 
-app = FastAPI(title="Гуляй API", version="0.4.0")
+app = FastAPI(title="Гуляй API", version="0.4.1")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"))
-ROUTES: dict[UUID, Route] = {}
-ROUTE_OWNERS: dict[UUID, UUID] = {}
-ROUTE_INPUTS: dict[UUID, CreateRoute] = {}
+ROUTE_REPOSITORY = RouteRepository()
 IDEMPOTENT_ROUTES: dict[tuple[UUID, UUID], Route] = {}
 IDEMPOTENT_REVISIONS: dict[tuple[UUID, UUID], Route] = {}
 RECENT_ROUTES: dict[tuple[UUID, str], tuple[float, Route]] = {}
@@ -44,6 +43,10 @@ def get_geo_provider() -> DgisGeoProvider:
     return DgisGeoProvider()
 
 
+def get_route_repository() -> RouteRepository:
+    return ROUTE_REPOSITORY
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     return failure("VALIDATION_ERROR", "Проверьте заполненные поля", 400,
@@ -52,7 +55,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.4.0"}
+    return {"status": "ok", "version": "0.4.1"}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])
@@ -86,7 +89,8 @@ def preview_route(payload: CreateRoute,
 def create_route(payload: CreateRoute, x_device_session: UUID | None = Header(default=None),
                  x_request_id: UUID | None = Header(default=None),
                  intent_provider: OpenAIIntentProvider = Depends(get_intent_provider),
-                 geo: DgisGeoProvider = Depends(get_geo_provider)) -> Route | JSONResponse:
+                 geo: DgisGeoProvider = Depends(get_geo_provider),
+                 repository: RouteRepository = Depends(get_route_repository)) -> Route | JSONResponse:
     request_id = str(x_request_id) if x_request_id else None
     authorization = _authorize_create(payload, x_device_session, request_id)
     if authorization:
@@ -106,10 +110,8 @@ def create_route(payload: CreateRoute, x_device_session: UUID | None = Header(de
     if isinstance(route_or_error, JSONResponse):
         return route_or_error
     route = route_or_error
+    repository.save_new(route, x_device_session, payload)
     with STATE_LOCK:
-        ROUTES[route.routeId] = route
-        ROUTE_OWNERS[route.routeId] = x_device_session
-        ROUTE_INPUTS[route.routeId] = payload
         RECENT_ROUTES[recent_key] = (time.monotonic() + _recent_route_ttl(), route)
         if cache_key:
             IDEMPOTENT_ROUTES[cache_key] = route
@@ -118,14 +120,15 @@ def create_route(payload: CreateRoute, x_device_session: UUID | None = Header(de
 
 @app.get("/v1/routes/{route_id}", response_model=Route)
 def get_route(route_id: UUID, x_device_session: UUID | None = Header(default=None),
-              x_request_id: UUID | None = Header(default=None)) -> Route | JSONResponse:
+              x_request_id: UUID | None = Header(default=None),
+              repository: RouteRepository = Depends(get_route_repository)) -> Route | JSONResponse:
     request_id = str(x_request_id) if x_request_id else None
-    with STATE_LOCK:
-        route = ROUTES.get(route_id)
-        owner = ROUTE_OWNERS.get(route_id)
-    if route is None or x_device_session is None or owner != x_device_session:
+    if x_device_session is None:
         return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
-    return route
+    state = repository.get(route_id, x_device_session)
+    if state is None:
+        return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
+    return state[0]
 
 
 @app.post("/v1/routes/{route_id}/revisions", response_model=Route)
@@ -133,7 +136,8 @@ def revise_route(route_id: UUID, revision: RouteRevision,
                  x_device_session: UUID | None = Header(default=None),
                  x_request_id: UUID | None = Header(default=None),
                  intent_provider: OpenAIIntentProvider = Depends(get_intent_provider),
-                 geo: DgisGeoProvider = Depends(get_geo_provider)) -> Route | JSONResponse:
+                 geo: DgisGeoProvider = Depends(get_geo_provider),
+                 repository: RouteRepository = Depends(get_route_repository)) -> Route | JSONResponse:
     request_id = str(x_request_id) if x_request_id else None
     if x_device_session is None:
         return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
@@ -141,14 +145,13 @@ def revise_route(route_id: UUID, revision: RouteRevision,
     with STATE_LOCK:
         if idempotency_key and idempotency_key in IDEMPOTENT_REVISIONS:
             return IDEMPOTENT_REVISIONS[idempotency_key]
-        current = ROUTES.get(route_id)
-        owner = ROUTE_OWNERS.get(route_id)
-        source = ROUTE_INPUTS.get(route_id)
-        if current is None or owner != x_device_session or source is None:
-            return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
-        if revision.baseVersion != current.routeVersion:
-            return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
-                           {"currentVersion": current.routeVersion})
+    state = repository.get(route_id, x_device_session)
+    if state is None:
+        return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
+    current, source = state
+    if revision.baseVersion != current.routeVersion:
+        return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
+                       {"currentVersion": current.routeVersion})
     if revision.query is None:
         return failure("VALIDATION_ERROR", "Для изменения маршрута нужен новый текст", 400, request_id,
                        {"fields": ["query"]})
@@ -163,14 +166,12 @@ def revise_route(route_id: UUID, revision: RouteRevision,
     replacement = route_or_error.model_copy(update={
         "routeId": route_id, "routeVersion": revision.baseVersion + 1,
     })
+    if not repository.replace(replacement, x_device_session, payload, revision.baseVersion):
+        latest = repository.get(route_id, x_device_session)
+        current_version = latest[0].routeVersion if latest else revision.baseVersion
+        return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
+                       {"currentVersion": current_version})
     with STATE_LOCK:
-        latest = ROUTES.get(route_id)
-        if latest is None or latest.routeVersion != revision.baseVersion:
-            current_version = latest.routeVersion if latest else revision.baseVersion
-            return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
-                           {"currentVersion": current_version})
-        ROUTES[route_id] = replacement
-        ROUTE_INPUTS[route_id] = payload
         if idempotency_key:
             IDEMPOTENT_REVISIONS[idempotency_key] = replacement
     return replacement

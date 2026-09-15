@@ -76,6 +76,19 @@ def test_center_request_uses_smaller_search_radius():
     assert radii == ["3500", "12000"]
 
 
+def test_generic_walk_searches_outdoor_places_to_fill_evening_route():
+    queries = []
+    def capture(request):
+        if request.url.host == "catalog.api.2gis.com":
+            queries.append(request.url.params.get("q"))
+        return response(request)
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(capture))
+    generic = preview(center=True).model_copy(update={"interests": []})
+    area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
+    provider.search_places("tula", generic, area)
+    assert queries == ["достопримечательности", "парки и скверы", "памятники"]
+
+
 def test_direction_and_named_area_become_explicit_search_anchors():
     provider = DgisGeoProvider("p", "r", httpx.MockTransport(response))
     center = (54.193, 37.617)

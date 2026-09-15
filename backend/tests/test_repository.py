@@ -44,6 +44,8 @@ def test_atomic_replace_rejects_stale_version():
     assert repository.replace(route(route_id, 2), owner, payload, base_version=1) is True
     assert repository.replace(route(route_id, 2), owner, payload, base_version=1) is False
     assert repository.get(route_id, owner)[0].routeVersion == 2
+    assert repository.get_version(route_id, owner, 1).routeVersion == 1
+    assert repository.get_version(route_id, owner, 2).routeVersion == 2
 
 
 def test_expired_guest_route_is_not_returned(monkeypatch):

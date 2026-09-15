@@ -4,8 +4,8 @@ import httpx
 import pytest
 
 from gulyay.geo import (DgisGeoProvider, GeoAuthenticationError,
-                        GeoInvalidResponse, GeoRateLimited, GeoRouteNotFound,
-                        GeoUnavailable, clear_geo_caches)
+                        GeoInvalidResponse, GeoPlaceNotFound, GeoRateLimited,
+                        GeoRouteNotFound, GeoUnavailable, clear_geo_caches)
 from gulyay.models import QueryPreview
 
 
@@ -87,6 +87,48 @@ def test_generic_walk_searches_outdoor_places_to_fill_evening_route():
     area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
     provider.search_places("tula", generic, area)
     assert queries == ["достопримечательности", "парки и скверы", "памятники"]
+
+
+def test_manual_search_returns_only_provider_candidates_near_selected_city():
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(response))
+    places = provider.search_candidates("tula", "кремль")
+    assert [place.placeId for place in places] == ["real-2gis-place"]
+    assert places[0].name == "Тульский кремль"
+
+
+def test_resolve_places_batches_ids_and_restores_requested_order():
+    calls = []
+    def by_id(request):
+        calls.append(request)
+        if request.url.params.get("q") == "Тула":
+            items = [{"id": "city", "name": "Тула", "point": {"lat": 54.193, "lon": 37.617}}]
+        else:
+            assert request.url.path.endswith("/items/byid")
+            assert request.url.params.get("id") == "first,second"
+            items = [
+                {"id": "first", "name": "Кремль", "city_alias": "tula",
+                 "point": {"lat": 54.196, "lon": 37.619}, "is_routing_available": True},
+                {"id": "second", "name": "Набережная", "city_alias": "tula",
+                 "point": {"lat": 54.197, "lon": 37.62}, "is_routing_available": True},
+            ]
+        return httpx.Response(200, json={"meta": {"code": 200}, "result": {"items": items}})
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(by_id))
+    resolved = provider.resolve_places("tula", ["second", "first"])
+    assert [item.placeId for item in resolved] == ["second", "first"]
+    assert len(calls) == 2
+
+
+def test_resolve_places_rejects_another_city():
+    def foreign(request):
+        if request.url.params.get("q") == "Тула":
+            items = [{"id": "city", "name": "Тула", "point": {"lat": 54.193, "lon": 37.617}}]
+        else:
+            items = [{"id": "foreign", "name": "Чужое место", "city_alias": "moscow",
+                      "point": {"lat": 55.7558, "lon": 37.6173}}]
+        return httpx.Response(200, json={"meta": {"code": 200}, "result": {"items": items}})
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(foreign))
+    with pytest.raises(GeoPlaceNotFound):
+        provider.resolve_places("tula", ["foreign"])
 
 
 def test_direction_and_named_area_become_explicit_search_anchors():

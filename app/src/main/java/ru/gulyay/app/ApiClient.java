@@ -6,11 +6,31 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 
 final class ApiClient {
     private ApiClient() { }
+
+    static final class PlaceOption {
+        final String placeId;
+        final String name;
+        final boolean food;
+
+        PlaceOption(String placeId, String name, boolean food) {
+            this.placeId = placeId;
+            this.name = name;
+            this.food = food;
+        }
+
+        @Override public String toString() {
+            return food ? name + " (еда)" : name;
+        }
+    }
 
     static final class Result {
         final boolean success;
@@ -19,19 +39,43 @@ final class ApiClient {
         final int routeVersion;
         final int retryAfterSeconds;
         final String errorCode;
+        final List<PlaceOption> points;
 
         Result(boolean success, String message, String routeId, int routeVersion) {
-            this(success, message, routeId, routeVersion, 0, null);
+            this(success, message, routeId, routeVersion, 0, null,
+                    Collections.emptyList());
         }
 
         Result(boolean success, String message, String routeId, int routeVersion,
                int retryAfterSeconds, String errorCode) {
+            this(success, message, routeId, routeVersion, retryAfterSeconds, errorCode,
+                    Collections.emptyList());
+        }
+
+        Result(boolean success, String message, String routeId, int routeVersion,
+               int retryAfterSeconds, String errorCode, List<PlaceOption> points) {
             this.success = success;
             this.message = message;
             this.routeId = routeId;
             this.routeVersion = routeVersion;
             this.retryAfterSeconds = retryAfterSeconds;
             this.errorCode = errorCode;
+            this.points = points;
+        }
+    }
+
+    static final class SearchResult {
+        final boolean success;
+        final String message;
+        final int retryAfterSeconds;
+        final List<PlaceOption> items;
+
+        SearchResult(boolean success, String message, int retryAfterSeconds,
+                     List<PlaceOption> items) {
+            this.success = success;
+            this.message = message;
+            this.retryAfterSeconds = retryAfterSeconds;
+            this.items = items;
         }
     }
 
@@ -55,11 +99,56 @@ final class ApiClient {
             Result recreated = createRoute(cityId, query, sessionId);
             if (recreated.success) {
                 return new Result(true, "Старый маршрут отсутствовал на сервере — построен новый.\n\n" +
-                        recreated.message, recreated.routeId, recreated.routeVersion);
+                        recreated.message, recreated.routeId, recreated.routeVersion,
+                        0, null, recreated.points);
             }
             return recreated;
         }
         return revised;
+    }
+
+    static Result revisePoints(String routeId, int baseVersion, String cityId,
+                               List<PlaceOption> points, String sessionId) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("baseVersion", baseVersion);
+        payload.put("mode", "EDIT_POINTS");
+        JSONArray ids = new JSONArray();
+        for (PlaceOption point : points) ids.put(point.placeId);
+        payload.put("pointIds", ids);
+        return send("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
+    }
+
+    static Result getRoute(String routeId, String cityId, String sessionId) throws Exception {
+        return getRouteResponse("/v1/routes/" + routeId, sessionId, cityId);
+    }
+
+    static SearchResult searchPlaces(String cityId, String query, String sessionId) throws Exception {
+        if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
+            return new SearchResult(false, "Сборка не подключена к backend.", 0,
+                    Collections.emptyList());
+        }
+        String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8.name());
+        HttpURLConnection connection = open("/v1/places?cityId=" + cityId + "&q=" + encoded,
+                "GET", sessionId);
+        try {
+            int status = connection.getResponseCode();
+            JSONObject response = readJson(connection, status);
+            if (status >= 400) {
+                return searchError(response, status);
+            }
+            JSONArray items = response.getJSONArray("items");
+            List<PlaceOption> places = new ArrayList<>();
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject item = items.getJSONObject(i);
+                places.add(new PlaceOption(item.getString("placeId"), item.getString("name"),
+                        item.optBoolean("isFood")));
+            }
+            String message = places.isEmpty() ? "Подходящих мест не найдено" :
+                    "Найдено мест: " + places.size();
+            return new SearchResult(true, message, 0, places);
+        } finally {
+            connection.disconnect();
+        }
     }
 
     private static Result send(String path, JSONObject payload, String sessionId,
@@ -67,46 +156,93 @@ final class ApiClient {
         if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
             return new Result(false, "Для построения маршрута нужен адрес запущенного backend. Эта сборка пока не подключена к серверу.", null, 0);
         }
-        HttpURLConnection connection = (HttpURLConnection) new URL(
-                BuildConfig.BACKEND_BASE_URL + path).openConnection();
-        connection.setRequestMethod("POST");
-        connection.setConnectTimeout(7000);
-        connection.setReadTimeout(60000);
+        HttpURLConnection connection = open(path, "POST", sessionId);
         connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        connection.setRequestProperty("X-Device-Session", sessionId);
-        connection.setRequestProperty("X-Request-Id", UUID.randomUUID().toString());
         byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
         try {
             try (java.io.OutputStream output = connection.getOutputStream()) {
                 output.write(bytes);
             }
             int status = connection.getResponseCode();
-            InputStream stream = status < 400 ? connection.getInputStream() : connection.getErrorStream();
-            if (stream == null) return new Result(false, "Backend вернул пустой ответ (" + status + ")", null, 0);
-            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-            byte[] chunk = new byte[4096];
-            try (InputStream input = stream) {
-                int n;
-                while ((n = input.read(chunk)) != -1) buffer.write(chunk, 0, n);
-            }
-            String body = buffer.toString("UTF-8");
-            if (body.trim().isEmpty()) return new Result(false, "Backend вернул пустой ответ (" + status + ")", null, 0);
-            JSONObject response = new JSONObject(body);
+            JSONObject response = readJson(connection, status);
             if (status >= 400) {
-                JSONObject error = response.optJSONObject("error");
-                if (error == null) return new Result(false, "Ошибка сервера (" + status + ")", null, 0);
-                JSONObject details = error.optJSONObject("details");
-                int retryAfter = details == null ? 0 : details.optInt("retryAfterSeconds", 0);
-                String code = error.optString("code");
-                return new Result(false, humanError(code, error.optString("message")),
-                        null, 0, retryAfter, code);
+                return routeError(response, status);
             }
             return new Result(true, routeSummary(response, cityId), response.getString("routeId"),
-                    response.getInt("routeVersion"));
+                    response.getInt("routeVersion"), 0, null, routePoints(response));
         } finally {
             connection.disconnect();
         }
+    }
+
+    private static Result getRouteResponse(String path, String sessionId, String cityId) throws Exception {
+        if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
+            return new Result(false, "Сборка не подключена к backend.", null, 0);
+        }
+        HttpURLConnection connection = open(path, "GET", sessionId);
+        try {
+            int status = connection.getResponseCode();
+            JSONObject response = readJson(connection, status);
+            if (status >= 400) return routeError(response, status);
+            return new Result(true, routeSummary(response, cityId), response.getString("routeId"),
+                    response.getInt("routeVersion"), 0, null, routePoints(response));
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static HttpURLConnection open(String path, String method, String sessionId)
+            throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(
+                BuildConfig.BACKEND_BASE_URL + path).openConnection();
+        connection.setRequestMethod(method);
+        connection.setConnectTimeout(7000);
+        connection.setReadTimeout(60000);
+        connection.setRequestProperty("X-Device-Session", sessionId);
+        connection.setRequestProperty("X-Request-Id", UUID.randomUUID().toString());
+        return connection;
+    }
+
+    private static JSONObject readJson(HttpURLConnection connection, int status) throws Exception {
+        InputStream stream = status < 400 ? connection.getInputStream() : connection.getErrorStream();
+        if (stream == null) throw new IllegalStateException("Backend вернул пустой ответ");
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[4096];
+        try (InputStream input = stream) {
+            int n;
+            while ((n = input.read(chunk)) != -1) buffer.write(chunk, 0, n);
+        }
+        String body = buffer.toString("UTF-8");
+        if (body.trim().isEmpty()) throw new IllegalStateException("Backend вернул пустой ответ");
+        return new JSONObject(body);
+    }
+
+    private static Result routeError(JSONObject response, int status) {
+        JSONObject error = response.optJSONObject("error");
+        if (error == null) return new Result(false, "Ошибка сервера (" + status + ")", null, 0);
+        JSONObject details = error.optJSONObject("details");
+        int retryAfter = details == null ? 0 : details.optInt("retryAfterSeconds", 0);
+        String code = error.optString("code");
+        return new Result(false, humanError(code, error.optString("message")),
+                null, 0, retryAfter, code);
+    }
+
+    private static SearchResult searchError(JSONObject response, int status) {
+        Result error = routeError(response, status);
+        return new SearchResult(false, error.message, error.retryAfterSeconds,
+                Collections.emptyList());
+    }
+
+    private static List<PlaceOption> routePoints(JSONObject response) throws Exception {
+        JSONArray items = response.getJSONArray("points");
+        List<PlaceOption> points = new ArrayList<>();
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.getJSONObject(i);
+            points.add(new PlaceOption(item.getString("placeId"), item.getString("name"),
+                    item.optBoolean("isFood")));
+        }
+        return points;
     }
 
     private static String routeSummary(JSONObject response, String cityId) throws Exception {
@@ -159,8 +295,10 @@ final class ApiClient {
             case "LLM_AUTH_ERROR": return "Сервер не принял ключ LLM. Проверьте настройки backend.";
             case "LLM_INVALID_RESPONSE": return "Не удалось разобрать пожелания. Попробуйте ещё раз.";
             case "QUERY_NEEDS_CLARIFICATION": return "Проверьте выбранный город и длительность прогулки.";
-            case "ROUTE_NOT_FOUND": return "Подходящих мест не найдено. Измените пожелания.";
-            case "TIME_BUDGET_EXCEEDED": return "Маршрут не помещается в выбранное время.";
+            case "ROUTE_NOT_FOUND": return message.isEmpty() ?
+                    "Подходящих мест не найдено. Измените пожелания." : message;
+            case "TIME_BUDGET_EXCEEDED": return message.isEmpty() ?
+                    "Маршрут не помещается в выбранное время." : message;
             case "VERSION_CONFLICT": return "Маршрут уже изменился. Повторите правку с актуальной версии.";
             case "VALIDATION_ERROR": return "Проверьте город и текст запроса.";
             case "UNAUTHORIZED": return "Сессия истекла. Перезапустите приложение.";

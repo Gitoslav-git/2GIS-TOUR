@@ -18,18 +18,20 @@ final class ApiClient {
         final String routeId;
         final int routeVersion;
         final int retryAfterSeconds;
+        final String errorCode;
 
         Result(boolean success, String message, String routeId, int routeVersion) {
-            this(success, message, routeId, routeVersion, 0);
+            this(success, message, routeId, routeVersion, 0, null);
         }
 
         Result(boolean success, String message, String routeId, int routeVersion,
-               int retryAfterSeconds) {
+               int retryAfterSeconds, String errorCode) {
             this.success = success;
             this.message = message;
             this.routeId = routeId;
             this.routeVersion = routeVersion;
             this.retryAfterSeconds = retryAfterSeconds;
+            this.errorCode = errorCode;
         }
     }
 
@@ -48,7 +50,16 @@ final class ApiClient {
         payload.put("baseVersion", baseVersion);
         payload.put("mode", "CHANGE_QUERY");
         payload.put("query", query);
-        return send("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
+        Result revised = send("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
+        if (!revised.success && "NOT_FOUND".equals(revised.errorCode)) {
+            Result recreated = createRoute(cityId, query, sessionId);
+            if (recreated.success) {
+                return new Result(true, "Старый маршрут отсутствовал на сервере — построен новый.\n\n" +
+                        recreated.message, recreated.routeId, recreated.routeVersion);
+            }
+            return recreated;
+        }
+        return revised;
     }
 
     private static Result send(String path, JSONObject payload, String sessionId,
@@ -87,8 +98,9 @@ final class ApiClient {
                 if (error == null) return new Result(false, "Ошибка сервера (" + status + ")", null, 0);
                 JSONObject details = error.optJSONObject("details");
                 int retryAfter = details == null ? 0 : details.optInt("retryAfterSeconds", 0);
-                return new Result(false, humanError(error.optString("code"), error.optString("message")),
-                        null, 0, retryAfter);
+                String code = error.optString("code");
+                return new Result(false, humanError(code, error.optString("message")),
+                        null, 0, retryAfter, code);
             }
             return new Result(true, routeSummary(response, cityId), response.getString("routeId"),
                     response.getInt("routeVersion"));
@@ -99,9 +111,12 @@ final class ApiClient {
 
     private static String routeSummary(JSONObject response, String cityId) throws Exception {
         String city = cityId.equals("tula") ? "Тула" : "Владимир";
+        int requested = response.optInt("requestedMinutes", response.getInt("totalMinutes"));
+        int unused = response.optInt("unusedMinutes", Math.max(0, requested - response.getInt("totalMinutes")));
         StringBuilder summary = new StringBuilder("Маршрут готов: " + city + ", " +
-                response.getInt("totalMinutes") + " мин. · версия " + response.getInt("routeVersion") +
+                response.getInt("totalMinutes") + " из " + requested + " мин. · версия " + response.getInt("routeVersion") +
                 "\nПожелания: " + response.getString("query"));
+        if (unused > 0) summary.append("\nСвободный резерв: ").append(unused).append(" мин.");
         JSONObject area = response.getJSONObject("searchArea");
         summary.append("\nОбласть поиска: ").append(area.getString("label"));
         if (response.optBoolean("approximateStart")) {

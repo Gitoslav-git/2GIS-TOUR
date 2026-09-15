@@ -123,7 +123,9 @@ class Route(StrictModel):
     filters: Filters
     searchArea: SearchArea
     approximateStart: bool
+    requestedMinutes: int
     totalMinutes: int
+    unusedMinutes: int
     points: list[RoutePoint]
     legs: list[RouteLeg]
     warnings: list[str]

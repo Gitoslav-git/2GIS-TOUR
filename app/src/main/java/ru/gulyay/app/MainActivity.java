@@ -2,6 +2,7 @@ package ru.gulyay.app;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.content.SharedPreferences;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -36,7 +37,7 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.4");
+        title.setText("Гуляй · версия 0.4.1");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
@@ -71,7 +72,10 @@ public final class MainActivity extends Activity {
             retryAllowedAtMillis = savedInstanceState.getLong("retryAllowedAtMillis", 0);
             if (routeId != null) submit.setText("Изменить маршрут");
         } else {
-            result.setText("Версия 0.4 понимает части города и ориентиры. После построения измените текст и нажмите «Изменить маршрут».");
+            restoreRouteState();
+            if (routeId == null) {
+                result.setText("Версия 0.4.1 сохраняет маршруты после перезапуска и старается заполнить указанное время доступными местами.");
+            }
         }
         submit.setOnClickListener(view -> generate());
         applyCooldown();
@@ -121,6 +125,7 @@ public final class MainActivity extends Activity {
                     lastSuccessfulResult = finalResponse.message;
                     result.setText(finalResponse.message);
                     submit.setText("Изменить маршрут");
+                    persistRouteState(text);
                 } else if (previous != null) {
                     result.setText(previous + "\n\nИзменение не применено: " + finalResponse.message);
                 } else {
@@ -145,6 +150,32 @@ public final class MainActivity extends Activity {
         submit.postDelayed(() -> {
             if (!isFinishing() && !isDestroyed() && !requestInFlight) submit.setEnabled(true);
         }, remaining + 100);
+    }
+
+    private void persistRouteState(String queryText) {
+        getPreferences(MODE_PRIVATE).edit()
+                .putString("routeId", routeId)
+                .putInt("routeVersion", routeVersion)
+                .putString("routeCityId", routeCityId)
+                .putString("lastSuccessfulResult", lastSuccessfulResult)
+                .putString("routeQuery", queryText)
+                .apply();
+    }
+
+    private void restoreRouteState() {
+        SharedPreferences preferences = getPreferences(MODE_PRIVATE);
+        routeId = preferences.getString("routeId", null);
+        routeVersion = preferences.getInt("routeVersion", 0);
+        routeCityId = preferences.getString("routeCityId", null);
+        lastSuccessfulResult = preferences.getString("lastSuccessfulResult", null);
+        if (routeId == null || routeVersion < 1 || routeCityId == null || lastSuccessfulResult == null) {
+            routeId = null;
+            return;
+        }
+        city.setSelection("vladimir".equals(routeCityId) ? 1 : 0);
+        query.setText(preferences.getString("routeQuery", ""));
+        result.setText(lastSuccessfulResult);
+        submit.setText("Изменить маршрут");
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {

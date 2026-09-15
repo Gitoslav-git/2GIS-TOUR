@@ -1,15 +1,17 @@
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from gulyay.api import (IDEMPOTENT_ROUTES, ROUTES, app, get_geo_provider,
-                        get_intent_provider, IDEMPOTENT_REVISIONS, RECENT_ROUTES,
-                        ROUTE_INPUTS, ROUTE_OWNERS)
+from gulyay.api import (IDEMPOTENT_REVISIONS, IDEMPOTENT_ROUTES, RECENT_ROUTES,
+                        app, get_geo_provider, get_intent_provider,
+                        get_route_repository)
 from gulyay.geo import GeoRateLimited, GeoUnavailable
 from gulyay.models import IntentExtraction, PlaceCandidate, RouteLeg, SearchArea
+from gulyay.repository import RouteRepository
 
 client = TestClient(app)
+repository = RouteRepository(":memory:")
 
 
 class FakeIntent:
@@ -50,14 +52,13 @@ class MissingGeo:
 
 @pytest.fixture(autouse=True)
 def reset_state():
+    repository.clear()
+    app.dependency_overrides[get_route_repository] = lambda: repository
     yield
     app.dependency_overrides.clear()
-    ROUTES.clear()
     IDEMPOTENT_ROUTES.clear()
     IDEMPOTENT_REVISIONS.clear()
     RECENT_ROUTES.clear()
-    ROUTE_INPUTS.clear()
-    ROUTE_OWNERS.clear()
 
 
 def test_pilot_cities_are_explicit():
@@ -142,7 +143,8 @@ def test_stale_revision_does_not_replace_current_route():
         "query": "Другой маршрут на два часа"})
     assert result.status_code == 409
     assert result.json()["error"]["code"] == "VERSION_CONFLICT"
-    assert ROUTES[next(iter(ROUTES))].routeVersion == 1
+    stored = repository.get(UUID(route_id), UUID(session))
+    assert stored is not None and stored[0].routeVersion == 1
 
 
 def test_2gis_rate_limit_has_retry_contract():

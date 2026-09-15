@@ -39,11 +39,18 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     skipped_for_budget = False
     local_now = now or datetime.now(city_timezone())
 
-    # Bounded candidate validation protects the upstream Routing API from bursts.
-    for candidate in candidates[:6]:
-        if len(route_points) >= 6:
+    # Stop near the requested budget and cap first-build traffic to 10 real Routing checks.
+    target_seconds = preview.durationMinutes * 60
+    satisfactory_seconds = math.floor(target_seconds * 0.9)
+    for candidate in candidates[:10]:
+        if len(route_points) >= 8 or elapsed_seconds >= satisfactory_seconds:
             break
         visit_minutes = 60 if candidate.isFood else 40
+        if target_seconds - elapsed_seconds < 40 * 60:
+            break
+        if elapsed_seconds + visit_minutes * 60 > target_seconds:
+            skipped_for_budget = True
+            continue
         try:
             leg = geo.walking_leg(current, (candidate.lat, candidate.lon),
                                   len(route_points), len(route_points) + 1)
@@ -71,6 +78,8 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
             raise TimeBudgetExceeded()
         raise RouteNotFound()
 
+    total_minutes = math.ceil(elapsed_seconds / 60)
+    unused_minutes = max(0, preview.durationMinutes - total_minutes)
     warnings = ["Время посещения пока оценочное: 40 минут, для еды — 60 минут"]
     if approximate_start:
         warnings.append("Время от вашего фактического местоположения не учтено")
@@ -80,10 +89,15 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         warnings.append("Подходящее место для еды не поместилось в маршрут")
     if any(point.scheduleStatus == "UNKNOWN" for point in route_points):
         warnings.append("Для части мест 2ГИС не вернул расписание")
+    if unused_minutes > max(20, math.ceil(preview.durationMinutes * 0.15)):
+        warnings.append(
+            f"Осталось {unused_minutes} мин.: больше подходящих открытых мест в бюджет не найдено"
+        )
     return Route(
         routeId=uuid4(), routeVersion=1, status="READY", cityId=payload.cityId,
         query=payload.query, filters=payload.filters, searchArea=search_area,
-        approximateStart=approximate_start, totalMinutes=math.ceil(elapsed_seconds / 60),
+        approximateStart=approximate_start, requestedMinutes=preview.durationMinutes,
+        totalMinutes=total_minutes, unusedMinutes=unused_minutes,
         points=route_points, legs=legs, warnings=warnings,
     )
 

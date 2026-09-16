@@ -11,11 +11,15 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
 import android.os.Looper;
+import android.graphics.Typeface;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.AdapterView;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -29,6 +33,7 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int LOCATION_PERMISSION_REQUEST = 75;
+    private static final int ROUTE_SCREEN_REQUEST = 76;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private Spinner city;
     private EditText query;
@@ -68,58 +73,129 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
-        int padding = (int) (20 * getResources().getDisplayMetrics().density);
-        column.setPadding(padding, padding, padding, padding);
         scroll.addView(column);
 
-        TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.6");
-        title.setTextSize(27);
-        column.addView(title);
-        TextView intro = new TextView(this);
-        intro.setText("Расскажите, как хотите провести прогулку. Подберём реальные места и пешие переходы 2ГИС.");
-        intro.setTextSize(17);
-        column.addView(intro);
+        int p = UiKit.dp(this, 20);
+        FrameLayout hero = new FrameLayout(this);
+        hero.setBackground(UiKit.hero(this));
+        column.addView(hero, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 270)));
+        TextView brand = UiKit.label(this, "● Гуляй", 31, 0xFFFFFFFF);
+        brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        FrameLayout.LayoutParams brandParams = new FrameLayout.LayoutParams(-2, -2);
+        brandParams.leftMargin = p;
+        brandParams.topMargin = UiKit.dp(this, 28);
+        hero.addView(brand, brandParams);
+        TextView subtitle = UiKit.label(this, "Маршрут под настроение", 15, 0xE6FFFFFF);
+        FrameLayout.LayoutParams subtitleParams = new FrameLayout.LayoutParams(-2, -2);
+        subtitleParams.leftMargin = p;
+        subtitleParams.topMargin = UiKit.dp(this, 72);
+        hero.addView(subtitle, subtitleParams);
+        Button profile = UiKit.button(this, "☺", 0xE6FFFFFF, UiKit.TEXT);
+        profile.setTextSize(22);
+        profile.setMinWidth(UiKit.dp(this, 52));
+        FrameLayout.LayoutParams profileParams = new FrameLayout.LayoutParams(
+                UiKit.dp(this, 52), UiKit.dp(this, 52), Gravity.TOP | Gravity.END);
+        profileParams.topMargin = UiKit.dp(this, 24);
+        profileParams.rightMargin = p;
+        hero.addView(profile, profileParams);
+
         city = new Spinner(this);
         city.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
                 new String[]{"Локация не определена", "Тула", "Владимир", "Москва"}));
-        column.addView(city);
+        city.setPadding(UiKit.dp(this, 16), 0, UiKit.dp(this, 12), 0);
+        city.setBackground(UiKit.rounded(0xEFFFFFFF, 18, this));
+        FrameLayout.LayoutParams cityParams = new FrameLayout.LayoutParams(
+                -1, UiKit.dp(this, 56), Gravity.BOTTOM);
+        cityParams.setMargins(p, 0, p, UiKit.dp(this, 24));
+        hero.addView(city, cityParams);
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(p, UiKit.dp(this, 22), p, UiKit.dp(this, 14));
+        column.addView(content);
+        TextView heading = UiKit.label(this, "Куда пойдём?", 26, UiKit.TEXT);
+        heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        content.addView(heading);
+        TextView intro = UiKit.label(this,
+                "Расскажите, как хотите провести прогулку", 15, UiKit.MUTED);
+        intro.setPadding(0, UiKit.dp(this, 3), 0, UiKit.dp(this, 14));
+        content.addView(intro);
+
         locationButton = new Button(this);
         locationButton.setText("Обновить геопозицию");
-        column.addView(locationButton);
         locationStatus = new TextView(this);
         locationStatus.setText("Определяем город. Если не получится — выберите его в списке.");
-        column.addView(locationStatus);
+        locationStatus.setTextColor(UiKit.MUTED);
+        locationStatus.setTextSize(12);
+        content.addView(locationStatus);
+        locationButton.setVisibility(View.GONE);
+
         query = new EditText(this);
-        query.setHint("Например: хочу гулять 4 часа и зайти поесть");
-        query.setMinLines(4);
-        query.setGravity(android.view.Gravity.TOP);
-        column.addView(query, new LinearLayout.LayoutParams(-1, -2));
-        submit = new Button(this);
-        submit.setText("Построить маршрут");
-        column.addView(submit);
+        query.setHint("Например: хочу гулять 2 часа по центру и зайти поесть");
+        query.setMinLines(3);
+        query.setTextSize(16);
+        query.setGravity(Gravity.TOP);
+        query.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14), UiKit.dp(this, 16), UiKit.dp(this, 14));
+        query.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE0E5E1, 16, this));
+        LinearLayout.LayoutParams queryParams = new LinearLayout.LayoutParams(-1, -2);
+        queryParams.topMargin = UiKit.dp(this, 12);
+        content.addView(query, queryParams);
+
+        TextView filtersTitle = UiKit.label(this, "Быстрые фильтры", 14, UiKit.MUTED);
+        filtersTitle.setPadding(0, UiKit.dp(this, 14), 0, UiKit.dp(this, 8));
+        content.addView(filtersTitle);
+        HorizontalScrollView filtersScroll = new HorizontalScrollView(this);
+        filtersScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout filters = new LinearLayout(this);
+        filters.setOrientation(LinearLayout.HORIZONTAL);
+        filtersScroll.addView(filters);
+        addFilterStub(filters, "2 часа");
+        addFilterStub(filters, "С детьми");
+        addFilterStub(filters, "Поесть");
+        addFilterStub(filters, "Необычное");
+        content.addView(filtersScroll);
+
+        submit = UiKit.button(this, "Построить маршрут", UiKit.GREEN, 0xFFFFFFFF);
+        LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 56));
+        submitParams.topMargin = UiKit.dp(this, 18);
+        content.addView(submit, submitParams);
         result = new TextView(this);
-        result.setTextSize(17);
+        result.setTextSize(14);
+        result.setTextColor(UiKit.MUTED);
+        result.setPadding(0, UiKit.dp(this, 10), 0, UiKit.dp(this, 12));
+        content.addView(result);
+
+        TextView historyTitle = UiKit.label(this, "История маршрутов", 20, UiKit.TEXT);
+        historyTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        content.addView(historyTitle);
+        TextView history = UiKit.label(this,
+                "🔒  История появится после входа в профиль", 15, UiKit.MUTED);
+        history.setGravity(Gravity.CENTER);
+        history.setBackground(UiKit.rounded(UiKit.SOFT, 16, this));
+        LinearLayout.LayoutParams historyParams = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 86));
+        historyParams.topMargin = UiKit.dp(this, 10);
+        content.addView(history, historyParams);
 
         editPointsButton = new Button(this);
         editPointsButton.setText("Редактировать точки");
         editPointsButton.setEnabled(false);
-        column.addView(editPointsButton);
+        content.addView(editPointsButton);
         startWalkButton = new Button(this);
         startWalkButton.setText("Начать прогулку");
         startWalkButton.setEnabled(false);
         startWalkButton.setVisibility(View.GONE);
-        column.addView(startWalkButton);
+        content.addView(startWalkButton);
         mapButton = new Button(this);
         mapButton.setText("Показать на карте 2ГИС");
         mapButton.setEnabled(false);
-        column.addView(mapButton);
+        content.addView(mapButton);
         resetRouteButton = new Button(this);
         resetRouteButton.setText("Сбросить маршрут");
         resetRouteButton.setVisibility(View.GONE);
-        column.addView(resetRouteButton);
+        content.addView(resetRouteButton);
         pointEditor = new LinearLayout(this);
         pointEditor.setOrientation(LinearLayout.VERTICAL);
         pointEditor.setVisibility(View.GONE);
@@ -159,8 +235,20 @@ public final class MainActivity extends Activity {
         pointEditor.addView(applyPointsButton);
         editorStatus = new TextView(this);
         pointEditor.addView(editorStatus);
-        column.addView(pointEditor);
-        column.addView(result);
+        content.addView(pointEditor);
+        UiKit.hidden(editPointsButton, startWalkButton, mapButton, resetRouteButton);
+
+        LinearLayout navigation = new LinearLayout(this);
+        navigation.setGravity(Gravity.CENTER);
+        navigation.setPadding(p, UiKit.dp(this, 6), p, UiKit.dp(this, 10));
+        navigation.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE6EAE7, 0, this));
+        Button homeTab = UiKit.button(this, "⌂  Главная", 0xFFFFFFFF, UiKit.GREEN_DARK);
+        Button routesTab = UiKit.button(this, "◇  Маршруты", 0xFFFFFFFF, UiKit.MUTED);
+        Button profileTab = UiKit.button(this, "○  Профиль", 0xFFFFFFFF, UiKit.MUTED);
+        navigation.addView(homeTab, new LinearLayout.LayoutParams(0, UiKit.dp(this, 50), 1));
+        navigation.addView(routesTab, new LinearLayout.LayoutParams(0, UiKit.dp(this, 50), 1));
+        navigation.addView(profileTab, new LinearLayout.LayoutParams(0, UiKit.dp(this, 50), 1));
+        column.addView(navigation);
         setContentView(scroll);
 
         if (savedInstanceState != null) {
@@ -194,9 +282,7 @@ public final class MainActivity extends Activity {
         }
         editPointsButton.setEnabled(routeId != null);
         startWalkButton.setEnabled(routeId != null);
-        startWalkButton.setVisibility(routeId != null ? View.VISIBLE : View.GONE);
         mapButton.setEnabled(routeId != null);
-        resetRouteButton.setVisibility(routeId != null ? View.VISIBLE : View.GONE);
         submit.setOnClickListener(view -> generate());
         locationButton.setOnClickListener(view -> toggleLocation());
         city.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
@@ -224,6 +310,21 @@ public final class MainActivity extends Activity {
         applyCooldown();
         showLocationRebuildIfNeeded();
         beginAutomaticLocationDetection();
+    }
+
+    private void addFilterStub(LinearLayout parent, String text) {
+        Button chip = UiKit.button(this, text, UiKit.SOFT, UiKit.TEXT);
+        chip.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
+        chip.setMinHeight(UiKit.dp(this, 42));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, UiKit.dp(this, 42));
+        params.rightMargin = UiKit.dp(this, 8);
+        parent.addView(chip, params);
+        chip.setOnClickListener(view -> {
+            boolean selected = !view.isSelected();
+            view.setSelected(selected);
+            chip.setTextColor(selected ? 0xFFFFFFFF : UiKit.TEXT);
+            chip.setBackground(UiKit.rounded(selected ? UiKit.GREEN : UiKit.SOFT, 14, this));
+        });
     }
 
     private void generate() {
@@ -278,13 +379,12 @@ public final class MainActivity extends Activity {
                     submit.setText("Изменить маршрут");
                     editPointsButton.setEnabled(true);
                     startWalkButton.setEnabled(true);
-                    startWalkButton.setVisibility(View.VISIBLE);
                     mapButton.setEnabled(true);
-                    resetRouteButton.setVisibility(View.VISIBLE);
                     currentPoints.clear();
                     currentPoints.addAll(finalResponse.points);
                     pointEditor.setVisibility(View.GONE);
                     persistRouteState(text);
+                    openMap();
                 } else if (previous != null) {
                     result.setText(previous + "\n\nИзменение не применено: " + finalResponse.message);
                 } else {
@@ -493,6 +593,7 @@ public final class MainActivity extends Activity {
                         placeSearch.setText("");
                     }
                     persistRouteState(query.getText().toString().trim());
+                    if (!finalRefreshedAfterConflict) openMap();
                 } else {
                     result.setText(previous + "\n\nИзменение точек не применено: " +
                             finalResponse.message);
@@ -818,7 +919,7 @@ public final class MainActivity extends Activity {
             intent.putExtra(MapActivity.EXTRA_USER_LAT, startLat);
             intent.putExtra(MapActivity.EXTRA_USER_LON, startLon);
         }
-        startActivity(intent);
+        startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
     }
 
     private void startWalkOrContinue() {
@@ -871,7 +972,7 @@ public final class MainActivity extends Activity {
         intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
         intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
         intent.putExtra(MapActivity.EXTRA_WALK_ID, walkId);
-        startActivity(intent);
+        startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
     }
 
     private void confirmRouteReset() {
@@ -932,6 +1033,21 @@ public final class MainActivity extends Activity {
                 .remove("lastSuccessfulResult").remove("routeQuery")
                 .remove("routeLocationDirty").apply();
         getSharedPreferences("active_walk", MODE_PRIVATE).edit().clear().apply();
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != ROUTE_SCREEN_REQUEST || resultCode != RESULT_OK || data == null) return;
+        String action = data.getStringExtra(MapActivity.EXTRA_RESULT_ACTION);
+        if (MapActivity.ACTION_CANCEL_ROUTE.equals(action)) {
+            clearLocalRouteState("Маршрут отменён. Можно составить новый.");
+        } else if (MapActivity.ACTION_EDIT_QUERY.equals(action)) {
+            query.requestFocus();
+            query.setSelection(query.getText().length());
+            result.setText("Измените пожелания и нажмите «Построить маршрут».");
+        } else if (MapActivity.ACTION_EDIT_POINTS.equals(action)) {
+            loadPointEditor();
+        }
     }
 
     @Override protected void onResume() {

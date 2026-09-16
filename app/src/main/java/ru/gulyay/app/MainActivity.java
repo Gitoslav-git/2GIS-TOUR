@@ -1,8 +1,15 @@
 package ru.gulyay.app;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.SharedPreferences;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.os.Bundle;
+import android.os.Looper;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -19,6 +26,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
+    private static final int LOCATION_PERMISSION_REQUEST = 75;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private Spinner city;
     private EditText query;
@@ -28,12 +36,15 @@ public final class MainActivity extends Activity {
     private Button findPlaceButton;
     private Button addPlaceButton;
     private Button applyPointsButton;
+    private Button mapButton;
+    private Button locationButton;
     private LinearLayout pointEditor;
     private Spinner routePointSpinner;
     private Spinner foundPlaceSpinner;
     private EditText placeSearch;
     private TextView editorStatus;
     private TextView pendingPoints;
+    private TextView locationStatus;
     private final List<ApiClient.PlaceOption> currentPoints = new ArrayList<>();
     private final List<ApiClient.PlaceOption> foundPlaces = new ArrayList<>();
     private boolean requestInFlight;
@@ -42,6 +53,12 @@ public final class MainActivity extends Activity {
     private String routeCityId;
     private String lastSuccessfulResult;
     private long retryAllowedAtMillis;
+    private Double startLat;
+    private Double startLon;
+    private Double startAccuracyMeters;
+    private boolean routeLocationDirty;
+    private LocationManager locationManager;
+    private LocationListener locationListener;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -53,7 +70,7 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.4.2");
+        title.setText("Гуляй · версия 0.5");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
@@ -64,6 +81,12 @@ public final class MainActivity extends Activity {
         city.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
                 new String[]{"Тула", "Владимир"}));
         column.addView(city);
+        locationButton = new Button(this);
+        locationButton.setText("Определить геопозицию");
+        column.addView(locationButton);
+        locationStatus = new TextView(this);
+        locationStatus.setText("Без геопозиции старт будет рассчитан от выбранной области города.");
+        column.addView(locationStatus);
         query = new EditText(this);
         query.setHint("Например: хочу гулять 4 часа и зайти поесть");
         query.setMinLines(4);
@@ -79,6 +102,10 @@ public final class MainActivity extends Activity {
         editPointsButton.setText("Редактировать точки");
         editPointsButton.setEnabled(false);
         column.addView(editPointsButton);
+        mapButton = new Button(this);
+        mapButton.setText("Показать на карте 2ГИС");
+        mapButton.setEnabled(false);
+        column.addView(mapButton);
         pointEditor = new LinearLayout(this);
         pointEditor.setOrientation(LinearLayout.VERTICAL);
         pointEditor.setVisibility(View.GONE);
@@ -131,15 +158,25 @@ public final class MainActivity extends Activity {
             routeCityId = savedInstanceState.getString("routeCityId");
             lastSuccessfulResult = savedInstanceState.getString("lastSuccessfulResult");
             retryAllowedAtMillis = savedInstanceState.getLong("retryAllowedAtMillis", 0);
+            if (savedInstanceState.containsKey("startLat")) {
+                startLat = savedInstanceState.getDouble("startLat");
+                startLon = savedInstanceState.getDouble("startLon");
+                startAccuracyMeters = savedInstanceState.getDouble("startAccuracyMeters", 100.0);
+                showLocation();
+            }
+            routeLocationDirty = savedInstanceState.getBoolean("routeLocationDirty", false);
             if (routeId != null) submit.setText("Изменить маршрут");
         } else {
             restoreRouteState();
             if (routeId == null) {
-                result.setText("Версия 0.4.2 позволяет добавлять, удалять и переставлять точки маршрута.");
+                result.setText("Версия 0.5 показывает маршрут и точки на встроенной карте 2ГИС.");
             }
         }
         editPointsButton.setEnabled(routeId != null);
+        mapButton.setEnabled(routeId != null);
         submit.setOnClickListener(view -> generate());
+        locationButton.setOnClickListener(view -> toggleLocation());
+        mapButton.setOnClickListener(view -> openMap());
         editPointsButton.setOnClickListener(view -> loadPointEditor());
         moveUp.setOnClickListener(view -> moveSelectedPoint(-1));
         moveDown.setOnClickListener(view -> moveSelectedPoint(1));
@@ -148,6 +185,7 @@ public final class MainActivity extends Activity {
         addPlaceButton.setOnClickListener(view -> addSelectedPlace());
         applyPointsButton.setOnClickListener(view -> applyPointChanges());
         applyCooldown();
+        showLocationRebuildIfNeeded();
     }
 
     private void generate() {
@@ -163,7 +201,7 @@ public final class MainActivity extends Activity {
         }
         setNetworkBusy(true);
         String cityId = city.getSelectedItemPosition() == 0 ? "tula" : "vladimir";
-        boolean revise = routeId != null && cityId.equals(routeCityId);
+        boolean revise = routeId != null && cityId.equals(routeCityId) && !routeLocationDirty;
         String previous = lastSuccessfulResult;
         result.setText(revise ? "Пересчитываем маршрут…" : "Разбираем пожелания и строим маршрут…");
         final String owner = sessionId();
@@ -171,8 +209,10 @@ public final class MainActivity extends Activity {
             ApiClient.Result response;
             try {
                 response = revise
-                        ? ApiClient.reviseRoute(routeId, routeVersion, cityId, text, owner)
-                        : ApiClient.createRoute(cityId, text, owner);
+                        ? ApiClient.reviseRoute(routeId, routeVersion, cityId, text, owner,
+                                startLat, startLon, startAccuracyMeters)
+                        : ApiClient.createRoute(cityId, text, owner, startLat, startLon,
+                                startAccuracyMeters);
             } catch (Exception exception) {
                 response = new ApiClient.Result(false,
                         "Нет ответа от backend. Проверьте адрес сервера и доступность сети.", null, 0);
@@ -185,10 +225,12 @@ public final class MainActivity extends Activity {
                     routeId = finalResponse.routeId;
                     routeVersion = finalResponse.routeVersion;
                     routeCityId = cityId;
+                    routeLocationDirty = false;
                     lastSuccessfulResult = finalResponse.message;
                     result.setText(finalResponse.message);
                     submit.setText("Изменить маршрут");
                     editPointsButton.setEnabled(true);
+                    mapButton.setEnabled(true);
                     currentPoints.clear();
                     currentPoints.addAll(finalResponse.points);
                     pointEditor.setVisibility(View.GONE);
@@ -228,7 +270,8 @@ public final class MainActivity extends Activity {
                 response = ApiClient.getRoute(requestedRouteId, requestedCityId, owner);
                 if (!response.success && "NOT_FOUND".equals(response.errorCode)) {
                     ApiClient.Result recreated = ApiClient.createRoute(
-                            requestedCityId, currentQuery, owner);
+                            requestedCityId, currentQuery, owner, startLat, startLon,
+                            startAccuracyMeters);
                     if (recreated.success) {
                         response = new ApiClient.Result(true,
                                 "Старый маршрут отсутствовал на сервере — построен новый.\n\n" +
@@ -409,6 +452,7 @@ public final class MainActivity extends Activity {
         requestInFlight = busy;
         submit.setEnabled(!busy);
         editPointsButton.setEnabled(!busy && routeId != null);
+        mapButton.setEnabled(!busy && routeId != null);
         findPlaceButton.setEnabled(!busy);
         addPlaceButton.setEnabled(!busy && !foundPlaces.isEmpty());
         applyPointsButton.setEnabled(!busy && !currentPoints.isEmpty());
@@ -428,6 +472,7 @@ public final class MainActivity extends Activity {
             if (!requestInFlight) {
                 submit.setEnabled(true);
                 editPointsButton.setEnabled(routeId != null);
+                mapButton.setEnabled(routeId != null);
                 findPlaceButton.setEnabled(true);
                 addPlaceButton.setEnabled(!foundPlaces.isEmpty());
                 applyPointsButton.setEnabled(!currentPoints.isEmpty());
@@ -436,6 +481,7 @@ public final class MainActivity extends Activity {
         }
         submit.setEnabled(false);
         editPointsButton.setEnabled(false);
+        mapButton.setEnabled(false);
         findPlaceButton.setEnabled(false);
         addPlaceButton.setEnabled(false);
         applyPointsButton.setEnabled(false);
@@ -445,13 +491,23 @@ public final class MainActivity extends Activity {
     }
 
     private void persistRouteState(String queryText) {
-        getPreferences(MODE_PRIVATE).edit()
+        SharedPreferences.Editor editor = getPreferences(MODE_PRIVATE).edit()
                 .putString("routeId", routeId)
                 .putInt("routeVersion", routeVersion)
                 .putString("routeCityId", routeCityId)
                 .putString("lastSuccessfulResult", lastSuccessfulResult)
-                .putString("routeQuery", queryText)
-                .apply();
+                .putString("routeQuery", queryText);
+        if (startLat != null && startLon != null) {
+            editor.putLong("startLatBits", Double.doubleToRawLongBits(startLat));
+            editor.putLong("startLonBits", Double.doubleToRawLongBits(startLon));
+            editor.putLong("startAccuracyBits", Double.doubleToRawLongBits(
+                    startAccuracyMeters == null ? 100.0 : startAccuracyMeters));
+        } else {
+            editor.remove("startLatBits").remove("startLonBits").remove("startAccuracyBits");
+        }
+        editor.putBoolean("routeLocationDirty", routeLocationDirty)
+                .remove("routeStartLatBits").remove("routeStartLonBits");
+        editor.apply();
     }
 
     private void restoreRouteState() {
@@ -460,6 +516,15 @@ public final class MainActivity extends Activity {
         routeVersion = preferences.getInt("routeVersion", 0);
         routeCityId = preferences.getString("routeCityId", null);
         lastSuccessfulResult = preferences.getString("lastSuccessfulResult", null);
+        if (preferences.contains("startLatBits") && preferences.contains("startLonBits")) {
+            startLat = Double.longBitsToDouble(preferences.getLong("startLatBits", 0));
+            startLon = Double.longBitsToDouble(preferences.getLong("startLonBits", 0));
+            startAccuracyMeters = Double.longBitsToDouble(
+                    preferences.getLong("startAccuracyBits",
+                            Double.doubleToRawLongBits(100.0)));
+            showLocation();
+        }
+        routeLocationDirty = preferences.getBoolean("routeLocationDirty", false);
         if (routeId == null || routeVersion < 1 || routeCityId == null || lastSuccessfulResult == null) {
             routeId = null;
             return;
@@ -479,10 +544,147 @@ public final class MainActivity extends Activity {
         out.putString("routeCityId", routeCityId);
         out.putString("lastSuccessfulResult", lastSuccessfulResult);
         out.putLong("retryAllowedAtMillis", retryAllowedAtMillis);
+        if (startLat != null && startLon != null) {
+            out.putDouble("startLat", startLat);
+            out.putDouble("startLon", startLon);
+            out.putDouble("startAccuracyMeters",
+                    startAccuracyMeters == null ? 100.0 : startAccuracyMeters);
+        }
+        out.putBoolean("routeLocationDirty", routeLocationDirty);
         super.onSaveInstanceState(out);
     }
 
+    private void toggleLocation() {
+        if (startLat != null && startLon != null) {
+            startLat = null;
+            startLon = null;
+            startAccuracyMeters = null;
+            locationButton.setText("Определить геопозицию");
+            locationStatus.setText("Геопозиция сброшена. Старт будет рассчитан от области города.");
+            getPreferences(MODE_PRIVATE).edit()
+                    .remove("startLatBits").remove("startLonBits")
+                    .remove("startAccuracyBits").apply();
+            markRouteLocationDirty();
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) !=
+                PackageManager.PERMISSION_GRANTED &&
+                checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) !=
+                        PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION}, LOCATION_PERMISSION_REQUEST);
+            return;
+        }
+        requestCurrentLocation();
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                                                     int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != LOCATION_PERMISSION_REQUEST) return;
+        boolean granted = false;
+        for (int result : grantResults) granted |= result == PackageManager.PERMISSION_GRANTED;
+        if (granted) requestCurrentLocation();
+        else locationStatus.setText("Доступ к геопозиции не разрешён. Маршрут можно построить без неё.");
+    }
+
+    private void requestCurrentLocation() {
+        locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
+        String provider = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                ? LocationManager.GPS_PROVIDER : LocationManager.NETWORK_PROVIDER;
+        if (!locationManager.isProviderEnabled(provider)) {
+            locationStatus.setText("Геопозиция на устройстве выключена. Включите её в настройках.");
+            return;
+        }
+        locationButton.setEnabled(false);
+        locationStatus.setText("Определяем текущую позицию…");
+        Location cached = null;
+        try {
+            cached = locationManager.getLastKnownLocation(provider);
+        } catch (SecurityException ignored) { }
+        if (cached != null && System.currentTimeMillis() - cached.getTime() < 120_000L) {
+            acceptLocation(cached);
+            return;
+        }
+        locationListener = new LocationListener() {
+            @Override public void onLocationChanged(Location location) {
+                acceptLocation(location);
+            }
+            @Override public void onProviderDisabled(String providerName) { }
+            @Override public void onProviderEnabled(String providerName) { }
+            @Override public void onStatusChanged(String providerName, int status, Bundle extras) { }
+        };
+        try {
+            locationManager.requestSingleUpdate(provider, locationListener, Looper.getMainLooper());
+            locationButton.postDelayed(() -> {
+                if (locationListener == null) return;
+                locationManager.removeUpdates(locationListener);
+                locationListener = null;
+                locationButton.setEnabled(true);
+                locationStatus.setText("Не удалось получить координаты. Маршрут можно построить без них.");
+            }, 12_000L);
+        } catch (SecurityException error) {
+            locationButton.setEnabled(true);
+            locationStatus.setText("Нет разрешения на геопозицию.");
+        }
+    }
+
+    private void acceptLocation(Location location) {
+        if (locationManager != null && locationListener != null) {
+            locationManager.removeUpdates(locationListener);
+            locationListener = null;
+        }
+        startLat = location.getLatitude();
+        startLon = location.getLongitude();
+        startAccuracyMeters = location.hasAccuracy() ? (double) location.getAccuracy() : 100.0;
+        locationButton.setEnabled(true);
+        showLocation();
+        getPreferences(MODE_PRIVATE).edit()
+                .putLong("startLatBits", Double.doubleToRawLongBits(startLat))
+                .putLong("startLonBits", Double.doubleToRawLongBits(startLon))
+                .putLong("startAccuracyBits", Double.doubleToRawLongBits(startAccuracyMeters))
+                .apply();
+        markRouteLocationDirty();
+    }
+
+    private void showLocation() {
+        locationButton.setText("Сбросить геопозицию");
+        locationStatus.setText(String.format(java.util.Locale.US,
+                "Старт по геопозиции: %.5f, %.5f (точность ±%.0f м)",
+                startLat, startLon, startAccuracyMeters == null ? 100.0 : startAccuracyMeters));
+    }
+
+    private void markRouteLocationDirty() {
+        if (routeId == null) return;
+        routeLocationDirty = true;
+        getPreferences(MODE_PRIVATE).edit().putBoolean("routeLocationDirty", true).apply();
+        showLocationRebuildIfNeeded();
+    }
+
+    private void showLocationRebuildIfNeeded() {
+        if (routeId == null || !routeLocationDirty) return;
+        submit.setText("Перестроить от новой позиции");
+        locationStatus.append(" Перестройте маршрут, чтобы учесть новый старт.");
+    }
+
+    private void openMap() {
+        if (routeId == null || routeCityId == null) return;
+        Intent intent = new Intent(this, MapActivity.class);
+        intent.putExtra(MapActivity.EXTRA_ROUTE_ID, routeId);
+        intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
+        intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
+        if (startLat != null && startLon != null) {
+            intent.putExtra(MapActivity.EXTRA_USER_LAT, startLat);
+            intent.putExtra(MapActivity.EXTRA_USER_LON, startLon);
+        }
+        startActivity(intent);
+    }
+
     @Override protected void onDestroy() {
+        if (locationManager != null && locationListener != null) {
+            locationManager.removeUpdates(locationListener);
+            locationListener = null;
+        }
         network.shutdownNow();
         super.onDestroy();
     }

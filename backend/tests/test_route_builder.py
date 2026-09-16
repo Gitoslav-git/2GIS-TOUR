@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from gulyay.models import (CreateRoute, PlaceCandidate, QueryPreview, RouteLeg,
-                           SearchArea)
+                           SearchArea, StartLocation)
 from gulyay.route_builder import (TimeBudgetExceeded, build_route, city_timezone,
                                   rebuild_route_with_points, schedule_status_at)
 
@@ -12,6 +12,7 @@ from gulyay.route_builder import (TimeBudgetExceeded, build_route, city_timezone
 class FakeGeo:
     def __init__(self, candidates):
         self.candidates = candidates
+        self.walking_starts = []
 
     def ensure_configured(self): pass
     def resolve_city_center(self, city_id): return 54.193, 37.617
@@ -21,6 +22,7 @@ class FakeGeo:
                           source="city")
     def search_places(self, city_id, preview, area): return self.candidates
     def walking_leg(self, start, end, from_order, to_order):
+        self.walking_starts.append(start)
         return RouteLeg(fromOrder=from_order, toOrder=to_order, distanceMeters=500,
                         durationSeconds=600, geometry=[[37.617, 54.193], [end[1], end[0]]])
 
@@ -47,6 +49,19 @@ def test_builds_route_only_from_provider_places_and_legs():
     assert route.requestedMinutes == 180
     assert route.unusedMinutes == 130
     assert route.approximateStart is True
+
+
+def test_device_location_is_used_as_real_first_leg_start():
+    geo = FakeGeo([candidate("Кремль", "2gis-1")])
+    payload = CreateRoute(
+        cityId="tula", query="История 3 часа",
+        startLocation=StartLocation(lat=54.191, lon=37.615, accuracyMeters=18),
+    )
+    route = build_route(payload, preferences(), geo,
+                        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    assert route.approximateStart is False
+    assert geo.walking_starts[0] == (54.191, 37.615)
+    assert all("фактического местоположения" not in warning for warning in route.warnings)
 
 
 def test_center_and_food_are_visible_in_route_warnings():

@@ -1,6 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
-    <application android:allowBackup="false" android:label="Гуляй" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:networkSecurityConfig="@xml/network_security_config">
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <application android:name=".GulyayApplication" android:allowBackup="false" android:label="Гуляй" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:networkSecurityConfig="@xml/network_security_config">
+        <activity android:name=".MapActivity" android:exported="false"/>
         <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>

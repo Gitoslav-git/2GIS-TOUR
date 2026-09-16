@@ -20,15 +20,33 @@ final class ApiClient {
         final String placeId;
         final String name;
         final boolean food;
+        final double lat;
+        final double lon;
 
         PlaceOption(String placeId, String name, boolean food) {
+            this(placeId, name, food, Double.NaN, Double.NaN);
+        }
+
+        PlaceOption(String placeId, String name, boolean food, double lat, double lon) {
             this.placeId = placeId;
             this.name = name;
             this.food = food;
+            this.lat = lat;
+            this.lon = lon;
         }
 
         @Override public String toString() {
             return food ? name + " (еда)" : name;
+        }
+    }
+
+    static final class GeoCoordinate {
+        final double lat;
+        final double lon;
+
+        GeoCoordinate(double lat, double lon) {
+            this.lat = lat;
+            this.lon = lon;
         }
     }
 
@@ -40,6 +58,7 @@ final class ApiClient {
         final int retryAfterSeconds;
         final String errorCode;
         final List<PlaceOption> points;
+        final List<GeoCoordinate> path;
 
         Result(boolean success, String message, String routeId, int routeVersion) {
             this(success, message, routeId, routeVersion, 0, null,
@@ -54,6 +73,13 @@ final class ApiClient {
 
         Result(boolean success, String message, String routeId, int routeVersion,
                int retryAfterSeconds, String errorCode, List<PlaceOption> points) {
+            this(success, message, routeId, routeVersion, retryAfterSeconds, errorCode,
+                    points, Collections.emptyList());
+        }
+
+        Result(boolean success, String message, String routeId, int routeVersion,
+               int retryAfterSeconds, String errorCode, List<PlaceOption> points,
+               List<GeoCoordinate> path) {
             this.success = success;
             this.message = message;
             this.routeId = routeId;
@@ -61,6 +87,7 @@ final class ApiClient {
             this.retryAfterSeconds = retryAfterSeconds;
             this.errorCode = errorCode;
             this.points = points;
+            this.path = path;
         }
     }
 
@@ -80,27 +107,61 @@ final class ApiClient {
     }
 
     static Result createRoute(String cityId, String query, String sessionId) throws Exception {
+        return createRoute(cityId, query, sessionId, null, null);
+    }
+
+    static Result createRoute(String cityId, String query, String sessionId,
+                              Double startLat, Double startLon) throws Exception {
+        return createRoute(cityId, query, sessionId, startLat, startLon, 100.0);
+    }
+
+    static Result createRoute(String cityId, String query, String sessionId,
+                              Double startLat, Double startLon,
+                              Double accuracyMeters) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("cityId", cityId);
         payload.put("query", query);
         payload.put("deviceSessionId", sessionId);
         payload.put("filters", new JSONObject());
+        if (startLat != null && startLon != null) {
+            JSONObject location = new JSONObject();
+            location.put("lat", startLat);
+            location.put("lon", startLon);
+            location.put("accuracyMeters", accuracyMeters == null
+                    ? 100.0 : Math.max(0.0, accuracyMeters));
+            payload.put("startLocation", location);
+        }
         return send("/v1/routes", payload, sessionId, cityId);
     }
 
     static Result reviseRoute(String routeId, int baseVersion, String cityId,
                               String query, String sessionId) throws Exception {
+        return reviseRoute(routeId, baseVersion, cityId, query, sessionId, null, null);
+    }
+
+    static Result reviseRoute(String routeId, int baseVersion, String cityId,
+                              String query, String sessionId,
+                              Double startLat, Double startLon) throws Exception {
+        return reviseRoute(routeId, baseVersion, cityId, query, sessionId,
+                startLat, startLon, 100.0);
+    }
+
+    static Result reviseRoute(String routeId, int baseVersion, String cityId,
+                              String query, String sessionId,
+                              Double startLat, Double startLon,
+                              Double accuracyMeters) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("baseVersion", baseVersion);
         payload.put("mode", "CHANGE_QUERY");
         payload.put("query", query);
         Result revised = send("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
         if (!revised.success && "NOT_FOUND".equals(revised.errorCode)) {
-            Result recreated = createRoute(cityId, query, sessionId);
+            Result recreated = createRoute(cityId, query, sessionId, startLat, startLon,
+                    accuracyMeters);
             if (recreated.success) {
                 return new Result(true, "Старый маршрут отсутствовал на сервере — построен новый.\n\n" +
                         recreated.message, recreated.routeId, recreated.routeVersion,
-                        0, null, recreated.points);
+                        0, null, recreated.points, recreated.path);
             }
             return recreated;
         }
@@ -141,7 +202,7 @@ final class ApiClient {
             for (int i = 0; i < items.length(); i++) {
                 JSONObject item = items.getJSONObject(i);
                 places.add(new PlaceOption(item.getString("placeId"), item.getString("name"),
-                        item.optBoolean("isFood")));
+                        item.optBoolean("isFood"), item.getDouble("lat"), item.getDouble("lon")));
             }
             String message = places.isEmpty() ? "Подходящих мест не найдено" :
                     "Найдено мест: " + places.size();
@@ -170,7 +231,8 @@ final class ApiClient {
                 return routeError(response, status);
             }
             return new Result(true, routeSummary(response, cityId), response.getString("routeId"),
-                    response.getInt("routeVersion"), 0, null, routePoints(response));
+                    response.getInt("routeVersion"), 0, null, routePoints(response),
+                    routePath(response));
         } finally {
             connection.disconnect();
         }
@@ -186,7 +248,8 @@ final class ApiClient {
             JSONObject response = readJson(connection, status);
             if (status >= 400) return routeError(response, status);
             return new Result(true, routeSummary(response, cityId), response.getString("routeId"),
-                    response.getInt("routeVersion"), 0, null, routePoints(response));
+                    response.getInt("routeVersion"), 0, null, routePoints(response),
+                    routePath(response));
         } finally {
             connection.disconnect();
         }
@@ -240,9 +303,29 @@ final class ApiClient {
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.getJSONObject(i);
             points.add(new PlaceOption(item.getString("placeId"), item.getString("name"),
-                    item.optBoolean("isFood")));
+                    item.optBoolean("isFood"), item.getDouble("lat"), item.getDouble("lon")));
         }
         return points;
+    }
+
+    private static List<GeoCoordinate> routePath(JSONObject response) throws Exception {
+        JSONArray legs = response.getJSONArray("legs");
+        List<GeoCoordinate> path = new ArrayList<>();
+        for (int legIndex = 0; legIndex < legs.length(); legIndex++) {
+            JSONArray geometry = legs.getJSONObject(legIndex).getJSONArray("geometry");
+            for (int pointIndex = 0; pointIndex < geometry.length(); pointIndex++) {
+                JSONArray coordinate = geometry.getJSONArray(pointIndex);
+                GeoCoordinate next = new GeoCoordinate(coordinate.getDouble(1),
+                        coordinate.getDouble(0));
+                if (path.isEmpty()) {
+                    path.add(next);
+                } else {
+                    GeoCoordinate previous = path.get(path.size() - 1);
+                    if (previous.lat != next.lat || previous.lon != next.lon) path.add(next);
+                }
+            }
+        }
+        return path;
     }
 
     private static String routeSummary(JSONObject response, String cityId) throws Exception {

@@ -5,6 +5,7 @@ if (!backendUrl.startsWith('https://')) {
     throw new GradleException('BACKEND_BASE_URL must be HTTPS')
 }
 def debugBackendUrl = providers.environmentVariable('DEBUG_BACKEND_BASE_URL').orElse(backendUrl).get()
+def dgisSdkVersion = providers.environmentVariable('DGIS_SDK_VERSION').orElse('13.6.0').get()
 if (!debugBackendUrl.startsWith('https://') && debugBackendUrl != 'http://10.0.2.2:8000') {
     throw new GradleException('DEBUG_BACKEND_BASE_URL must be HTTPS or http://10.0.2.2:8000 for an emulator')
 }
@@ -16,8 +17,8 @@ android {
         applicationId 'ru.gulyay.app'
         minSdk 23
         targetSdk 35
-        versionCode 6
-        versionName '0.4.2'
+        versionCode 7
+        versionName '0.5'
         buildConfigField 'String', 'BACKEND_BASE_URL', '"' + backendUrl.replace('"', '\\"') + '"'
     }
     buildTypes {
@@ -30,4 +31,12 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation "ru.dgis.sdk:sdk-map:${dgisSdkVersion}"
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
+    implementation 'androidx.activity:activity:1.9.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime:2.6.1'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel:2.6.1'
 }

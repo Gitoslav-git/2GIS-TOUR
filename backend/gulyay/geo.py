@@ -136,7 +136,7 @@ class DgisGeoProvider:
 
     def _client(self) -> httpx.Client:
         return httpx.Client(timeout=12.0, transport=self.transport,
-                            headers={"User-Agent": "Gulyay-Backend/0.4.2"})
+                            headers={"User-Agent": "Gulyay-Backend/0.5"})
 
     def _request(self, method: str, url: str, **kwargs) -> dict:
         global _RATE_LIMITED_UNTIL

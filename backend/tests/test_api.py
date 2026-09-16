@@ -22,7 +22,9 @@ class FakeIntent:
         self.calls += 1
         return IntentExtraction(cityText="Тула", durationMinutes=120, interests=["история"],
                                 includeFood=False, withChildren=False, unusualPlaces=False,
-                                centerOnly=True, locationHint="центр")
+                                centerOnly=True, locationHint="центр",
+                                startLocationHint=None, directionHint=None,
+                                startLocationAmbiguous=False, preferShortWalks=False)
 
 
 class FakeGeo:

@@ -64,6 +64,49 @@ def test_device_location_is_used_as_real_first_leg_start():
     assert all("фактического местоположения" not in warning for warning in route.warnings)
 
 
+def test_named_start_is_used_before_direction_and_center_is_not_the_start():
+    class MoscowGeo(FakeGeo):
+        def __init__(self):
+            places = [
+                PlaceCandidate(placeId="away", name="Назад", lat=55.7400, lon=37.5200,
+                               rubrics=[], schedule={"is_24x7": True}, isFood=False),
+                PlaceCandidate(placeId="toward", name="По пути к центру", lat=55.7400, lon=37.5450,
+                               rubrics=[], schedule={"is_24x7": True}, isFood=False),
+            ]
+            super().__init__(places)
+            self.searched_area = None
+
+        def resolve_city_center(self, city_id): return 55.7558, 37.6173
+        def resolve_search_area(self, city_id, location_hint, center):
+            if location_hint == "МЦК Кутузовская":
+                return SearchArea(label="МЦК Кутузовская", lat=55.7400, lon=37.5340,
+                                  radiusMeters=3000, source="2gis")
+            if location_hint == "центр":
+                return SearchArea(label="Центр города", lat=55.7558, lon=37.6173,
+                                  radiusMeters=3500, source="city")
+            return super().resolve_search_area(city_id, location_hint, center)
+        def search_places(self, city_id, preview, area):
+            self.searched_area = area
+            return self.candidates
+
+    geo = MoscowGeo()
+    preview = preferences(
+        cityId="moscow", durationMinutes=120, interests=[],
+        startLocationHint="МЦК Кутузовская", directionHint="центр",
+        preferShortWalks=True,
+    )
+    route = build_route(
+        CreateRoute(cityId="moscow", query="От МЦК Кутузовская в сторону центра 2 часа"),
+        preview, geo, datetime(2026, 9, 16, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert geo.walking_starts[0] == (55.7400, 37.5340)
+    assert geo.searched_area.lon == 37.5340
+    assert geo.searched_area.label == "МЦК Кутузовская → центр"
+    assert route.points[0].placeId == "toward"
+    assert "Старт по указанному ориентиру: МЦК Кутузовская" in route.warnings
+    assert "Направление прогулки: центр" in route.warnings
+
+
 def test_center_and_food_are_visible_in_route_warnings():
     route = build_route(CreateRoute(cityId="tula", query="Центр с едой 2 часа"),
                         preferences(durationMinutes=120, includeFood=True, centerOnly=True),

@@ -55,6 +55,10 @@ class IntentExtraction(StrictModel):
     unusualPlaces: bool | None
     centerOnly: bool | None
     locationHint: str | None = Field(max_length=120)
+    startLocationHint: str | None = Field(max_length=160)
+    directionHint: str | None = Field(max_length=120)
+    startLocationAmbiguous: bool
+    preferShortWalks: bool | None
 
     @field_validator("interests")
     @classmethod
@@ -74,6 +78,9 @@ class QueryPreview(StrictModel):
     unusualPlaces: bool
     centerOnly: bool
     locationHint: str | None = Field(default=None, max_length=120)
+    startLocationHint: str | None = Field(default=None, max_length=160)
+    directionHint: str | None = Field(default=None, max_length=120)
+    preferShortWalks: bool = False
     warnings: list[str]
 
 

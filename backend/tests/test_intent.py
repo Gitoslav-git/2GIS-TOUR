@@ -27,7 +27,8 @@ class FakeIntentProvider:
 def parsed(**updates):
     values = dict(cityText=None, durationMinutes=None, interests=[],
                   includeFood=None, withChildren=None, unusualPlaces=None, centerOnly=None,
-                  locationHint=None)
+                  locationHint=None, startLocationHint=None, directionHint=None,
+                  startLocationAmbiguous=False, preferShortWalks=None)
     values.update(updates)
     return IntentExtraction.model_validate(values)
 
@@ -56,7 +57,9 @@ def test_extracts_preferences_without_claiming_real_locations():
     assert result.json() == {
         "cityId": "tula", "durationMinutes": 120, "durationSource": "text",
         "interests": ["храмы"], "includeFood": True, "withChildren": False,
-        "unusualPlaces": False, "centerOnly": False, "locationHint": None, "warnings": [],
+        "unusualPlaces": False, "centerOnly": False, "locationHint": None,
+        "startLocationHint": None, "directionHint": None, "preferShortWalks": False,
+        "warnings": [],
     }
     assert provider.calls == 1
     assert "placeId" not in result.text and "lat" not in result.text
@@ -112,6 +115,49 @@ def test_named_area_from_llm_is_preserved():
     assert result.json()["locationHint"] == "Заречье"
 
 
+def test_start_direction_and_short_walks_are_not_collapsed_into_center():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
+        cityText="Москва", durationMinutes=120,
+        startLocationHint="МЦК Кутузовская", directionHint="центр",
+        centerOnly=False, preferShortWalks=True,
+    ))
+    result = request(cityId="moscow", query=(
+        "Хочу погулять от МЦК Кутузовская в сторону ЦЕНТРА 2 часа, "
+        "желательно чтобы до локаций идти было не далеко"
+    ))
+    assert result.status_code == 200
+    assert result.json()["startLocationHint"] == "МЦК Кутузовская"
+    assert result.json()["directionHint"] == "центр"
+    assert result.json()["locationHint"] is None
+    assert result.json()["centerOnly"] is False
+    assert result.json()["preferShortWalks"] is True
+
+
+def test_control_query_is_recovered_even_if_llm_misses_geo_semantics():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
+        cityText="Москва", durationMinutes=120,
+    ))
+    result = request(cityId="moscow", query=(
+        "Хочу погулять от МЦК Кутузовская в сторону ЦЕНТРА 2 часа, "
+        "желательно чтобы до локаций идти было не далеко"
+    ))
+    assert result.status_code == 200
+    assert result.json()["startLocationHint"] == "мцк кутузовская"
+    assert result.json()["directionHint"] == "центр"
+    assert result.json()["centerOnly"] is False
+    assert result.json()["preferShortWalks"] is True
+
+
+def test_ambiguous_personal_start_requires_clarification():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
+        cityText="Москва", durationMinutes=120,
+        startLocationHint="офис на Кутузе", startLocationAmbiguous=False,
+    ))
+    result = request(cityId="moscow", query="Хочу погулять от офиса на Кутузе два часа")
+    assert result.status_code == 422
+    assert result.json()["error"]["details"]["fields"] == ["startLocationHint"]
+
+
 def test_city_conflict_asks_for_clarification():
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(cityText="Владимир"))
     result = request()
@@ -151,6 +197,8 @@ def test_fake_provider_is_schema_checked_too():
                 "includeFood": False, "withChildren": False, "unusualPlaces": False,
                 "centerOnly": False,
                 "locationHint": None,
+                "startLocationHint": None, "directionHint": None,
+                "startLocationAmbiguous": False, "preferShortWalks": False,
                 "madeUpPlaceId": "invented"})
     result = request()
     assert result.status_code == 502

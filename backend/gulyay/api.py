@@ -23,7 +23,7 @@ from .repository import RouteRepository
 from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
                             rebuild_route_with_points)
 
-app = FastAPI(title="Гуляй API", version="0.5.2")
+app = FastAPI(title="Гуляй API", version="0.5.3")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"))
 ROUTE_REPOSITORY = RouteRepository()
@@ -61,7 +61,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.5.2"}
+    return {"status": "ok", "version": "0.5.3"}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])
@@ -115,7 +115,7 @@ def preview_route(payload: CreateRoute,
     try:
         return interpret(payload, provider)
     except IntentNeedsClarification as exc:
-        return failure("QUERY_NEEDS_CLARIFICATION", "Уточните запрос и выбранный город или длительность", 422,
+        return failure("QUERY_NEEDS_CLARIFICATION", _clarification_message(exc.fields), 422,
                        request_id, {"fields": exc.fields})
     except IntentAuthenticationError:
         return failure("LLM_AUTH_ERROR", "Ключ LLM не принят сервером", 503, request_id)
@@ -272,7 +272,7 @@ def _build(payload: CreateRoute, intent_provider: OpenAIIntentProvider,
         preview = interpret(payload, intent_provider)
         return build_route(payload, preview, geo)
     except IntentNeedsClarification as exc:
-        return failure("QUERY_NEEDS_CLARIFICATION", "Уточните выбранный город или длительность", 422,
+        return failure("QUERY_NEEDS_CLARIFICATION", _clarification_message(exc.fields), 422,
                        request_id, {"fields": exc.fields})
     except IntentAuthenticationError:
         return failure("LLM_AUTH_ERROR", "Ключ LLM не принят сервером", 503, request_id)
@@ -312,6 +312,16 @@ def _recent_route_ttl() -> int:
     except ValueError:
         return 600
     return max(60, min(3600, value))
+
+
+def _clarification_message(fields: list[str]) -> str:
+    if "startLocationHint" in fields:
+        return "Уточните точное название или адрес стартовой точки"
+    if "cityId" in fields:
+        return "Город в тексте не совпадает с выбранным городом"
+    if "durationMinutes" in fields:
+        return "Уточните длительность прогулки от 30 минут до 12 часов"
+    return "Уточните параметры прогулки"
 
 
 def _client_rate_limit(session: UUID | None, request_id: str | None) -> JSONResponse | None:

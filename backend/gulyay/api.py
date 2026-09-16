@@ -23,7 +23,7 @@ from .repository import RouteRepository
 from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
                             rebuild_route_with_points)
 
-app = FastAPI(title="Гуляй API", version="0.5.1")
+app = FastAPI(title="Гуляй API", version="0.5.2")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"))
 ROUTE_REPOSITORY = RouteRepository()
@@ -61,7 +61,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.5.1"}
+    return {"status": "ok", "version": "0.5.2"}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])

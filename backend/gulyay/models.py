@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
@@ -59,6 +60,7 @@ class IntentExtraction(StrictModel):
     directionHint: str | None = Field(max_length=120)
     startLocationAmbiguous: bool
     preferShortWalks: bool | None
+    maxWalkingMinutes: int | None = Field(ge=1, le=120)
 
     @field_validator("interests")
     @classmethod
@@ -81,6 +83,7 @@ class QueryPreview(StrictModel):
     startLocationHint: str | None = Field(default=None, max_length=160)
     directionHint: str | None = Field(default=None, max_length=120)
     preferShortWalks: bool = False
+    maxWalkingMinutes: int | None = Field(default=None, ge=1, le=120)
     warnings: list[str]
 
 
@@ -141,6 +144,7 @@ class Route(StrictModel):
     startLat: float | None = Field(default=None, ge=-90, le=90)
     startLon: float | None = Field(default=None, ge=-180, le=180)
     startSource: Literal["USER_GEO", "TEXT_ANCHOR", "CITY_CENTER", "LEGACY"] = "LEGACY"
+    maxWalkingMinutes: int | None = Field(default=None, ge=1, le=120)
     requestedMinutes: int
     totalMinutes: int
     unusedMinutes: int
@@ -177,3 +181,57 @@ class RouteRevision(StrictModel):
         if len(set(cleaned)) != len(cleaned):
             raise ValueError("Точки маршрута не должны повторяться")
         return cleaned
+
+
+class StartWalk(StrictModel):
+    routeVersion: int = Field(ge=1)
+
+
+class WalkPosition(StrictModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    accuracyMeters: float = Field(ge=0)
+    measuredAt: datetime
+
+    @field_validator("measuredAt")
+    @classmethod
+    def timezone_required(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("measuredAt must include timezone")
+        return value
+
+
+class WalkAction(StrictModel):
+    action: Literal["PAUSE", "RESUME", "STOP"]
+
+
+class Visit(StrictModel):
+    pointOrder: int = Field(ge=1, le=8)
+    reachedAt: datetime
+
+
+class WalkSession(StrictModel):
+    walkId: UUID
+    routeId: UUID
+    routeVersion: int = Field(ge=1)
+    status: Literal["ACTIVE", "PAUSED", "COMPLETED", "STOPPED"]
+    currentPointOrder: int | None = Field(default=None, ge=1, le=8)
+    startedAt: datetime
+    endedAt: datetime | None = None
+    estimatedRemainingMinutes: int = Field(ge=0)
+    visits: list[Visit] = Field(default_factory=list)
+
+
+class WalkProgress(StrictModel):
+    walk: WalkSession
+    pointReached: bool
+    distanceMeters: int | None = Field(default=None, ge=0)
+
+
+class WalkState(StrictModel):
+    session: WalkSession
+    lastMeasuredAt: datetime | None = None
+    proximityStartedAt: datetime | None = None
+    proximityPointOrder: int | None = Field(default=None, ge=1, le=8)
+    pausedAt: datetime | None = None
+    pausedSeconds: int = Field(default=0, ge=0)

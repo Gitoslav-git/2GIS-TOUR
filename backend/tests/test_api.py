@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -24,7 +25,8 @@ class FakeIntent:
                                 includeFood=False, withChildren=False, unusualPlaces=False,
                                 centerOnly=True, locationHint="центр",
                                 startLocationHint=None, directionHint=None,
-                                startLocationAmbiguous=False, preferShortWalks=False)
+                                startLocationAmbiguous=False, preferShortWalks=False,
+                                maxWalkingMinutes=None)
 
 
 class FakeGeo:
@@ -147,6 +149,70 @@ def test_delete_route_removes_state_and_invalidates_recent_cache():
     recreated = client.post("/v1/routes", headers=headers, json=body)
     assert recreated.status_code == 200
     assert recreated.json()["routeId"] != route_id
+
+
+def test_walk_start_arrival_pause_resume_and_stop():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "История в центре два часа",
+        "deviceSessionId": session,
+    })
+    route_id = created.json()["routeId"]
+    started = client.post(f"/v1/routes/{route_id}/walks", headers=headers,
+                          json={"routeVersion": 1})
+    assert started.status_code == 200
+    walk_id = started.json()["walkId"]
+    assert started.json()["status"] == "ACTIVE"
+
+    point = created.json()["points"][0]
+    first_time = datetime.now(timezone.utc)
+    first = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
+        "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,
+        "measuredAt": first_time.isoformat(),
+    })
+    second = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
+        "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,
+        "measuredAt": (first_time + timedelta(seconds=5)).isoformat(),
+    })
+    assert first.status_code == second.status_code == 200
+    assert first.json()["pointReached"] is False
+    assert second.json()["pointReached"] is True
+    assert second.json()["walk"]["status"] == "COMPLETED"
+    assert len(second.json()["walk"]["visits"]) == 1
+
+
+def test_walk_actions_require_valid_state_and_active_walk_is_unique():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "История в центре два часа",
+        "deviceSessionId": session,
+    })
+    route_id = created.json()["routeId"]
+    started = client.post(f"/v1/routes/{route_id}/walks", headers=headers,
+                          json={"routeVersion": 1})
+    walk_id = started.json()["walkId"]
+    repeated = client.post(f"/v1/routes/{route_id}/walks", headers=headers,
+                           json={"routeVersion": 1})
+    assert repeated.json()["walkId"] == walk_id
+    paused = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
+                         json={"action": "PAUSE"})
+    assert paused.status_code == 200 and paused.json()["status"] == "PAUSED"
+    resumed = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
+                          json={"action": "RESUME"})
+    assert resumed.status_code == 200 and resumed.json()["status"] == "ACTIVE"
+    stopped = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
+                          json={"action": "STOP"})
+    assert stopped.status_code == 200 and stopped.json()["status"] == "STOPPED"
+    invalid = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
+                          json={"action": "RESUME"})
+    assert invalid.status_code == 409
+    assert invalid.json()["error"]["code"] == "WALK_INVALID_STATE"
 
 
 def test_same_request_with_new_request_id_uses_recent_result_cache():

@@ -28,7 +28,8 @@ def parsed(**updates):
     values = dict(cityText=None, durationMinutes=None, interests=[],
                   includeFood=None, withChildren=None, unusualPlaces=None, centerOnly=None,
                   locationHint=None, startLocationHint=None, directionHint=None,
-                  startLocationAmbiguous=False, preferShortWalks=None)
+                  startLocationAmbiguous=False, preferShortWalks=None,
+                  maxWalkingMinutes=None)
     values.update(updates)
     return IntentExtraction.model_validate(values)
 
@@ -59,6 +60,7 @@ def test_extracts_preferences_without_claiming_real_locations():
         "interests": ["храмы"], "includeFood": True, "withChildren": False,
         "unusualPlaces": False, "centerOnly": False, "locationHint": None,
         "startLocationHint": None, "directionHint": None, "preferShortWalks": False,
+        "maxWalkingMinutes": None,
         "warnings": [],
     }
     assert provider.calls == 1
@@ -131,6 +133,7 @@ def test_start_direction_and_short_walks_are_not_collapsed_into_center():
     assert result.json()["locationHint"] is None
     assert result.json()["centerOnly"] is False
     assert result.json()["preferShortWalks"] is True
+    assert result.json()["maxWalkingMinutes"] == 20
 
 
 def test_control_query_is_recovered_even_if_llm_misses_geo_semantics():
@@ -146,6 +149,28 @@ def test_control_query_is_recovered_even_if_llm_misses_geo_semantics():
     assert result.json()["directionHint"] == "центр"
     assert result.json()["centerOnly"] is False
     assert result.json()["preferShortWalks"] is True
+    assert result.json()["maxWalkingMinutes"] == 20
+
+
+@pytest.mark.parametrize("query,parsed_limit,expected", [
+    ("Желательно, чтобы до локаций идти было недалеко", None, 20),
+    ("Между точками должно быть максимум 15-20 минут", None, 20),
+    ("Чтобы идти было не больше 12 минут между локациями", None, 12),
+    ("Хочу короткие переходы", 17, 20),
+])
+def test_walking_phrases_become_numeric_limit(query, parsed_limit, expected):
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
+        durationMinutes=120, preferShortWalks=True, maxWalkingMinutes=parsed_limit,
+        locationHint="до локаций идти недалеко",
+        startLocationHint="до локаций идти недалеко",
+        directionHint="короткие переходы",
+    ))
+    result = request(query=query)
+    assert result.status_code == 200
+    assert result.json()["locationHint"] is None
+    assert result.json()["startLocationHint"] is None
+    assert result.json()["directionHint"] is None
+    assert result.json()["maxWalkingMinutes"] == expected
 
 
 def test_ambiguous_personal_start_requires_clarification():

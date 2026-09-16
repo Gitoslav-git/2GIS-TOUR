@@ -34,7 +34,8 @@ def candidate(name, place_id, food=False, schedule=None):
 
 def preferences(**updates):
     data = dict(cityId="tula", durationMinutes=180, durationSource="text", interests=["история"],
-                includeFood=False, withChildren=False, unusualPlaces=False, centerOnly=False, warnings=[])
+                includeFood=False, withChildren=False, unusualPlaces=False, centerOnly=False,
+                maxWalkingMinutes=None, warnings=[])
     data.update(updates)
     return QueryPreview.model_validate(data)
 
@@ -175,6 +176,33 @@ def test_route_adds_another_real_place_to_fill_requested_time():
     assert route.totalMinutes == 150
     assert route.requestedMinutes == 180
     assert route.unusedMinutes == 30
+
+
+def test_walking_limit_skips_long_leg_without_reporting_geo_failure():
+    near = PlaceCandidate(placeId="near", name="Рядом", lat=54.194, lon=37.618,
+                          rubrics=[], schedule={"is_24x7": True}, isFood=False)
+    far = PlaceCandidate(placeId="far", name="Далеко", lat=54.25, lon=37.70,
+                         rubrics=[], schedule={"is_24x7": True}, isFood=False)
+
+    class LimitedGeo(FakeGeo):
+        def walking_leg(self, start, end, from_order, to_order):
+            self.walking_starts.append(start)
+            seconds = 600 if end == (near.lat, near.lon) else 1800
+            return RouteLeg(fromOrder=from_order, toOrder=to_order,
+                            distanceMeters=500 if seconds == 600 else 2500,
+                            durationSeconds=seconds,
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    geo = LimitedGeo([far, near])
+    route = build_route(
+        CreateRoute(cityId="tula", query="Недалеко идти два часа"),
+        preferences(durationMinutes=120, preferShortWalks=True, maxWalkingMinutes=20),
+        geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert [point.placeId for point in route.points] == ["near"]
+    assert route.maxWalkingMinutes == 20
+    assert all(leg.durationSeconds <= 1200 for leg in route.legs)
+    assert "Каждый пеший переход — не более 20 мин." in route.warnings
 
 
 def test_large_unused_budget_is_explained_instead_of_hidden():

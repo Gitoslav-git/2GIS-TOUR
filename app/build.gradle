@@ -17,8 +17,8 @@ android {
         applicationId 'ru.gulyay.app'
         minSdk 23
         targetSdk 35
-        versionCode 9
-        versionName '0.5.2'
+        versionCode 10
+        versionName '0.5.3'
         buildConfigField 'String', 'BACKEND_BASE_URL', '"' + backendUrl.replace('"', '\\"') + '"'
     }
     buildTypes {

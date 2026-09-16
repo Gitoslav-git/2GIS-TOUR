@@ -23,17 +23,41 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     city_center = geo.resolve_city_center(payload.cityId)
     location_hint = preview.locationHint or ("центр" if preview.centerOnly else None)
     search_area = geo.resolve_search_area(payload.cityId, location_hint, city_center)
-    if payload.startLocation:
+    explicit_start_area = None
+    if preview.startLocationHint:
+        explicit_start_area = geo.resolve_search_area(
+            payload.cityId, preview.startLocationHint, city_center,
+        )
+        start = (explicit_start_area.lat, explicit_start_area.lon)
+        approximate_start = False
+        if not location_hint:
+            radius = 4500 if preview.preferShortWalks else 6500
+            label = explicit_start_area.label
+            if preview.directionHint:
+                label += f" → {preview.directionHint}"
+            search_area = explicit_start_area.model_copy(update={
+                "label": label, "radiusMeters": radius,
+            })
+    elif payload.startLocation:
         start = (payload.startLocation.lat, payload.startLocation.lon)
         approximate_start = False
     else:
         start = (search_area.lat, search_area.lon)
         approximate_start = True
 
+    direction_target = None
+    if preview.directionHint:
+        direction_area = geo.resolve_search_area(
+            payload.cityId, preview.directionHint, city_center,
+        )
+        direction_target = (direction_area.lat, direction_area.lon)
+
     candidates = geo.search_places(payload.cityId, preview, search_area)
     if not candidates:
         raise RouteNotFound()
-    candidates = _candidate_order(candidates, preview.includeFood, start)
+    candidates = _candidate_order(
+        candidates, preview.includeFood, start, direction_target, preview.preferShortWalks,
+    )
     current, elapsed_seconds = start, 0
     route_points, legs = [], []
     skipped_for_budget = False
@@ -81,6 +105,12 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     total_minutes = math.ceil(elapsed_seconds / 60)
     unused_minutes = max(0, preview.durationMinutes - total_minutes)
     warnings = ["Время посещения пока оценочное: 40 минут, для еды — 60 минут"]
+    if explicit_start_area:
+        warnings.append(f"Старт по указанному ориентиру: {explicit_start_area.label}")
+    if preview.directionHint:
+        warnings.append(f"Направление прогулки: {preview.directionHint}")
+    if preview.preferShortWalks:
+        warnings.append("При подборе отданы предпочтения коротким пешим переходам")
     if approximate_start:
         warnings.append("Время от вашего фактического местоположения не учтено")
     if location_hint:
@@ -179,26 +209,57 @@ def _route_warnings(requested_minutes: int, unused_minutes: int,
 
 
 def _candidate_order(candidates: list[PlaceCandidate], include_food: bool,
-                     start: tuple[float, float]) -> list[PlaceCandidate]:
+                     start: tuple[float, float], direction_target: tuple[float, float] | None,
+                     prefer_short_walks: bool) -> list[PlaceCandidate]:
     """Use a nearest-neighbour shortlist; published legs are still verified by 2GIS Routing."""
-    sights = _nearest_order([candidate for candidate in candidates if not candidate.isFood], start)
+    sights = _preference_order(
+        [candidate for candidate in candidates if not candidate.isFood], start,
+        direction_target, prefer_short_walks,
+    )
     if not include_food:
         return sights
-    food = _nearest_order([candidate for candidate in candidates if candidate.isFood], start)
+    food = _preference_order(
+        [candidate for candidate in candidates if candidate.isFood], start,
+        direction_target, prefer_short_walks,
+    )
     if not food:
         return sights
     insertion = min(2, len(sights))
     return sights[:insertion] + food[:1] + sights[insertion:] + food[1:]
 
 
-def _nearest_order(candidates: list[PlaceCandidate], start: tuple[float, float]) -> list[PlaceCandidate]:
+def _preference_order(candidates: list[PlaceCandidate], start: tuple[float, float],
+                      direction_target: tuple[float, float] | None,
+                      prefer_short_walks: bool) -> list[PlaceCandidate]:
     remaining, ordered, current = list(candidates), [], start
     while remaining:
-        candidate = min(remaining, key=lambda item: _distance_squared(current, (item.lat, item.lon)))
+        candidate = min(remaining, key=lambda item: _candidate_score(
+            current, (item.lat, item.lon), direction_target, prefer_short_walks,
+        ))
         remaining.remove(candidate)
         ordered.append(candidate)
         current = candidate.lat, candidate.lon
     return ordered
+
+
+def _candidate_score(current: tuple[float, float], candidate: tuple[float, float],
+                     direction_target: tuple[float, float] | None,
+                     prefer_short_walks: bool) -> float:
+    leg = _approx_distance_meters(current, candidate)
+    score = leg * (1.8 if prefer_short_walks else 1.0)
+    if direction_target is None:
+        return score
+    current_to_target = _approx_distance_meters(current, direction_target)
+    candidate_to_target = _approx_distance_meters(candidate, direction_target)
+    # Moving away from the requested direction is expensive; moving toward it is rewarded
+    # modestly so «short transitions» still wins over a single long jump to the target.
+    regression = max(0.0, candidate_to_target - current_to_target)
+    progress = max(0.0, current_to_target - candidate_to_target)
+    return score + regression * 2.5 - progress * 0.25
+
+
+def _approx_distance_meters(start: tuple[float, float], end: tuple[float, float]) -> float:
+    return math.sqrt(_distance_squared(start, end)) * 111_320
 
 
 def _distance_squared(start: tuple[float, float], end: tuple[float, float]) -> float:

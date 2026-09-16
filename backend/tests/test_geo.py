@@ -173,6 +173,23 @@ def test_direction_and_named_area_become_explicit_search_anchors():
     assert named.source == "2gis" and named.label == "Заречье, Тула"
 
 
+def test_named_start_prefers_best_text_match_not_first_catalog_item():
+    def stations(request):
+        items = [
+            {"id": "wrong", "name": "Кутузовский проспект",
+             "full_name": "Москва, Кутузовский проспект", "point": {"lat": 55.74, "lon": 37.55}},
+            {"id": "right", "name": "Кутузовская",
+             "full_name": "МЦК Кутузовская, Москва", "point": {"lat": 55.74, "lon": 37.534}},
+        ]
+        return httpx.Response(200, json={"meta": {"code": 200}, "result": {"items": items}})
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(stations))
+    area = provider.resolve_search_area(
+        "moscow", "МЦК Кутузовская", (55.7558, 37.6173),
+    )
+    assert area.label == "МЦК Кутузовская, Москва"
+    assert area.lon == 37.534
+
+
 def test_places_and_routing_results_are_cached():
     calls = {"places": 0, "routing": 0}
     def capture(request):

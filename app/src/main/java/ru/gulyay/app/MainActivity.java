@@ -72,7 +72,7 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.5.2");
+        title.setText("Гуляй · версия 0.5.3");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
@@ -177,7 +177,7 @@ public final class MainActivity extends Activity {
         } else {
             restoreRouteState();
             if (routeId == null) {
-                result.setText("Версия 0.5.2 автоматически определяет доступный город или позволяет выбрать его вручную.");
+                result.setText("Версия 0.5.3 различает старт, направление и область прогулки.");
             }
         }
         editPointsButton.setEnabled(routeId != null);

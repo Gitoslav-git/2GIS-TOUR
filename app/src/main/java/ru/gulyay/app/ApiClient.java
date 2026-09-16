@@ -378,7 +378,8 @@ final class ApiClient {
             case "LLM_UNAVAILABLE": return "Разбор запроса недоступен. Проверьте ключ LLM и работу backend.";
             case "LLM_AUTH_ERROR": return "Сервер не принял ключ LLM. Проверьте настройки backend.";
             case "LLM_INVALID_RESPONSE": return "Не удалось разобрать пожелания. Попробуйте ещё раз.";
-            case "QUERY_NEEDS_CLARIFICATION": return "Проверьте выбранный город и длительность прогулки.";
+            case "QUERY_NEEDS_CLARIFICATION": return message.isEmpty() ?
+                    "Уточните параметры прогулки." : message;
             case "ROUTE_NOT_FOUND": return message.isEmpty() ?
                     "Подходящих мест не найдено. Измените пожелания." : message;
             case "TIME_BUDGET_EXCEEDED": return message.isEmpty() ?

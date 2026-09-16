@@ -236,9 +236,10 @@ class DgisGeoProvider:
 
         items = self._places(
             q=f"{location_hint}, {CITY_NAMES[city_id]}", locale="ru_RU",
-            fields="items.point,items.full_name,items.address_name", page_size=10,
+            fields="items.point,items.name,items.full_name,items.address_name", page_size=10,
             search_is_query_text_complete="true",
         )
+        suitable = []
         for item in items:
             point = item.get("point")
             if not _valid_point(point):
@@ -246,6 +247,11 @@ class DgisGeoProvider:
             coordinates = float(point["lat"]), float(point["lon"])
             if _haversine_meters(city_center, coordinates) > 25000:
                 continue
+            suitable.append(item)
+        suitable.sort(key=lambda item: _anchor_match_score(location_hint, item), reverse=True)
+        for item in suitable:
+            point = item["point"]
+            coordinates = float(point["lat"]), float(point["lon"])
             label = str(item.get("full_name") or item.get("name") or location_hint).strip()
             return SearchArea(label=label, lat=coordinates[0], lon=coordinates[1],
                               radiusMeters=3000, source="2gis")
@@ -378,6 +384,15 @@ def _valid_point(point: object) -> bool:
     return (isinstance(point, dict)
             and isinstance(point.get("lat"), (int, float))
             and isinstance(point.get("lon"), (int, float)))
+
+
+def _anchor_match_score(query: str, item: dict) -> tuple[int, int]:
+    query_tokens = set(re.findall(r"[а-яёa-z0-9]+", query.casefold()))
+    candidate_text = " ".join(str(item.get(field, ""))
+                              for field in ("name", "full_name", "address_name")).casefold()
+    matched = sum(token in candidate_text for token in query_tokens)
+    exact_name = int(str(item.get("name", "")).strip().casefold() == query.strip().casefold())
+    return exact_name, matched
 
 
 def _candidate_from_item(item: dict, requested_as_food: bool = False,

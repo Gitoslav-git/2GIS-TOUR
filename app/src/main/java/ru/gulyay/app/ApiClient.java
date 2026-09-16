@@ -329,7 +329,8 @@ final class ApiClient {
     }
 
     private static String routeSummary(JSONObject response, String cityId) throws Exception {
-        String city = cityId.equals("tula") ? "Тула" : "Владимир";
+        String city = cityId.equals("tula") ? "Тула" :
+                (cityId.equals("moscow") ? "Москва" : "Владимир");
         int requested = response.optInt("requestedMinutes", response.getInt("totalMinutes"));
         int unused = response.optInt("unusedMinutes", Math.max(0, requested - response.getInt("totalMinutes")));
         StringBuilder summary = new StringBuilder("Маршрут готов: " + city + ", " +

@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from gulyay.api import (IDEMPOTENT_REVISIONS, IDEMPOTENT_ROUTES, RECENT_ROUTES,
+from gulyay.api import (CLIENT_REQUESTS, IDEMPOTENT_REVISIONS, IDEMPOTENT_ROUTES, RECENT_ROUTES,
                         app, get_geo_provider, get_intent_provider,
                         get_route_repository)
 from gulyay.geo import GeoRateLimited, GeoUnavailable
@@ -74,6 +74,7 @@ def reset_state():
     IDEMPOTENT_ROUTES.clear()
     IDEMPOTENT_REVISIONS.clear()
     RECENT_ROUTES.clear()
+    CLIENT_REQUESTS.clear()
 
 
 def test_pilot_cities_are_explicit():
@@ -82,7 +83,23 @@ def test_pilot_cities_are_explicit():
     assert response.json() == {"cities": [
         {"cityId": "tula", "name": "Тула"},
         {"cityId": "vladimir", "name": "Владимир"},
+        {"cityId": "moscow", "name": "Москва"},
     ]}
+
+
+def test_client_is_limited_to_five_expensive_requests_per_minute():
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    for _ in range(5):
+        response = client.get("/v1/places", headers=headers,
+                              params={"cityId": "tula", "q": "кремль"})
+        assert response.status_code == 200
+    limited = client.get("/v1/places", headers=headers,
+                         params={"cityId": "tula", "q": "кремль"})
+    assert limited.status_code == 429
+    assert limited.json()["error"]["details"]["dependency"] == "client"
+    assert 1 <= int(limited.headers["Retry-After"]) <= 60
 
 
 def test_never_publish_a_fabricated_route():

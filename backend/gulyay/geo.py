@@ -64,7 +64,7 @@ class GeoProvider(Protocol):
                     from_order: int, to_order: int) -> RouteLeg: ...
 
 
-CITY_NAMES = {"tula": "Тула", "vladimir": "Владимир"}
+CITY_NAMES = {"tula": "Тула", "vladimir": "Владимир", "moscow": "Москва"}
 PLACES_URL = "https://catalog.api.2gis.com/3.0/items"
 PLACES_BY_ID_URL = "https://catalog.api.2gis.com/3.0/items/byid"
 ROUTING_URL = "https://routing.api.2gis.com/routing/7.0.0/global"
@@ -276,7 +276,7 @@ class DgisGeoProvider:
                 page_size=10, search_is_query_text_complete="true",
             )
             for item in items:
-                candidate = _candidate_from_item(item, requested_as_food)
+                candidate = _candidate_from_item(item, requested_as_food, require_tourist=True)
                 if candidate is None or candidate.placeId in seen:
                     continue
                 result.append(candidate)
@@ -380,7 +380,8 @@ def _valid_point(point: object) -> bool:
             and isinstance(point.get("lon"), (int, float)))
 
 
-def _candidate_from_item(item: dict, requested_as_food: bool = False) -> PlaceCandidate | None:
+def _candidate_from_item(item: dict, requested_as_food: bool = False,
+                         require_tourist: bool = False) -> PlaceCandidate | None:
     place_id = str(item.get("id", "")).strip()
     name = str(item.get("name", "")).strip()
     point = item.get("point")
@@ -391,10 +392,27 @@ def _candidate_from_item(item: dict, requested_as_food: bool = False) -> PlaceCa
     rubrics = ([str(r.get("name", "")).strip() for r in rubrics_data
                 if isinstance(r, dict) and r.get("name")]
                if isinstance(rubrics_data, list) else [])
-    food_words = ("кафе", "ресторан", "кофейн", "столов", "бар", "пицц", "бургер")
-    is_food = requested_as_food or any(
-        any(word in rubric.casefold() for word in food_words) for rubric in rubrics
+    searchable = " ".join([name, *rubrics]).casefold()
+    blocked_words = (
+        "ритуал", "похорон", "кладбищ", "крематор", "морг", "автосервис",
+        "ремонт", "юридичес", "страхован", "агентство недвижимости",
     )
+    if any(word in searchable for word in blocked_words):
+        return None
+    food_words = ("кафе", "ресторан", "кофейн", "столов", "бар", "пицц", "бургер", "гастроп")
+    is_food = any(word in searchable for word in food_words)
+    if requested_as_food and not is_food:
+        return None
+    tourist_words = (
+        "достопримеч", "музей", "галере", "выстав", "памятник", "скульптур",
+        "архитект", "истор", "культур", "театр", "филармони", "планетар",
+        "зоопарк", "ботаничес", "парк", "сквер", "набереж", "усадьб",
+        "кремль", "собор", "храм", "церков", "монастыр", "мечеть", "синагог",
+        "библиотек", "арт-объект",
+    )
+    if require_tourist and not requested_as_food and not any(
+            word in searchable for word in tourist_words):
+        return None
     schedule = item.get("schedule") if isinstance(item.get("schedule"), dict) else {}
     return PlaceCandidate(
         placeId=place_id, name=name, lat=float(point["lat"]), lon=float(point["lon"]),

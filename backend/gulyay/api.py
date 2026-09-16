@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from collections import defaultdict, deque
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, Query, Request
@@ -22,13 +23,15 @@ from .repository import RouteRepository
 from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
                             rebuild_route_with_points)
 
-app = FastAPI(title="Гуляй API", version="0.5")
-CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"))
+app = FastAPI(title="Гуляй API", version="0.5.1")
+CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
+          City(cityId="moscow", name="Москва"))
 ROUTE_REPOSITORY = RouteRepository()
 IDEMPOTENT_ROUTES: dict[tuple[UUID, UUID], Route] = {}
 IDEMPOTENT_REVISIONS: dict[tuple[UUID, UUID], Route] = {}
 RECENT_ROUTES: dict[tuple[UUID, str], tuple[float, Route]] = {}
 STATE_LOCK = threading.RLock()
+CLIENT_REQUESTS: dict[UUID, deque[float]] = defaultdict(deque)
 
 
 def failure(code: str, message: str, status: int, request_id: str | None = None,
@@ -58,7 +61,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.5"}
+    return {"status": "ok", "version": "0.5.1"}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])
@@ -76,6 +79,9 @@ def places(cityId: str, q: str = Query(min_length=2, max_length=120),
         return failure("UNAUTHORIZED", "Укажите гостевую сессию", 401, request_id)
     if cityId not in {city.cityId for city in CITIES} or len(q.strip()) < 2:
         return failure("VALIDATION_ERROR", "Проверьте город и строку поиска", 400, request_id)
+    limited = _client_rate_limit(x_device_session, request_id)
+    if limited:
+        return limited
     try:
         candidates = geo.search_candidates(cityId, q.strip())
         return {"items": [PlaceSummary(
@@ -103,6 +109,9 @@ def preview_route(payload: CreateRoute,
     authorization = _authorize_create(payload, x_device_session, request_id)
     if authorization:
         return authorization
+    limited = _client_rate_limit(x_device_session, request_id)
+    if limited:
+        return limited
     try:
         return interpret(payload, provider)
     except IntentNeedsClarification as exc:
@@ -137,6 +146,9 @@ def create_route(payload: CreateRoute, x_device_session: UUID | None = Header(de
             return recent[1]
         if recent:
             RECENT_ROUTES.pop(recent_key, None)
+    limited = _client_rate_limit(x_device_session, request_id)
+    if limited:
+        return limited
     route_or_error = _build(payload, intent_provider, geo, request_id)
     if isinstance(route_or_error, JSONResponse):
         return route_or_error
@@ -176,6 +188,9 @@ def revise_route(route_id: UUID, revision: RouteRevision,
     with STATE_LOCK:
         if idempotency_key and idempotency_key in IDEMPOTENT_REVISIONS:
             return IDEMPOTENT_REVISIONS[idempotency_key]
+    limited = _client_rate_limit(x_device_session, request_id)
+    if limited:
+        return limited
     state = repository.get(route_id, x_device_session)
     if state is None:
         return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
@@ -297,3 +312,24 @@ def _recent_route_ttl() -> int:
     except ValueError:
         return 600
     return max(60, min(3600, value))
+
+
+def _client_rate_limit(session: UUID | None, request_id: str | None) -> JSONResponse | None:
+    """Allow five expensive client operations per rolling minute and device session."""
+    if session is None:
+        return None
+    now = time.monotonic()
+    with STATE_LOCK:
+        window = CLIENT_REQUESTS[session]
+        while window and window[0] <= now - 60:
+            window.popleft()
+        if len(window) >= 5:
+            retry_after = max(1, int(61 - (now - window[0])))
+            return failure(
+                "RATE_LIMITED", f"Не больше 5 запросов в минуту. Повторите через {retry_after} сек.",
+                429, request_id,
+                {"retryAfterSeconds": retry_after, "dependency": "client"},
+                {"Retry-After": str(retry_after)},
+            )
+        window.append(now)
+    return None

@@ -2,6 +2,7 @@ package ru.gulyay.app;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -38,6 +39,7 @@ public final class MainActivity extends Activity {
     private Button addPlaceButton;
     private Button applyPointsButton;
     private Button mapButton;
+    private Button resetRouteButton;
     private Button locationButton;
     private LinearLayout pointEditor;
     private Spinner routePointSpinner;
@@ -72,7 +74,7 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.5.3");
+        title.setText("Гуляй · версия 0.5.4");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
@@ -108,6 +110,10 @@ public final class MainActivity extends Activity {
         mapButton.setText("Показать на карте 2ГИС");
         mapButton.setEnabled(false);
         column.addView(mapButton);
+        resetRouteButton = new Button(this);
+        resetRouteButton.setText("Сбросить маршрут");
+        resetRouteButton.setVisibility(View.GONE);
+        column.addView(resetRouteButton);
         pointEditor = new LinearLayout(this);
         pointEditor.setOrientation(LinearLayout.VERTICAL);
         pointEditor.setVisibility(View.GONE);
@@ -177,11 +183,12 @@ public final class MainActivity extends Activity {
         } else {
             restoreRouteState();
             if (routeId == null) {
-                result.setText("Версия 0.5.3 различает старт, направление и область прогулки.");
+                result.setText("Версия 0.5.4 выбирает старт по геопозиции или тексту и позволяет полностью сбросить маршрут.");
             }
         }
         editPointsButton.setEnabled(routeId != null);
         mapButton.setEnabled(routeId != null);
+        resetRouteButton.setVisibility(routeId != null ? View.VISIBLE : View.GONE);
         submit.setOnClickListener(view -> generate());
         locationButton.setOnClickListener(view -> toggleLocation());
         city.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
@@ -197,6 +204,7 @@ public final class MainActivity extends Activity {
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
         mapButton.setOnClickListener(view -> openMap());
+        resetRouteButton.setOnClickListener(view -> confirmRouteReset());
         editPointsButton.setOnClickListener(view -> loadPointEditor());
         moveUp.setOnClickListener(view -> moveSelectedPoint(-1));
         moveDown.setOnClickListener(view -> moveSelectedPoint(1));
@@ -229,7 +237,7 @@ public final class MainActivity extends Activity {
         }
         if (startLat != null && startLon != null && !locationMatchesCity(cityId, startLat, startLon)) {
             clearCoordinatesKeepingCity();
-            locationStatus.setText("Город выбран вручную. Старт рассчитан от выбранной области города.");
+            locationStatus.setText("Город выбран вручную. Если в пожеланиях нет старта, маршрут начнётся от центра города.");
         }
         boolean revise = routeId != null && cityId.equals(routeCityId) && !routeLocationDirty;
         String previous = lastSuccessfulResult;
@@ -261,6 +269,7 @@ public final class MainActivity extends Activity {
                     submit.setText("Изменить маршрут");
                     editPointsButton.setEnabled(true);
                     mapButton.setEnabled(true);
+                    resetRouteButton.setVisibility(View.VISIBLE);
                     currentPoints.clear();
                     currentPoints.addAll(finalResponse.points);
                     pointEditor.setVisibility(View.GONE);
@@ -463,10 +472,15 @@ public final class MainActivity extends Activity {
                     currentPoints.addAll(finalResponse.points);
                     lastSuccessfulResult = finalResponse.message;
                     result.setText(finalResponse.message);
-                    refreshPointEditor();
-                    editorStatus.setText(finalRefreshedAfterConflict
-                            ? "Маршрут уже изменился. Загружена актуальная версия — повторите правки."
-                            : "Точки применены, переходы и время пересчитаны.");
+                    if (finalRefreshedAfterConflict) {
+                        refreshPointEditor();
+                        editorStatus.setText(
+                                "Маршрут уже изменился. Загружена актуальная версия — повторите правки.");
+                    } else {
+                        pointEditor.setVisibility(View.GONE);
+                        foundPlaces.clear();
+                        placeSearch.setText("");
+                    }
                     persistRouteState(query.getText().toString().trim());
                 } else {
                     result.setText(previous + "\n\nИзменение точек не применено: " +
@@ -483,6 +497,7 @@ public final class MainActivity extends Activity {
         submit.setEnabled(!busy);
         editPointsButton.setEnabled(!busy && routeId != null);
         mapButton.setEnabled(!busy && routeId != null);
+        resetRouteButton.setEnabled(!busy && routeId != null);
         findPlaceButton.setEnabled(!busy);
         addPlaceButton.setEnabled(!busy && !foundPlaces.isEmpty());
         applyPointsButton.setEnabled(!busy && !currentPoints.isEmpty());
@@ -503,6 +518,7 @@ public final class MainActivity extends Activity {
                 submit.setEnabled(true);
                 editPointsButton.setEnabled(routeId != null);
                 mapButton.setEnabled(routeId != null);
+                resetRouteButton.setEnabled(routeId != null);
                 findPlaceButton.setEnabled(true);
                 addPlaceButton.setEnabled(!foundPlaces.isEmpty());
                 applyPointsButton.setEnabled(!currentPoints.isEmpty());
@@ -512,6 +528,7 @@ public final class MainActivity extends Activity {
         submit.setEnabled(false);
         editPointsButton.setEnabled(false);
         mapButton.setEnabled(false);
+        resetRouteButton.setEnabled(false);
         findPlaceButton.setEnabled(false);
         addPlaceButton.setEnabled(false);
         applyPointsButton.setEnabled(false);
@@ -660,7 +677,7 @@ public final class MainActivity extends Activity {
                     locationStatus.setText("Локация не определена. Выберите доступный город вручную.");
                 } else if (!locationResolved) {
                     locationStatus.setText("Город определён по последней позиции. " +
-                            "Точные координаты не получены — старт будет от области города.");
+                            "Если в пожеланиях нет старта, маршрут начнётся от центра города.");
                 }
             }, 20_000L);
         } catch (SecurityException error) {
@@ -788,6 +805,63 @@ public final class MainActivity extends Activity {
             intent.putExtra(MapActivity.EXTRA_USER_LON, startLon);
         }
         startActivity(intent);
+    }
+
+    private void confirmRouteReset() {
+        if (requestInFlight || routeId == null) return;
+        new AlertDialog.Builder(this)
+                .setTitle("Сбросить маршрут?")
+                .setMessage("Запрос, точки и построенный маршрут будут удалены.")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Сбросить", (dialog, which) -> resetRoute())
+                .show();
+    }
+
+    private void resetRoute() {
+        final String requestedRouteId = routeId;
+        final String owner = sessionId();
+        setNetworkBusy(true);
+        result.setText("Сбрасываем маршрут…");
+        network.execute(() -> {
+            ApiClient.Result response;
+            try {
+                response = ApiClient.deleteRoute(requestedRouteId, owner);
+            } catch (Exception exception) {
+                response = new ApiClient.Result(false,
+                        "Backend недоступен: маршрут сброшен только в приложении.", null, 0);
+            }
+            ApiClient.Result finalResponse = response;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                clearLocalRouteState(finalResponse.success
+                        ? "Маршрут полностью сброшен. Можно составить новый."
+                        : finalResponse.message);
+                finishNetwork(0);
+            });
+        });
+    }
+
+    private void clearLocalRouteState(String message) {
+        routeId = null;
+        routeVersion = 0;
+        routeCityId = null;
+        lastSuccessfulResult = null;
+        routeLocationDirty = false;
+        retryAllowedAtMillis = 0;
+        currentPoints.clear();
+        foundPlaces.clear();
+        query.setText("");
+        placeSearch.setText("");
+        pointEditor.setVisibility(View.GONE);
+        submit.setText("Построить маршрут");
+        editPointsButton.setEnabled(false);
+        mapButton.setEnabled(false);
+        resetRouteButton.setVisibility(View.GONE);
+        result.setText(message);
+        getPreferences(MODE_PRIVATE).edit()
+                .remove("routeId").remove("routeVersion").remove("routeCityId")
+                .remove("lastSuccessfulResult").remove("routeQuery")
+                .remove("routeLocationDirty").apply();
     }
 
     @Override protected void onDestroy() {

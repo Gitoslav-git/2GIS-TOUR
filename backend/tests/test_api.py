@@ -132,6 +132,23 @@ def test_builds_and_saves_real_provider_route_idempotently():
     assert intent.calls == 1
 
 
+def test_delete_route_removes_state_and_invalidates_recent_cache():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    body = {"cityId": "tula", "query": "История в центре два часа",
+            "deviceSessionId": session}
+    created = client.post("/v1/routes", headers=headers, json=body)
+    route_id = created.json()["routeId"]
+    deleted = client.delete(f"/v1/routes/{route_id}", headers=headers)
+    assert deleted.status_code == 204
+    assert client.get(f"/v1/routes/{route_id}", headers=headers).status_code == 404
+    recreated = client.post("/v1/routes", headers=headers, json=body)
+    assert recreated.status_code == 200
+    assert recreated.json()["routeId"] != route_id
+
+
 def test_same_request_with_new_request_id_uses_recent_result_cache():
     intent = FakeIntent()
     app.dependency_overrides[get_intent_provider] = lambda: intent

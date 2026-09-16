@@ -183,6 +183,23 @@ final class ApiClient {
         return getRouteResponse("/v1/routes/" + routeId, sessionId, cityId);
     }
 
+    static Result deleteRoute(String routeId, String sessionId) throws Exception {
+        if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
+            return new Result(false, "Сборка не подключена к backend.", null, 0);
+        }
+        HttpURLConnection connection = open("/v1/routes/" + routeId, "DELETE", sessionId);
+        try {
+            int status = connection.getResponseCode();
+            if (status == 204 || status == 404) {
+                return new Result(true, "Маршрут сброшен.", null, 0);
+            }
+            JSONObject response = readJson(connection, status);
+            return routeError(response, status);
+        } finally {
+            connection.disconnect();
+        }
+    }
+
     static SearchResult searchPlaces(String cityId, String query, String sessionId) throws Exception {
         if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
             return new SearchResult(false, "Сборка не подключена к backend.", 0,
@@ -339,8 +356,13 @@ final class ApiClient {
         if (unused > 0) summary.append("\nСвободный резерв: ").append(unused).append(" мин.");
         JSONObject area = response.getJSONObject("searchArea");
         summary.append("\nОбласть поиска: ").append(area.getString("label"));
-        if (response.optBoolean("approximateStart")) {
-            summary.append("\nСтарт без геопозиции: ").append(area.getString("label"));
+        String startSource = response.optString("startSource", "LEGACY");
+        if (startSource.equals("USER_GEO")) {
+            summary.append("\nСтарт: геопозиция пользователя");
+        } else if (startSource.equals("TEXT_ANCHOR")) {
+            summary.append("\nСтарт: ориентир из пожеланий");
+        } else if (startSource.equals("CITY_CENTER") || response.optBoolean("approximateStart")) {
+            summary.append("\nСтарт: центр выбранного города");
         }
         JSONArray points = response.getJSONArray("points");
         JSONArray legs = response.getJSONArray("legs");

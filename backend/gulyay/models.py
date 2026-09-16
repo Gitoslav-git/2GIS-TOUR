@@ -138,6 +138,9 @@ class Route(StrictModel):
     filters: Filters
     searchArea: SearchArea
     approximateStart: bool
+    startLat: float | None = Field(default=None, ge=-90, le=90)
+    startLon: float | None = Field(default=None, ge=-180, le=180)
+    startSource: Literal["USER_GEO", "TEXT_ANCHOR", "CITY_CENTER", "LEGACY"] = "LEGACY"
     requestedMinutes: int
     totalMinutes: int
     unusedMinutes: int

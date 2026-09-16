@@ -64,6 +64,42 @@ def test_device_location_is_used_as_real_first_leg_start():
     assert all("фактического местоположения" not in warning for warning in route.warnings)
 
 
+@pytest.mark.parametrize("has_geo,has_text_start,expected_start,expected_source", [
+    (True, False, (54.191, 37.615), "USER_GEO"),
+    (False, True, (54.210, 37.640), "TEXT_ANCHOR"),
+    (False, False, (54.193, 37.617), "CITY_CENTER"),
+    (True, True, (54.210, 37.640), "TEXT_ANCHOR"),
+])
+def test_start_priority_matrix(has_geo, has_text_start, expected_start, expected_source):
+    class StartGeo(FakeGeo):
+        def resolve_search_area(self, city_id, location_hint, center):
+            if location_hint == "вокзал":
+                return SearchArea(label="Вокзал", lat=54.210, lon=37.640,
+                                  radiusMeters=3000, source="2gis")
+            if location_hint == "север":
+                return SearchArea(label="Север города", lat=54.250, lon=37.620,
+                                  radiusMeters=3500, source="2gis")
+            return super().resolve_search_area(city_id, location_hint, center)
+
+    geo = StartGeo([candidate("Кремль", "2gis-1", schedule={"is_24x7": True})])
+    payload_data = {"cityId": "tula", "query": "Прогулка 2 часа"}
+    if has_geo:
+        payload_data["startLocation"] = StartLocation(
+            lat=54.191, lon=37.615, accuracyMeters=18,
+        )
+    preview = preferences(
+        durationMinutes=120,
+        locationHint="север",
+        startLocationHint="вокзал" if has_text_start else None,
+    )
+    route = build_route(CreateRoute(**payload_data), preview, geo,
+                        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    assert geo.walking_starts[0] == expected_start
+    assert (route.startLat, route.startLon) == expected_start
+    assert route.startSource == expected_source
+    assert route.approximateStart is (expected_source == "CITY_CENTER")
+
+
 def test_named_start_is_used_before_direction_and_center_is_not_the_start():
     class MoscowGeo(FakeGeo):
         def __init__(self):
@@ -162,6 +198,76 @@ def test_manual_point_order_is_preserved_and_all_legs_are_rebuilt():
     assert [point.placeId for point in changed.points] == ["2gis-2", "2gis-1"]
     assert [(leg.fromOrder, leg.toOrder) for leg in changed.legs] == [(0, 1), (1, 2)]
     assert changed.totalMinutes == 100
+
+
+def test_reordering_points_rebuilds_legs_and_changes_total_time():
+    first = PlaceCandidate(placeId="near", name="Ближняя", lat=0.0, lon=1.0,
+                           rubrics=[], schedule={"is_24x7": True}, isFood=False)
+    second = PlaceCandidate(placeId="far", name="Дальняя", lat=0.0, lon=10.0,
+                            rubrics=[], schedule={"is_24x7": True}, isFood=False)
+
+    class VariableLegGeo(FakeGeo):
+        def resolve_city_center(self, city_id): return 0.0, 0.0
+        def walking_leg(self, start, end, from_order, to_order):
+            self.walking_starts.append(start)
+            units = abs(end[0] - start[0]) + abs(end[1] - start[1])
+            return RouteLeg(fromOrder=from_order, toOrder=to_order,
+                            distanceMeters=round(units * 1000),
+                            durationSeconds=round(units * 60),
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    geo = VariableLegGeo([first, second])
+    payload = CreateRoute(cityId="tula", query="Прогулка 3 часа")
+    source = build_route(
+        payload, preferences(durationMinutes=180), geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    geo.walking_starts.clear()
+    changed = rebuild_route_with_points(
+        source, payload, [second, first], geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert [point.placeId for point in source.points] == ["near", "far"]
+    assert [point.placeId for point in changed.points] == ["far", "near"]
+    assert geo.walking_starts == [(0.0, 0.0), (0.0, 10.0)]
+    assert source.totalMinutes == 90
+    assert changed.totalMinutes == 99
+
+
+def test_point_edit_keeps_text_start_and_direction_explanation():
+    place = candidate("Кремль", "2gis-1", schedule={"is_24x7": True})
+    geo = FakeGeo([place])
+    source = build_route(
+        CreateRoute(cityId="tula", query="От вокзала в сторону центра 2 часа"),
+        preferences(durationMinutes=120, startLocationHint="вокзал",
+                    directionHint="центр", preferShortWalks=True),
+        geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    changed = rebuild_route_with_points(
+        source, CreateRoute(cityId="tula", query=source.query), [place], geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert any(warning.startswith("Старт по указанному ориентиру:")
+               for warning in changed.warnings)
+    assert "Направление прогулки: центр" in changed.warnings
+    assert "При подборе отданы предпочтения коротким пешим переходам" in changed.warnings
+
+
+def test_point_edit_recovers_exact_start_from_route_created_before_0_5_4():
+    place = candidate("Кремль", "2gis-1", schedule={"is_24x7": True})
+    geo = FakeGeo([place])
+    source = build_route(
+        CreateRoute(cityId="tula", query="От вокзала 2 часа"),
+        preferences(durationMinutes=120, startLocationHint="вокзал"), geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    ).model_copy(update={"startLat": None, "startLon": None, "startSource": "LEGACY"})
+    source.legs[0].geometry[0] = (37.700, 54.250)
+    geo.walking_starts.clear()
+    rebuild_route_with_points(
+        source, CreateRoute(cityId="tula", query=source.query), [place], geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert geo.walking_starts[0] == (54.250, 37.700)
 
 
 def test_manual_edit_over_budget_does_not_publish_partial_route():

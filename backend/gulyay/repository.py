@@ -129,6 +129,14 @@ class RouteRepository:
         except ValueError:
             return None
 
+    def delete(self, route_id: UUID, owner: UUID) -> bool:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM routes WHERE route_id = ? AND owner_session = ?",
+                (str(route_id), str(owner)),
+            )
+            return cursor.rowcount == 1
+
     def clear(self) -> None:
         with self._lock, self._connection:
             self._connection.execute("DELETE FROM route_versions")

@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .geo import (DgisGeoProvider, GeoAuthenticationError, GeoConstraintNotFound,
                   GeoInvalidResponse, GeoPlaceNotFound, GeoRateLimited,
@@ -23,7 +23,7 @@ from .repository import RouteRepository
 from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
                             rebuild_route_with_points)
 
-app = FastAPI(title="Гуляй API", version="0.5.3")
+app = FastAPI(title="Гуляй API", version="0.5.4")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"))
 ROUTE_REPOSITORY = RouteRepository()
@@ -61,7 +61,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.5.3"}
+    return {"status": "ok", "version": "0.5.4"}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])
@@ -172,6 +172,26 @@ def get_route(route_id: UUID, x_device_session: UUID | None = Header(default=Non
     if state is None:
         return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
     return state[0]
+
+
+@app.delete("/v1/routes/{route_id}", status_code=204, response_model=None)
+def delete_route(route_id: UUID, x_device_session: UUID | None = Header(default=None),
+                 x_request_id: UUID | None = Header(default=None),
+                 repository: RouteRepository = Depends(get_route_repository)) -> Response | JSONResponse:
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None or not repository.delete(route_id, x_device_session):
+        return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
+    with STATE_LOCK:
+        for key, route in list(IDEMPOTENT_ROUTES.items()):
+            if key[0] == x_device_session and route.routeId == route_id:
+                IDEMPOTENT_ROUTES.pop(key, None)
+        for key, route in list(IDEMPOTENT_REVISIONS.items()):
+            if key[0] == x_device_session and route.routeId == route_id:
+                IDEMPOTENT_REVISIONS.pop(key, None)
+        for key, cached in list(RECENT_ROUTES.items()):
+            if key[0] == x_device_session and cached[1].routeId == route_id:
+                RECENT_ROUTES.pop(key, None)
+    return Response(status_code=204)
 
 
 @app.post("/v1/routes/{route_id}/revisions", response_model=Route)

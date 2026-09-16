@@ -30,6 +30,7 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         )
         start = (explicit_start_area.lat, explicit_start_area.lon)
         approximate_start = False
+        start_source = "TEXT_ANCHOR"
         if not location_hint:
             radius = 4500 if preview.preferShortWalks else 6500
             label = explicit_start_area.label
@@ -41,9 +42,11 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     elif payload.startLocation:
         start = (payload.startLocation.lat, payload.startLocation.lon)
         approximate_start = False
+        start_source = "USER_GEO"
     else:
-        start = (search_area.lat, search_area.lon)
+        start = city_center
         approximate_start = True
+        start_source = "CITY_CENTER"
 
     direction_target = None
     if preview.directionHint:
@@ -112,7 +115,7 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     if preview.preferShortWalks:
         warnings.append("При подборе отданы предпочтения коротким пешим переходам")
     if approximate_start:
-        warnings.append("Время от вашего фактического местоположения не учтено")
+        warnings.append("Геопозиция и старт в тексте не указаны — маршрут начат от центра города")
     if location_hint:
         warnings.append(f"Область поиска: {search_area.label}")
     if preview.includeFood and not any(point.isFood for point in route_points):
@@ -126,7 +129,8 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     return Route(
         routeId=uuid4(), routeVersion=1, status="READY", cityId=payload.cityId,
         query=payload.query, filters=payload.filters, searchArea=search_area,
-        approximateStart=approximate_start, requestedMinutes=preview.durationMinutes,
+        approximateStart=approximate_start, startLat=start[0], startLon=start[1],
+        startSource=start_source, requestedMinutes=preview.durationMinutes,
         totalMinutes=total_minutes, unusedMinutes=unused_minutes,
         points=route_points, legs=legs, warnings=warnings,
     )
@@ -141,7 +145,14 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
     if len({candidate.placeId for candidate in candidates}) != len(candidates):
         raise RouteNotFound()
 
-    if payload.startLocation:
+    if source.startLat is not None and source.startLon is not None:
+        current = source.startLat, source.startLon
+    elif source.legs and source.legs[0].geometry:
+        # Routes persisted before 0.5.4 do not have explicit start fields, but
+        # the first Routing geometry still contains the exact original start.
+        first_lon, first_lat = source.legs[0].geometry[0]
+        current = first_lat, first_lon
+    elif payload.startLocation:
         current = payload.startLocation.lat, payload.startLocation.lon
     else:
         current = source.searchArea.lat, source.searchArea.lon
@@ -184,6 +195,14 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
         food_required, any(point.isFood for point in route_points),
         any(point.scheduleStatus == "UNKNOWN" for point in route_points),
     )
+    retained_prefixes = (
+        "Старт по указанному ориентиру:",
+        "Направление прогулки:",
+        "При подборе отданы предпочтения коротким пешим переходам",
+    )
+    retained = [warning for warning in source.warnings
+                if warning.startswith(retained_prefixes)]
+    warnings = retained + [warning for warning in warnings if warning not in retained]
     return source.model_copy(update={
         "points": route_points, "legs": legs, "totalMinutes": total_minutes,
         "unusedMinutes": unused_minutes, "warnings": warnings,
@@ -196,7 +215,7 @@ def _route_warnings(requested_minutes: int, unused_minutes: int,
                     has_unknown_schedule: bool) -> list[str]:
     warnings = ["Время посещения пока оценочное: 40 минут, для еды — 60 минут"]
     if approximate_start:
-        warnings.append("Время от вашего фактического местоположения не учтено")
+        warnings.append("Геопозиция и старт в тексте не указаны — маршрут начат от центра города")
     if area_is_explicit:
         warnings.append(f"Область поиска: {area_label}")
     if food_required and not has_food:

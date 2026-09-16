@@ -12,6 +12,7 @@ import android.os.Bundle;
 import android.os.Looper;
 import android.view.View;
 import android.widget.ArrayAdapter;
+import android.widget.AdapterView;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -38,7 +39,6 @@ public final class MainActivity extends Activity {
     private Button applyPointsButton;
     private Button mapButton;
     private Button locationButton;
-    private Button clearLocationButton;
     private LinearLayout pointEditor;
     private Spinner routePointSpinner;
     private Spinner foundPlaceSpinner;
@@ -60,6 +60,7 @@ public final class MainActivity extends Activity {
     private boolean routeLocationDirty;
     private LocationManager locationManager;
     private LocationListener locationListener;
+    private boolean locationResolved;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -71,7 +72,7 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.5.1");
+        title.setText("Гуляй · версия 0.5.2");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
@@ -80,17 +81,13 @@ public final class MainActivity extends Activity {
         column.addView(intro);
         city = new Spinner(this);
         city.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"Тула", "Владимир", "Москва"}));
+                new String[]{"Локация не определена", "Тула", "Владимир", "Москва"}));
         column.addView(city);
         locationButton = new Button(this);
         locationButton.setText("Обновить геопозицию");
         column.addView(locationButton);
-        clearLocationButton = new Button(this);
-        clearLocationButton.setText("Использовать без геопозиции");
-        clearLocationButton.setEnabled(false);
-        column.addView(clearLocationButton);
         locationStatus = new TextView(this);
-        locationStatus.setText("Без геопозиции старт будет рассчитан от выбранной области города.");
+        locationStatus.setText("Определяем город. Если не получится — выберите его в списке.");
         column.addView(locationStatus);
         query = new EditText(this);
         query.setHint("Например: хочу гулять 4 часа и зайти поесть");
@@ -167,21 +164,38 @@ public final class MainActivity extends Activity {
                 startLat = savedInstanceState.getDouble("startLat");
                 startLon = savedInstanceState.getDouble("startLon");
                 startAccuracyMeters = savedInstanceState.getDouble("startAccuracyMeters", 100.0);
-                showLocation();
+                String restoredCityId = cityIdForLocation(startLat, startLon);
+                if (restoredCityId != null) {
+                    city.setSelection(cityPosition(restoredCityId));
+                    showLocation(restoredCityId);
+                } else {
+                    clearLocationToUnknown();
+                }
             }
             routeLocationDirty = savedInstanceState.getBoolean("routeLocationDirty", false);
             if (routeId != null) submit.setText("Изменить маршрут");
         } else {
             restoreRouteState();
             if (routeId == null) {
-                result.setText("Версия 0.5.1 показывает маршрут и точки на встроенной карте 2ГИС.");
+                result.setText("Версия 0.5.2 автоматически определяет доступный город или позволяет выбрать его вручную.");
             }
         }
         editPointsButton.setEnabled(routeId != null);
         mapButton.setEnabled(routeId != null);
         submit.setOnClickListener(view -> generate());
         locationButton.setOnClickListener(view -> toggleLocation());
-        clearLocationButton.setOnClickListener(view -> clearLocation());
+        city.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view,
+                                                  int position, long id) {
+                String selected = selectedCityId();
+                if (selected != null && startLat != null && startLon != null
+                        && !locationMatchesCity(selected, startLat, startLon)) {
+                    clearCoordinatesKeepingCity();
+                    locationStatus.setText("Город выбран вручную. Маршрут будет рассчитан от его области.");
+                }
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
         mapButton.setOnClickListener(view -> openMap());
         editPointsButton.setOnClickListener(view -> loadPointEditor());
         moveUp.setOnClickListener(view -> moveSelectedPoint(-1));
@@ -192,6 +206,7 @@ public final class MainActivity extends Activity {
         applyPointsButton.setOnClickListener(view -> applyPointChanges());
         applyCooldown();
         showLocationRebuildIfNeeded();
+        beginAutomaticLocationDetection();
     }
 
     private void generate() {
@@ -207,10 +222,14 @@ public final class MainActivity extends Activity {
         }
         setNetworkBusy(true);
         String cityId = selectedCityId();
+        if (cityId == null) {
+            setNetworkBusy(false);
+            locationStatus.setText("Локация не определена. Выберите Тулу, Владимир или Москву в списке.");
+            return;
+        }
         if (startLat != null && startLon != null && !locationMatchesCity(cityId, startLat, startLon)) {
-            clearLocation();
-            locationStatus.setText("Полученные координаты находятся вне выбранного города. " +
-                    "VPN не меняет GPS: задайте Location эмулятора вручную и обновите геопозицию.");
+            clearCoordinatesKeepingCity();
+            locationStatus.setText("Город выбран вручную. Старт рассчитан от выбранной области города.");
         }
         boolean revise = routeId != null && cityId.equals(routeCityId) && !routeLocationDirty;
         String previous = lastSuccessfulResult;
@@ -508,14 +527,7 @@ public final class MainActivity extends Activity {
                 .putString("routeCityId", routeCityId)
                 .putString("lastSuccessfulResult", lastSuccessfulResult)
                 .putString("routeQuery", queryText);
-        if (startLat != null && startLon != null) {
-            editor.putLong("startLatBits", Double.doubleToRawLongBits(startLat));
-            editor.putLong("startLonBits", Double.doubleToRawLongBits(startLon));
-            editor.putLong("startAccuracyBits", Double.doubleToRawLongBits(
-                    startAccuracyMeters == null ? 100.0 : startAccuracyMeters));
-        } else {
-            editor.remove("startLatBits").remove("startLonBits").remove("startAccuracyBits");
-        }
+        editor.remove("startLatBits").remove("startLonBits").remove("startAccuracyBits");
         editor.putBoolean("routeLocationDirty", routeLocationDirty)
                 .remove("routeStartLatBits").remove("routeStartLonBits");
         editor.apply();
@@ -527,20 +539,14 @@ public final class MainActivity extends Activity {
         routeVersion = preferences.getInt("routeVersion", 0);
         routeCityId = preferences.getString("routeCityId", null);
         lastSuccessfulResult = preferences.getString("lastSuccessfulResult", null);
-        if (preferences.contains("startLatBits") && preferences.contains("startLonBits")) {
-            startLat = Double.longBitsToDouble(preferences.getLong("startLatBits", 0));
-            startLon = Double.longBitsToDouble(preferences.getLong("startLonBits", 0));
-            startAccuracyMeters = Double.longBitsToDouble(
-                    preferences.getLong("startAccuracyBits",
-                            Double.doubleToRawLongBits(100.0)));
-            showLocation();
-        }
+        preferences.edit().remove("startLatBits").remove("startLonBits")
+                .remove("startAccuracyBits").apply();
         routeLocationDirty = preferences.getBoolean("routeLocationDirty", false);
         if (routeId == null || routeVersion < 1 || routeCityId == null || lastSuccessfulResult == null) {
             routeId = null;
             return;
         }
-        city.setSelection("moscow".equals(routeCityId) ? 2 : ("vladimir".equals(routeCityId) ? 1 : 0));
+        city.setSelection(0);
         query.setText(preferences.getString("routeQuery", ""));
         result.setText(lastSuccessfulResult);
         submit.setText("Изменить маршрут");
@@ -577,6 +583,19 @@ public final class MainActivity extends Activity {
         requestCurrentLocation();
     }
 
+    private void beginAutomaticLocationDetection() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED ||
+                checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) ==
+                        PackageManager.PERMISSION_GRANTED) {
+            requestCurrentLocation();
+        } else {
+            city.setSelection(0);
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION}, LOCATION_PERMISSION_REQUEST);
+        }
+    }
+
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions,
                                                      int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -584,22 +603,36 @@ public final class MainActivity extends Activity {
         boolean granted = false;
         for (int result : grantResults) granted |= result == PackageManager.PERMISSION_GRANTED;
         if (granted) requestCurrentLocation();
-        else locationStatus.setText("Доступ к геопозиции не разрешён. Маршрут можно построить без неё.");
+        else {
+            city.setSelection(0);
+            locationStatus.setText("Локация не определена. Выберите доступный город вручную.");
+        }
     }
 
     private void requestCurrentLocation() {
         locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
-        String provider = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
-                ? LocationManager.GPS_PROVIDER : LocationManager.NETWORK_PROVIDER;
-        if (!locationManager.isProviderEnabled(provider)) {
-            locationStatus.setText("Геопозиция на устройстве выключена. Включите её в настройках.");
+        boolean gpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+        boolean networkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        if (!gpsEnabled && !networkEnabled) {
+            clearLocationToUnknown();
+            locationStatus.setText("Геопозиция выключена. Включите её или выберите город вручную.");
             return;
         }
+        locationResolved = false;
         locationButton.setEnabled(false);
-        locationStatus.setText("Запрашиваем новые координаты у " + provider + "…");
+        locationStatus.setText("Определяем город и уточняем текущую позицию…");
         if (locationListener != null) {
             try { locationManager.removeUpdates(locationListener); } catch (SecurityException ignored) { }
             locationListener = null;
+        }
+        Location cached = bestLastKnownLocation(gpsEnabled, networkEnabled);
+        if (cached != null) {
+            String cachedCity = cityIdForLocation(cached.getLatitude(), cached.getLongitude());
+            if (cachedCity != null) {
+                city.setSelection(cityPosition(cachedCity));
+                locationStatus.setText("Определён город: " + cityName(cachedCity) +
+                        ". Уточняем свежие координаты…");
+            }
         }
         locationListener = new LocationListener() {
             @Override public void onLocationChanged(Location location) {
@@ -610,69 +643,116 @@ public final class MainActivity extends Activity {
             @Override public void onStatusChanged(String providerName, int status, Bundle extras) { }
         };
         try {
-            locationManager.requestSingleUpdate(provider, locationListener, Looper.getMainLooper());
+            if (gpsEnabled) {
+                locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER,
+                        locationListener, Looper.getMainLooper());
+            }
+            if (networkEnabled) {
+                locationManager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER,
+                        locationListener, Looper.getMainLooper());
+            }
             locationButton.postDelayed(() -> {
                 if (locationListener == null) return;
                 locationManager.removeUpdates(locationListener);
                 locationListener = null;
                 locationButton.setEnabled(true);
-                locationStatus.setText("Не удалось получить координаты. Маршрут можно построить без них.");
+                if (!locationResolved && selectedCityId() == null) {
+                    locationStatus.setText("Локация не определена. Выберите доступный город вручную.");
+                } else if (!locationResolved) {
+                    locationStatus.setText("Город определён по последней позиции. " +
+                            "Точные координаты не получены — старт будет от области города.");
+                }
             }, 20_000L);
         } catch (SecurityException error) {
             locationButton.setEnabled(true);
-            locationStatus.setText("Нет разрешения на геопозицию.");
+            clearLocationToUnknown();
+            locationStatus.setText("Нет разрешения на геопозицию. Выберите город вручную.");
         }
     }
 
+    private Location bestLastKnownLocation(boolean gpsEnabled, boolean networkEnabled) {
+        Location best = null;
+        try {
+            if (gpsEnabled) best = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+            if (networkEnabled) {
+                Location networkLocation = locationManager.getLastKnownLocation(
+                        LocationManager.NETWORK_PROVIDER);
+                if (networkLocation != null && (best == null
+                        || networkLocation.getTime() > best.getTime())) best = networkLocation;
+            }
+            Location passiveLocation = locationManager.getLastKnownLocation(
+                    LocationManager.PASSIVE_PROVIDER);
+            if (passiveLocation != null && (best == null
+                    || passiveLocation.getTime() > best.getTime())) best = passiveLocation;
+        } catch (SecurityException ignored) { }
+        return best;
+    }
+
     private void acceptLocation(Location location) {
+        String cityId = cityIdForLocation(location.getLatitude(), location.getLongitude());
+        if (cityId == null) {
+            startLat = null;
+            startLon = null;
+            startAccuracyMeters = null;
+            city.setSelection(0);
+            locationStatus.setText("Получены координаты вне доступных городов. " +
+                    "Ожидаем другой источник геопозиции…");
+            return;
+        }
         if (locationManager != null && locationListener != null) {
             locationManager.removeUpdates(locationListener);
             locationListener = null;
         }
-        String cityId = selectedCityId();
-        if (!locationMatchesCity(cityId, location.getLatitude(), location.getLongitude())) {
-            locationButton.setEnabled(true);
-            locationStatus.setText("GPS вернул координаты вне выбранного города. VPN на GPS не влияет. " +
-                    "В эмуляторе: … → Location → задайте точку в городе → Send, затем обновите здесь.");
-            return;
-        }
+        locationResolved = true;
         startLat = location.getLatitude();
         startLon = location.getLongitude();
         startAccuracyMeters = location.hasAccuracy() ? (double) location.getAccuracy() : 100.0;
+        city.setSelection(cityPosition(cityId));
         locationButton.setEnabled(true);
-        showLocation();
-        getPreferences(MODE_PRIVATE).edit()
-                .putLong("startLatBits", Double.doubleToRawLongBits(startLat))
-                .putLong("startLonBits", Double.doubleToRawLongBits(startLon))
-                .putLong("startAccuracyBits", Double.doubleToRawLongBits(startAccuracyMeters))
-                .apply();
+        showLocation(cityId);
         markRouteLocationDirty();
     }
 
-    private void showLocation() {
+    private void showLocation(String cityId) {
         locationButton.setText("Обновить геопозицию");
-        if (clearLocationButton != null) clearLocationButton.setEnabled(true);
         locationStatus.setText(String.format(java.util.Locale.US,
-                "Старт по геопозиции: %.5f, %.5f (точность ±%.0f м)",
-                startLat, startLon, startAccuracyMeters == null ? 100.0 : startAccuracyMeters));
+                "Определён город: %s. Геопозиция получена (точность ±%.0f м).",
+                cityName(cityId), startAccuracyMeters == null ? 100.0 : startAccuracyMeters));
     }
 
-    private void clearLocation() {
+    private void clearCoordinatesKeepingCity() {
         startLat = null;
         startLon = null;
         startAccuracyMeters = null;
         locationButton.setText("Обновить геопозицию");
-        clearLocationButton.setEnabled(false);
-        locationStatus.setText("Старт будет рассчитан от выбранной области города.");
-        getPreferences(MODE_PRIVATE).edit()
-                .remove("startLatBits").remove("startLonBits")
-                .remove("startAccuracyBits").apply();
         markRouteLocationDirty();
+    }
+
+    private void clearLocationToUnknown() {
+        clearCoordinatesKeepingCity();
+        city.setSelection(0);
     }
 
     private String selectedCityId() {
         int position = city.getSelectedItemPosition();
-        return position == 2 ? "moscow" : (position == 1 ? "vladimir" : "tula");
+        return position == 3 ? "moscow" : (position == 2 ? "vladimir" :
+                (position == 1 ? "tula" : null));
+    }
+
+    private static int cityPosition(String cityId) {
+        return "moscow".equals(cityId) ? 3 : ("vladimir".equals(cityId) ? 2 : 1);
+    }
+
+    private static String cityName(String cityId) {
+        return "moscow".equals(cityId) ? "Москва" :
+                ("vladimir".equals(cityId) ? "Владимир" : "Тула");
+    }
+
+    private static String cityIdForLocation(double lat, double lon) {
+        if (locationMatchesCity("moscow", lat, lon)) return "moscow";
+        if (locationMatchesCity("vladimir", lat, lon)) return "vladimir";
+        if (locationMatchesCity("tula", lat, lon)) return "tula";
+        return null;
     }
 
     private static boolean locationMatchesCity(String cityId, double lat, double lon) {

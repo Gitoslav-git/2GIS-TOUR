@@ -18,12 +18,15 @@ from .intent import (IntentAuthenticationError, IntentInvalidResponse,
                      IntentNeedsClarification, IntentUnavailable,
                      OpenAIIntentProvider, interpret)
 from .models import (City, CreateRoute, PlaceSummary, QueryPreview, Route,
-                     RouteRevision)
+                     RouteRevision, StartWalk, WalkAction, WalkPosition,
+                     WalkProgress, WalkSession)
 from .repository import RouteRepository
 from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
                             rebuild_route_with_points)
+from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
+                   register_position, start_walk)
 
-app = FastAPI(title="Гуляй API", version="0.5.4")
+app = FastAPI(title="Гуляй API", version="0.6")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"))
 ROUTE_REPOSITORY = RouteRepository()
@@ -61,7 +64,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.5.4"}
+    return {"status": "ok", "version": "0.6"}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])
@@ -172,6 +175,105 @@ def get_route(route_id: UUID, x_device_session: UUID | None = Header(default=Non
     if state is None:
         return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
     return state[0]
+
+
+@app.post("/v1/routes/{route_id}/walks", response_model=WalkSession)
+def create_walk(route_id: UUID, payload: StartWalk,
+                x_device_session: UUID | None = Header(default=None),
+                x_request_id: UUID | None = Header(default=None),
+                repository: RouteRepository = Depends(get_route_repository)) -> WalkSession | JSONResponse:
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None:
+        return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
+    with STATE_LOCK:
+        route_state = repository.get(route_id, x_device_session)
+        if route_state is None:
+            return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
+        route = route_state[0]
+        if payload.routeVersion != route.routeVersion:
+            return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
+                           {"currentVersion": route.routeVersion})
+        active = repository.find_active_walk(x_device_session)
+        if active is not None:
+            if (active.session.routeId == route_id
+                    and active.session.routeVersion == payload.routeVersion):
+                return active.session
+            return failure("ACTIVE_WALK_EXISTS", "Сначала завершите текущую прогулку", 409,
+                           request_id, {"walkId": str(active.session.walkId)})
+        try:
+            state = start_walk(route, payload)
+        except WalkInvalidState:
+            return failure("VERSION_CONFLICT", "Нельзя начать эту версию маршрута", 409,
+                           request_id)
+        repository.save_walk(state, x_device_session)
+        return state.session
+
+
+@app.get("/v1/walks/{walk_id}", response_model=WalkSession)
+def get_walk(walk_id: UUID, x_device_session: UUID | None = Header(default=None),
+             x_request_id: UUID | None = Header(default=None),
+             repository: RouteRepository = Depends(get_route_repository)) -> WalkSession | JSONResponse:
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+    state = repository.get_walk(walk_id, x_device_session)
+    if state is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+    return state.session
+
+
+@app.post("/v1/walks/{walk_id}/positions", response_model=WalkProgress)
+def add_walk_position(walk_id: UUID, payload: WalkPosition,
+                      x_device_session: UUID | None = Header(default=None),
+                      x_request_id: UUID | None = Header(default=None),
+                      repository: RouteRepository = Depends(get_route_repository)) -> WalkProgress | JSONResponse:
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+    with STATE_LOCK:
+        state = repository.get_walk(walk_id, x_device_session)
+        if state is None:
+            return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+        route = repository.get_version(
+            state.session.routeId, x_device_session, state.session.routeVersion,
+        )
+        if route is None:
+            return failure("VERSION_CONFLICT", "Версия маршрута недоступна", 409, request_id)
+        try:
+            updated, progress = register_position(state, route, payload)
+        except WalkInvalidState:
+            return failure("WALK_NOT_ACTIVE", "Прогулка сейчас не активна", 409, request_id)
+        except WalkInvalidPosition:
+            return failure("VALIDATION_ERROR", "Некорректное время геопозиции", 400,
+                           request_id)
+        repository.replace_walk(updated, x_device_session)
+        return progress
+
+
+@app.post("/v1/walks/{walk_id}/actions", response_model=WalkSession)
+def walk_action(walk_id: UUID, payload: WalkAction,
+                x_device_session: UUID | None = Header(default=None),
+                x_request_id: UUID | None = Header(default=None),
+                repository: RouteRepository = Depends(get_route_repository)) -> WalkSession | JSONResponse:
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+    with STATE_LOCK:
+        state = repository.get_walk(walk_id, x_device_session)
+        if state is None:
+            return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+        route = repository.get_version(
+            state.session.routeId, x_device_session, state.session.routeVersion,
+        )
+        if route is None:
+            return failure("VERSION_CONFLICT", "Версия маршрута недоступна", 409, request_id)
+        try:
+            updated = apply_action(state, route, payload)
+        except WalkInvalidState:
+            return failure("WALK_INVALID_STATE", "Действие недоступно в текущем состоянии", 409,
+                           request_id)
+        repository.replace_walk(updated, x_device_session)
+        return updated.session
 
 
 @app.delete("/v1/routes/{route_id}", status_code=204, response_model=None)

@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 from uuid import UUID
 
-from .models import CreateRoute, Route
+from .models import CreateRoute, Route, WalkState
 
 
 class RouteRepository:
@@ -51,6 +51,16 @@ class RouteRepository:
                 route_json TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (route_id, route_version),
+                FOREIGN KEY (route_id) REFERENCES routes(route_id) ON DELETE CASCADE
+            )
+        """)
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS walks (
+                walk_id TEXT PRIMARY KEY,
+                route_id TEXT NOT NULL,
+                owner_session TEXT NOT NULL,
+                walk_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (route_id) REFERENCES routes(route_id) ON DELETE CASCADE
             )
         """)
@@ -137,8 +147,66 @@ class RouteRepository:
             )
             return cursor.rowcount == 1
 
+    def save_walk(self, state: WalkState, owner: UUID) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT INTO walks
+                   (walk_id, route_id, owner_session, walk_json, updated_at)
+                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (str(state.session.walkId), str(state.session.routeId), str(owner),
+                 state.model_dump_json()),
+            )
+            self._connection.execute(
+                "UPDATE routes SET updated_at = CURRENT_TIMESTAMP WHERE route_id = ?",
+                (str(state.session.routeId),),
+            )
+
+    def get_walk(self, walk_id: UUID, owner: UUID) -> WalkState | None:
+        self.purge_expired()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT walk_json FROM walks WHERE walk_id = ? AND owner_session = ?",
+                (str(walk_id), str(owner)),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return WalkState.model_validate_json(row[0])
+        except ValueError:
+            return None
+
+    def replace_walk(self, state: WalkState, owner: UUID) -> bool:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """UPDATE walks SET walk_json = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE walk_id = ? AND owner_session = ?""",
+                (state.model_dump_json(), str(state.session.walkId), str(owner)),
+            )
+            if cursor.rowcount == 1:
+                self._connection.execute(
+                    "UPDATE routes SET updated_at = CURRENT_TIMESTAMP WHERE route_id = ?",
+                    (str(state.session.routeId),),
+                )
+            return cursor.rowcount == 1
+
+    def find_active_walk(self, owner: UUID) -> WalkState | None:
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT walk_json FROM walks WHERE owner_session = ?
+                   ORDER BY updated_at DESC""", (str(owner),),
+            ).fetchall()
+        for row in rows:
+            try:
+                state = WalkState.model_validate_json(row[0])
+            except ValueError:
+                continue
+            if state.session.status in {"ACTIVE", "PAUSED"}:
+                return state
+        return None
+
     def clear(self) -> None:
         with self._lock, self._connection:
+            self._connection.execute("DELETE FROM walks")
             self._connection.execute("DELETE FROM route_versions")
             self._connection.execute("DELETE FROM routes")
 

@@ -8,9 +8,13 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
+import java.util.TimeZone;
 import java.util.UUID;
 
 final class ApiClient {
@@ -103,6 +107,32 @@ final class ApiClient {
             this.message = message;
             this.retryAfterSeconds = retryAfterSeconds;
             this.items = items;
+        }
+    }
+
+    static final class WalkResult {
+        final boolean success;
+        final String message;
+        final String walkId;
+        final String status;
+        final int currentPointOrder;
+        final int remainingMinutes;
+        final boolean pointReached;
+        final int distanceMeters;
+        final String errorCode;
+
+        WalkResult(boolean success, String message, String walkId, String status,
+                   int currentPointOrder, int remainingMinutes, boolean pointReached,
+                   int distanceMeters, String errorCode) {
+            this.success = success;
+            this.message = message;
+            this.walkId = walkId;
+            this.status = status;
+            this.currentPointOrder = currentPointOrder;
+            this.remainingMinutes = remainingMinutes;
+            this.pointReached = pointReached;
+            this.distanceMeters = distanceMeters;
+            this.errorCode = errorCode;
         }
     }
 
@@ -200,6 +230,37 @@ final class ApiClient {
         }
     }
 
+    static WalkResult startWalk(String routeId, int routeVersion, String sessionId)
+            throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("routeVersion", routeVersion);
+        return sendWalk("/v1/routes/" + routeId + "/walks", "POST", payload, sessionId);
+    }
+
+    static WalkResult getWalk(String walkId, String sessionId) throws Exception {
+        return sendWalk("/v1/walks/" + walkId, "GET", null, sessionId);
+    }
+
+    static WalkResult sendWalkPosition(String walkId, String sessionId,
+                                       double lat, double lon, double accuracyMeters,
+                                       long measuredAtMillis) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("lat", lat);
+        payload.put("lon", lon);
+        payload.put("accuracyMeters", Math.max(0.0, accuracyMeters));
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
+        format.setTimeZone(TimeZone.getTimeZone("UTC"));
+        payload.put("measuredAt", format.format(new Date(measuredAtMillis)));
+        return sendWalk("/v1/walks/" + walkId + "/positions", "POST", payload, sessionId);
+    }
+
+    static WalkResult walkAction(String walkId, String sessionId, String action)
+            throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("action", action);
+        return sendWalk("/v1/walks/" + walkId + "/actions", "POST", payload, sessionId);
+    }
+
     static SearchResult searchPlaces(String cityId, String query, String sessionId) throws Exception {
         if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
             return new SearchResult(false, "Сборка не подключена к backend.", 0,
@@ -253,6 +314,60 @@ final class ApiClient {
         } finally {
             connection.disconnect();
         }
+    }
+
+    private static WalkResult sendWalk(String path, String method, JSONObject payload,
+                                       String sessionId) throws Exception {
+        if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
+            return new WalkResult(false, "Сборка не подключена к backend.", null, null,
+                    0, 0, false, -1, null);
+        }
+        HttpURLConnection connection = open(path, method, sessionId);
+        if (payload != null) {
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+        }
+        try {
+            if (payload != null) {
+                byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(bytes);
+                }
+            }
+            int status = connection.getResponseCode();
+            JSONObject response = readJson(connection, status);
+            if (status >= 400) {
+                Result error = routeError(response, status);
+                return new WalkResult(false, error.message, null, null, 0, 0,
+                        false, -1, error.errorCode);
+            }
+            boolean pointReached = response.optBoolean("pointReached", false);
+            int distance = response.has("distanceMeters") && !response.isNull("distanceMeters")
+                    ? response.getInt("distanceMeters") : -1;
+            JSONObject walk = response.optJSONObject("walk");
+            if (walk == null) walk = response;
+            String walkStatus = walk.getString("status");
+            int order = walk.has("currentPointOrder") && !walk.isNull("currentPointOrder")
+                    ? walk.getInt("currentPointOrder") : 0;
+            int remaining = walk.optInt("estimatedRemainingMinutes", 0);
+            String message = walkMessage(walkStatus, order, remaining, pointReached, distance);
+            return new WalkResult(true, message, walk.getString("walkId"), walkStatus,
+                    order, remaining, pointReached, distance, null);
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static String walkMessage(String status, int order, int remaining,
+                                      boolean reached, int distance) {
+        if (status.equals("COMPLETED")) return "Прогулка завершена — все точки пройдены.";
+        if (status.equals("STOPPED")) return "Прогулка остановлена.";
+        if (status.equals("PAUSED")) return "Прогулка на паузе. Осталось примерно " +
+                remaining + " мин.";
+        String prefix = reached ? "Точка достигнута. " : "";
+        String distanceText = distance >= 0 ? " · до точки ≈" + distance + " м" : "";
+        return prefix + "Следующая точка: " + order + distanceText +
+                " · осталось примерно " + remaining + " мин.";
     }
 
     private static Result getRouteResponse(String path, String sessionId, String cityId) throws Exception {
@@ -364,6 +479,10 @@ final class ApiClient {
         } else if (startSource.equals("CITY_CENTER") || response.optBoolean("approximateStart")) {
             summary.append("\nСтарт: центр выбранного города");
         }
+        if (response.has("maxWalkingMinutes") && !response.isNull("maxWalkingMinutes")) {
+            summary.append("\nМаксимум одного пешего перехода: ")
+                    .append(response.getInt("maxWalkingMinutes")).append(" мин.");
+        }
         JSONArray points = response.getJSONArray("points");
         JSONArray legs = response.getJSONArray("legs");
         summary.append("\n\nТочки маршрута:");
@@ -407,6 +526,10 @@ final class ApiClient {
             case "TIME_BUDGET_EXCEEDED": return message.isEmpty() ?
                     "Маршрут не помещается в выбранное время." : message;
             case "VERSION_CONFLICT": return "Маршрут уже изменился. Повторите правку с актуальной версии.";
+            case "ACTIVE_WALK_EXISTS": return "У вас уже есть активная прогулка. Сначала продолжите или завершите её.";
+            case "WALK_NOT_ACTIVE": return "Прогулка на паузе или уже завершена.";
+            case "WALK_INVALID_STATE": return message.isEmpty() ?
+                    "Это действие сейчас недоступно." : message;
             case "VALIDATION_ERROR": return "Проверьте город и текст запроса.";
             case "UNAUTHORIZED": return "Сессия истекла. Перезапустите приложение.";
             default: return message.isEmpty() ? "Не удалось получить маршрут: " + code : message;

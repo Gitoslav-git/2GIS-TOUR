@@ -78,10 +78,19 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         if elapsed_seconds + visit_minutes * 60 > target_seconds:
             skipped_for_budget = True
             continue
+        if (preview.maxWalkingMinutes is not None
+                and _approx_distance_meters(current, (candidate.lat, candidate.lon))
+                > preview.maxWalkingMinutes * 130):
+            # A direct distance already exceeding an optimistic walking speed
+            # cannot satisfy the user's limit; avoid an unnecessary Routing call.
+            continue
         try:
             leg = geo.walking_leg(current, (candidate.lat, candidate.lon),
                                   len(route_points), len(route_points) + 1)
         except GeoRouteNotFound:
+            continue
+        if (preview.maxWalkingMinutes is not None
+                and math.ceil(leg.durationSeconds / 60) > preview.maxWalkingMinutes):
             continue
         projected_seconds = elapsed_seconds + leg.durationSeconds + visit_minutes * 60
         if math.ceil(projected_seconds / 60) > preview.durationMinutes:
@@ -114,6 +123,10 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         warnings.append(f"Направление прогулки: {preview.directionHint}")
     if preview.preferShortWalks:
         warnings.append("При подборе отданы предпочтения коротким пешим переходам")
+    if preview.maxWalkingMinutes is not None:
+        warnings.append(
+            f"Каждый пеший переход — не более {preview.maxWalkingMinutes} мин."
+        )
     if approximate_start:
         warnings.append("Геопозиция и старт в тексте не указаны — маршрут начат от центра города")
     if location_hint:
@@ -130,7 +143,8 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         routeId=uuid4(), routeVersion=1, status="READY", cityId=payload.cityId,
         query=payload.query, filters=payload.filters, searchArea=search_area,
         approximateStart=approximate_start, startLat=start[0], startLon=start[1],
-        startSource=start_source, requestedMinutes=preview.durationMinutes,
+        startSource=start_source, maxWalkingMinutes=preview.maxWalkingMinutes,
+        requestedMinutes=preview.durationMinutes,
         totalMinutes=total_minutes, unusedMinutes=unused_minutes,
         points=route_points, legs=legs, warnings=warnings,
     )
@@ -169,6 +183,9 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
                                   len(route_points), len(route_points) + 1)
         except GeoRouteNotFound as exc:
             raise RouteNotFound() from exc
+        if (source.maxWalkingMinutes is not None
+                and math.ceil(leg.durationSeconds / 60) > source.maxWalkingMinutes):
+            raise RouteNotFound()
         projected_seconds = elapsed_seconds + leg.durationSeconds + visit_minutes * 60
         arrival = local_now + timedelta(seconds=elapsed_seconds + leg.durationSeconds)
         schedule_status = schedule_status_at(candidate.schedule, arrival, visit_minutes)
@@ -199,6 +216,7 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
         "Старт по указанному ориентиру:",
         "Направление прогулки:",
         "При подборе отданы предпочтения коротким пешим переходам",
+        "Каждый пеший переход — не более",
     )
     retained = [warning for warning in source.warnings
                 if warning.startswith(retained_prefixes)]

@@ -11,7 +11,7 @@
 Успешный ответ 200:
 
 ```json
-{"cityId":"tula","durationMinutes":120,"durationSource":"text","interests":["храмы"],"includeFood":true,"withChildren":false,"unusualPlaces":false,"centerOnly":true,"locationHint":"центр","startLocationHint":null,"directionHint":null,"preferShortWalks":false,"warnings":[]}
+{"cityId":"tula","durationMinutes":120,"durationSource":"text","interests":["храмы"],"includeFood":true,"withChildren":false,"unusualPlaces":false,"centerOnly":true,"locationHint":"центр","startLocationHint":null,"directionHint":null,"preferShortWalks":false,"maxWalkingMinutes":null,"warnings":[]}
 ```
 
 `durationSource` — `text`, `filter` или `default`; время по умолчанию 180 минут и сопровождается предупреждением. Выбранный фильтр имеет приоритет перед текстом. Для обязательного выбранного города и недопустимой длительности ответ `QUERY_NEEDS_CLARIFICATION` (422) содержит `details.fields` с `cityId` или `durationMinutes`. Выбранный город обязателен; отсутствие длительности в тексте допустимо при значении по умолчанию.
@@ -19,6 +19,8 @@
 `centerOnly=true` сохранён для совместимости этапов, если пользователь написал «в центре» или «по центру». Начиная с 0.4 универсальное поле `locationHint` также переносит стороны города, районы и ориентиры; разрешённая через GEO область возвращается в `Route.searchArea`.
 
 Начиная с 0.5.3 конкретный старт, направление движения и область прогулки больше не объединяются в `locationHint`: используются `startLocationHint`, `directionHint` и `locationHint` соответственно. `preferShortWalks` переносит пожелание коротких переходов в подбор порядка точек.
+
+Начиная с 0.6 пожелание «недалеко идти» даёт `maxWalkingMinutes=20`. Явный максимум или верхняя граница диапазона («между точками 15–20 минут») сохраняется числом. Такие фразы не могут становиться `locationHint` и не отправляются в 2ГИС как название района.
 
 Все ошибки имеют вид `{"error":{"code":"...","message":"...","details":{},"requestId":"..."}}`. `VALIDATION_ERROR` (400) — ошибочное тело или город, `UNAUTHORIZED` (401) — отсутствие совпадающей гостевой сессии, `LLM_AUTH_ERROR` (503) — неверный ключ или права, `LLM_UNAVAILABLE` (503) — не задан ключ/модель либо недоступен сервис, `LLM_INVALID_RESPONSE` (502) — ответ не прошёл структурную проверку. Секреты или сырой ответ провайдера в теле ошибки не возвращаются.
 

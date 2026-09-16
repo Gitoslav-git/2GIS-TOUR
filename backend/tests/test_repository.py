@@ -1,8 +1,9 @@
 from uuid import uuid4
 
 from gulyay.models import (CreateRoute, Filters, Route, RouteLeg, RoutePoint,
-                           SearchArea)
+                           SearchArea, StartWalk)
 from gulyay.repository import RouteRepository
+from gulyay.walk import start_walk
 
 
 def route(route_id, version=1):
@@ -60,3 +61,17 @@ def test_expired_guest_route_is_not_returned(monkeypatch):
             (str(route_id),),
         )
     assert repository.get(route_id, owner) is None
+
+
+def test_walk_state_is_persisted_and_removed_with_route():
+    repository = RouteRepository(":memory:")
+    owner, route_id = uuid4(), uuid4()
+    itinerary = route(route_id)
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+    repository.save_new(itinerary, owner, payload)
+    walk = start_walk(itinerary, StartWalk(routeVersion=1))
+    repository.save_walk(walk, owner)
+    assert repository.get_walk(walk.session.walkId, owner) is not None
+    assert repository.find_active_walk(owner).session.walkId == walk.session.walkId
+    assert repository.delete(route_id, owner) is True
+    assert repository.get_walk(walk.session.walkId, owner) is None

@@ -39,6 +39,7 @@ public final class MainActivity extends Activity {
     private Button addPlaceButton;
     private Button applyPointsButton;
     private Button mapButton;
+    private Button startWalkButton;
     private Button resetRouteButton;
     private Button locationButton;
     private LinearLayout pointEditor;
@@ -74,7 +75,7 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.5.4");
+        title.setText("Гуляй · версия 0.6");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
@@ -106,6 +107,11 @@ public final class MainActivity extends Activity {
         editPointsButton.setText("Редактировать точки");
         editPointsButton.setEnabled(false);
         column.addView(editPointsButton);
+        startWalkButton = new Button(this);
+        startWalkButton.setText("Начать прогулку");
+        startWalkButton.setEnabled(false);
+        startWalkButton.setVisibility(View.GONE);
+        column.addView(startWalkButton);
         mapButton = new Button(this);
         mapButton.setText("Показать на карте 2ГИС");
         mapButton.setEnabled(false);
@@ -183,10 +189,12 @@ public final class MainActivity extends Activity {
         } else {
             restoreRouteState();
             if (routeId == null) {
-                result.setText("Версия 0.5.4 выбирает старт по геопозиции или тексту и позволяет полностью сбросить маршрут.");
+                result.setText("Версия 0.6 поддерживает ограничение пеших переходов и прохождение маршрута.");
             }
         }
         editPointsButton.setEnabled(routeId != null);
+        startWalkButton.setEnabled(routeId != null);
+        startWalkButton.setVisibility(routeId != null ? View.VISIBLE : View.GONE);
         mapButton.setEnabled(routeId != null);
         resetRouteButton.setVisibility(routeId != null ? View.VISIBLE : View.GONE);
         submit.setOnClickListener(view -> generate());
@@ -198,12 +206,13 @@ public final class MainActivity extends Activity {
                 if (selected != null && startLat != null && startLon != null
                         && !locationMatchesCity(selected, startLat, startLon)) {
                     clearCoordinatesKeepingCity();
-                    locationStatus.setText("Город выбран вручную. Маршрут будет рассчитан от его области.");
+                    locationStatus.setText("Город выбран вручную. Если в пожеланиях нет старта, маршрут начнётся от центра города.");
                 }
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
         mapButton.setOnClickListener(view -> openMap());
+        startWalkButton.setOnClickListener(view -> startWalkOrContinue());
         resetRouteButton.setOnClickListener(view -> confirmRouteReset());
         editPointsButton.setOnClickListener(view -> loadPointEditor());
         moveUp.setOnClickListener(view -> moveSelectedPoint(-1));
@@ -268,6 +277,8 @@ public final class MainActivity extends Activity {
                     result.setText(finalResponse.message);
                     submit.setText("Изменить маршрут");
                     editPointsButton.setEnabled(true);
+                    startWalkButton.setEnabled(true);
+                    startWalkButton.setVisibility(View.VISIBLE);
                     mapButton.setEnabled(true);
                     resetRouteButton.setVisibility(View.VISIBLE);
                     currentPoints.clear();
@@ -496,6 +507,7 @@ public final class MainActivity extends Activity {
         requestInFlight = busy;
         submit.setEnabled(!busy);
         editPointsButton.setEnabled(!busy && routeId != null);
+        startWalkButton.setEnabled(!busy && routeId != null);
         mapButton.setEnabled(!busy && routeId != null);
         resetRouteButton.setEnabled(!busy && routeId != null);
         findPlaceButton.setEnabled(!busy);
@@ -517,6 +529,7 @@ public final class MainActivity extends Activity {
             if (!requestInFlight) {
                 submit.setEnabled(true);
                 editPointsButton.setEnabled(routeId != null);
+                startWalkButton.setEnabled(routeId != null);
                 mapButton.setEnabled(routeId != null);
                 resetRouteButton.setEnabled(routeId != null);
                 findPlaceButton.setEnabled(true);
@@ -527,6 +540,7 @@ public final class MainActivity extends Activity {
         }
         submit.setEnabled(false);
         editPointsButton.setEnabled(false);
+        startWalkButton.setEnabled(false);
         mapButton.setEnabled(false);
         resetRouteButton.setEnabled(false);
         findPlaceButton.setEnabled(false);
@@ -807,6 +821,59 @@ public final class MainActivity extends Activity {
         startActivity(intent);
     }
 
+    private void startWalkOrContinue() {
+        if (requestInFlight || routeId == null || routeCityId == null) return;
+        SharedPreferences walk = getSharedPreferences("active_walk", MODE_PRIVATE);
+        String activeWalkId = walk.getString("walkId", null);
+        String activeRouteId = walk.getString("routeId", null);
+        if (activeWalkId != null && routeId.equals(activeRouteId)) {
+            openWalkMap(activeWalkId);
+            return;
+        }
+        setNetworkBusy(true);
+        result.setText("Запускаем прогулку…");
+        final String requestedRouteId = routeId;
+        final int requestedVersion = routeVersion;
+        final String owner = sessionId();
+        network.execute(() -> {
+            ApiClient.WalkResult response;
+            try {
+                response = ApiClient.startWalk(
+                        requestedRouteId, requestedVersion, owner);
+            } catch (Exception exception) {
+                response = new ApiClient.WalkResult(false,
+                        "Не удалось запустить прогулку. Проверьте backend.", null, null,
+                        0, 0, false, -1, null);
+            }
+            ApiClient.WalkResult finalResponse = response;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (finalResponse.success) {
+                    getSharedPreferences("active_walk", MODE_PRIVATE).edit()
+                            .putString("walkId", finalResponse.walkId)
+                            .putString("routeId", requestedRouteId).apply();
+                    startWalkButton.setText("Продолжить прогулку");
+                    result.setText(lastSuccessfulResult == null ? finalResponse.message
+                            : lastSuccessfulResult + "\n\n" + finalResponse.message);
+                    openWalkMap(finalResponse.walkId);
+                } else {
+                    result.setText((lastSuccessfulResult == null ? "" :
+                            lastSuccessfulResult + "\n\n") + finalResponse.message);
+                }
+                finishNetwork(0);
+            });
+        });
+    }
+
+    private void openWalkMap(String walkId) {
+        Intent intent = new Intent(this, MapActivity.class);
+        intent.putExtra(MapActivity.EXTRA_ROUTE_ID, routeId);
+        intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
+        intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
+        intent.putExtra(MapActivity.EXTRA_WALK_ID, walkId);
+        startActivity(intent);
+    }
+
     private void confirmRouteReset() {
         if (requestInFlight || routeId == null) return;
         new AlertDialog.Builder(this)
@@ -855,6 +922,8 @@ public final class MainActivity extends Activity {
         pointEditor.setVisibility(View.GONE);
         submit.setText("Построить маршрут");
         editPointsButton.setEnabled(false);
+        startWalkButton.setEnabled(false);
+        startWalkButton.setVisibility(View.GONE);
         mapButton.setEnabled(false);
         resetRouteButton.setVisibility(View.GONE);
         result.setText(message);
@@ -862,6 +931,28 @@ public final class MainActivity extends Activity {
                 .remove("routeId").remove("routeVersion").remove("routeCityId")
                 .remove("lastSuccessfulResult").remove("routeQuery")
                 .remove("routeLocationDirty").apply();
+        getSharedPreferences("active_walk", MODE_PRIVATE).edit().clear().apply();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (startWalkButton == null) return;
+        SharedPreferences walk = getSharedPreferences("active_walk", MODE_PRIVATE);
+        String activeWalkId = walk.getString("walkId", null);
+        String activeRouteId = walk.getString("routeId", null);
+        boolean currentWalkActive = activeWalkId != null && routeId != null
+                && routeId.equals(activeRouteId);
+        startWalkButton.setText(currentWalkActive
+                ? "Продолжить прогулку" : "Начать прогулку");
+        if (currentWalkActive) {
+            submit.setEnabled(false);
+            editPointsButton.setEnabled(false);
+            resetRouteButton.setEnabled(false);
+        } else if (!requestInFlight) {
+            submit.setEnabled(true);
+            editPointsButton.setEnabled(routeId != null);
+            resetRouteButton.setEnabled(routeId != null);
+        }
     }
 
     @Override protected void onDestroy() {

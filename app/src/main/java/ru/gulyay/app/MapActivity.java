@@ -105,8 +105,9 @@ public final class MapActivity extends ComponentActivity {
         }
 
         String cityId = getIntent().getStringExtra(EXTRA_CITY_ID);
-        double[] center = "vladimir".equals(cityId)
-                ? new double[]{56.1291, 40.4075} : new double[]{54.1930, 37.6178};
+        double[] center = "moscow".equals(cityId) ? new double[]{55.7558, 37.6173}
+                : ("vladimir".equals(cityId) ? new double[]{56.1291, 40.4075}
+                : new double[]{54.1930, 37.6178});
         MapOptions options = new MapOptions();
         options.setPosition(camera(center[0], center[1], 12.5f));
         mapView = new MapView(this, options);

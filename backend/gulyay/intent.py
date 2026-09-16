@@ -89,7 +89,8 @@ def interpret(payload: CreateRoute, provider: IntentProvider) -> QueryPreview:
 
     city_text = parsed.cityText.strip().casefold() if parsed.cityText else None
     known_names = {"tula": {"тула", "туле", "тулу", "тулы", "тулой"},
-                   "vladimir": {"владимир", "владимире", "владимира", "владимиром"}}
+                   "vladimir": {"владимир", "владимире", "владимира", "владимиром"},
+                   "moscow": {"москва", "москве", "москву", "москвы", "москвой"}}
     if city_text and city_text not in known_names[payload.cityId]:
         raise IntentNeedsClarification(["cityId"])
 

@@ -96,6 +96,38 @@ def test_manual_search_returns_only_provider_candidates_near_selected_city():
     assert places[0].name == "Тульский кремль"
 
 
+def test_automatic_search_rejects_ritual_and_unrelated_branches():
+    def mixed(request):
+        items = [
+            {"id": "ritual", "name": "Ритуал, бюро ритуальных услуг",
+             "point": {"lat": 54.194, "lon": 37.618},
+             "rubrics": [{"name": "Ритуальные услуги"}], "is_routing_available": True},
+            {"id": "shop", "name": "Магазин у дома",
+             "point": {"lat": 54.195, "lon": 37.619},
+             "rubrics": [{"name": "Продукты"}], "is_routing_available": True},
+            {"id": "museum", "name": "Музей оружия",
+             "point": {"lat": 54.196, "lon": 37.620},
+             "rubrics": [{"name": "Музеи"}], "is_routing_available": True},
+        ]
+        return httpx.Response(200, json={"meta": {"code": 200}, "result": {"items": items}})
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(mixed))
+    area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
+    places = provider.search_places("tula", preview(), area)
+    assert [place.placeId for place in places] == ["museum"]
+
+
+def test_food_search_does_not_turn_unrelated_branch_into_restaurant():
+    def unrelated(request):
+        item = {"id": "ritual", "name": "Ритуальные услуги",
+                "point": {"lat": 54.194, "lon": 37.618},
+                "rubrics": [{"name": "Ритуальные услуги"}], "is_routing_available": True}
+        return httpx.Response(200, json={"meta": {"code": 200}, "result": {"items": [item]}})
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(unrelated))
+    food_preview = preview().model_copy(update={"includeFood": True})
+    area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
+    assert provider.search_places("tula", food_preview, area) == []
+
+
 def test_resolve_places_batches_ids_and_restores_requested_order():
     calls = []
     def by_id(request):

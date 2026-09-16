@@ -38,6 +38,7 @@ public final class MainActivity extends Activity {
     private Button applyPointsButton;
     private Button mapButton;
     private Button locationButton;
+    private Button clearLocationButton;
     private LinearLayout pointEditor;
     private Spinner routePointSpinner;
     private Spinner foundPlaceSpinner;
@@ -70,7 +71,7 @@ public final class MainActivity extends Activity {
         scroll.addView(column);
 
         TextView title = new TextView(this);
-        title.setText("Гуляй · версия 0.5");
+        title.setText("Гуляй · версия 0.5.1");
         title.setTextSize(27);
         column.addView(title);
         TextView intro = new TextView(this);
@@ -79,11 +80,15 @@ public final class MainActivity extends Activity {
         column.addView(intro);
         city = new Spinner(this);
         city.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"Тула", "Владимир"}));
+                new String[]{"Тула", "Владимир", "Москва"}));
         column.addView(city);
         locationButton = new Button(this);
-        locationButton.setText("Определить геопозицию");
+        locationButton.setText("Обновить геопозицию");
         column.addView(locationButton);
+        clearLocationButton = new Button(this);
+        clearLocationButton.setText("Использовать без геопозиции");
+        clearLocationButton.setEnabled(false);
+        column.addView(clearLocationButton);
         locationStatus = new TextView(this);
         locationStatus.setText("Без геопозиции старт будет рассчитан от выбранной области города.");
         column.addView(locationStatus);
@@ -169,13 +174,14 @@ public final class MainActivity extends Activity {
         } else {
             restoreRouteState();
             if (routeId == null) {
-                result.setText("Версия 0.5 показывает маршрут и точки на встроенной карте 2ГИС.");
+                result.setText("Версия 0.5.1 показывает маршрут и точки на встроенной карте 2ГИС.");
             }
         }
         editPointsButton.setEnabled(routeId != null);
         mapButton.setEnabled(routeId != null);
         submit.setOnClickListener(view -> generate());
         locationButton.setOnClickListener(view -> toggleLocation());
+        clearLocationButton.setOnClickListener(view -> clearLocation());
         mapButton.setOnClickListener(view -> openMap());
         editPointsButton.setOnClickListener(view -> loadPointEditor());
         moveUp.setOnClickListener(view -> moveSelectedPoint(-1));
@@ -200,7 +206,12 @@ public final class MainActivity extends Activity {
             return;
         }
         setNetworkBusy(true);
-        String cityId = city.getSelectedItemPosition() == 0 ? "tula" : "vladimir";
+        String cityId = selectedCityId();
+        if (startLat != null && startLon != null && !locationMatchesCity(cityId, startLat, startLon)) {
+            clearLocation();
+            locationStatus.setText("Полученные координаты находятся вне выбранного города. " +
+                    "VPN не меняет GPS: задайте Location эмулятора вручную и обновите геопозицию.");
+        }
         boolean revise = routeId != null && cityId.equals(routeCityId) && !routeLocationDirty;
         String previous = lastSuccessfulResult;
         result.setText(revise ? "Пересчитываем маршрут…" : "Разбираем пожелания и строим маршрут…");
@@ -529,7 +540,7 @@ public final class MainActivity extends Activity {
             routeId = null;
             return;
         }
-        city.setSelection("vladimir".equals(routeCityId) ? 1 : 0);
+        city.setSelection("moscow".equals(routeCityId) ? 2 : ("vladimir".equals(routeCityId) ? 1 : 0));
         query.setText(preferences.getString("routeQuery", ""));
         result.setText(lastSuccessfulResult);
         submit.setText("Изменить маршрут");
@@ -555,18 +566,6 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleLocation() {
-        if (startLat != null && startLon != null) {
-            startLat = null;
-            startLon = null;
-            startAccuracyMeters = null;
-            locationButton.setText("Определить геопозицию");
-            locationStatus.setText("Геопозиция сброшена. Старт будет рассчитан от области города.");
-            getPreferences(MODE_PRIVATE).edit()
-                    .remove("startLatBits").remove("startLonBits")
-                    .remove("startAccuracyBits").apply();
-            markRouteLocationDirty();
-            return;
-        }
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) !=
                 PackageManager.PERMISSION_GRANTED &&
                 checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) !=
@@ -597,14 +596,10 @@ public final class MainActivity extends Activity {
             return;
         }
         locationButton.setEnabled(false);
-        locationStatus.setText("Определяем текущую позицию…");
-        Location cached = null;
-        try {
-            cached = locationManager.getLastKnownLocation(provider);
-        } catch (SecurityException ignored) { }
-        if (cached != null && System.currentTimeMillis() - cached.getTime() < 120_000L) {
-            acceptLocation(cached);
-            return;
+        locationStatus.setText("Запрашиваем новые координаты у " + provider + "…");
+        if (locationListener != null) {
+            try { locationManager.removeUpdates(locationListener); } catch (SecurityException ignored) { }
+            locationListener = null;
         }
         locationListener = new LocationListener() {
             @Override public void onLocationChanged(Location location) {
@@ -622,7 +617,7 @@ public final class MainActivity extends Activity {
                 locationListener = null;
                 locationButton.setEnabled(true);
                 locationStatus.setText("Не удалось получить координаты. Маршрут можно построить без них.");
-            }, 12_000L);
+            }, 20_000L);
         } catch (SecurityException error) {
             locationButton.setEnabled(true);
             locationStatus.setText("Нет разрешения на геопозицию.");
@@ -633,6 +628,13 @@ public final class MainActivity extends Activity {
         if (locationManager != null && locationListener != null) {
             locationManager.removeUpdates(locationListener);
             locationListener = null;
+        }
+        String cityId = selectedCityId();
+        if (!locationMatchesCity(cityId, location.getLatitude(), location.getLongitude())) {
+            locationButton.setEnabled(true);
+            locationStatus.setText("GPS вернул координаты вне выбранного города. VPN на GPS не влияет. " +
+                    "В эмуляторе: … → Location → задайте точку в городе → Send, затем обновите здесь.");
+            return;
         }
         startLat = location.getLatitude();
         startLon = location.getLongitude();
@@ -648,10 +650,38 @@ public final class MainActivity extends Activity {
     }
 
     private void showLocation() {
-        locationButton.setText("Сбросить геопозицию");
+        locationButton.setText("Обновить геопозицию");
+        if (clearLocationButton != null) clearLocationButton.setEnabled(true);
         locationStatus.setText(String.format(java.util.Locale.US,
                 "Старт по геопозиции: %.5f, %.5f (точность ±%.0f м)",
                 startLat, startLon, startAccuracyMeters == null ? 100.0 : startAccuracyMeters));
+    }
+
+    private void clearLocation() {
+        startLat = null;
+        startLon = null;
+        startAccuracyMeters = null;
+        locationButton.setText("Обновить геопозицию");
+        clearLocationButton.setEnabled(false);
+        locationStatus.setText("Старт будет рассчитан от выбранной области города.");
+        getPreferences(MODE_PRIVATE).edit()
+                .remove("startLatBits").remove("startLonBits")
+                .remove("startAccuracyBits").apply();
+        markRouteLocationDirty();
+    }
+
+    private String selectedCityId() {
+        int position = city.getSelectedItemPosition();
+        return position == 2 ? "moscow" : (position == 1 ? "vladimir" : "tula");
+    }
+
+    private static boolean locationMatchesCity(String cityId, double lat, double lon) {
+        double centerLat = 54.1930, centerLon = 37.6178, limitKm = 50.0;
+        if ("vladimir".equals(cityId)) { centerLat = 56.1291; centerLon = 40.4075; }
+        if ("moscow".equals(cityId)) { centerLat = 55.7558; centerLon = 37.6173; limitKm = 80.0; }
+        double latKm = (lat - centerLat) * 111.32;
+        double lonKm = (lon - centerLon) * 111.32 * Math.cos(Math.toRadians(centerLat));
+        return Math.sqrt(latKm * latKm + lonKm * lonKm) <= limitKm;
     }
 
     private void markRouteLocationDirty() {

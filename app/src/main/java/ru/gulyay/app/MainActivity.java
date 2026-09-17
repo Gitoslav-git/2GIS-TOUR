@@ -13,7 +13,10 @@ import android.os.Bundle;
 import android.os.Looper;
 import android.graphics.Typeface;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.ArrayAdapter;
 import android.widget.AdapterView;
 import android.widget.Button;
@@ -74,6 +77,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
         column.setBackgroundColor(0xFFFAFBFA);
@@ -183,19 +187,28 @@ public final class MainActivity extends Activity {
 
         submit = UiKit.button(this, "Построить маршрут", UiKit.GREEN, 0xFFFFFFFF);
         submit.setTextSize(compact ? 13 : 14);
+        submit.setSingleLine(true);
+        submit.setMinWidth(0);
+        submit.setMinHeight(0);
+        submit.setPadding(UiKit.dp(this, 5), 0, UiKit.dp(this, 5), 0);
         returnToRouteButton = UiKit.button(this, "Вернуться к маршруту", UiKit.SOFT,
                 UiKit.GREEN_DARK);
         returnToRouteButton.setTextSize(compact ? 12 : 13);
+        returnToRouteButton.setSingleLine(true);
+        returnToRouteButton.setMinWidth(0);
+        returnToRouteButton.setMinHeight(0);
+        returnToRouteButton.setPadding(UiKit.dp(this, 4), 0, UiKit.dp(this, 4), 0);
         returnToRouteButton.setVisibility(View.GONE);
         LinearLayout routeActions = new LinearLayout(this);
         routeActions.setOrientation(LinearLayout.HORIZONTAL);
         routeActions.setGravity(Gravity.CENTER_VERTICAL);
+        routeActions.setBaselineAligned(false);
         LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(
                 0, UiKit.dp(this, compact ? 48 : 54), 1f);
         routeActions.addView(submit, submitParams);
         LinearLayout.LayoutParams returnParams = new LinearLayout.LayoutParams(
-                0, UiKit.dp(this, compact ? 48 : 54), 1f);
-        returnParams.leftMargin = UiKit.dp(this, 8);
+                0, UiKit.dp(this, compact ? 48 : 54), 1.18f);
+        returnParams.leftMargin = UiKit.dp(this, 6);
         routeActions.addView(returnToRouteButton, returnParams);
         LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
                 -1, UiKit.dp(this, compact ? 48 : 54));
@@ -357,6 +370,29 @@ public final class MainActivity extends Activity {
         updateQueryEditActions();
         showLocationRebuildIfNeeded();
         beginAutomaticLocationDetection();
+    }
+
+    @Override public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            View focused = getCurrentFocus();
+            if (focused instanceof EditText) {
+                int[] location = new int[2];
+                focused.getLocationOnScreen(location);
+                float x = event.getRawX();
+                float y = event.getRawY();
+                boolean outside = x < location[0] || x > location[0] + focused.getWidth()
+                        || y < location[1] || y > location[1] + focused.getHeight();
+                if (outside) {
+                    focused.clearFocus();
+                    InputMethodManager keyboard = (InputMethodManager)
+                            getSystemService(INPUT_METHOD_SERVICE);
+                    if (keyboard != null) {
+                        keyboard.hideSoftInputFromWindow(focused.getWindowToken(), 0);
+                    }
+                }
+            }
+        }
+        return super.dispatchTouchEvent(event);
     }
 
     private void addFilterStub(LinearLayout parent, String text) {

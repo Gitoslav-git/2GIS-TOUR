@@ -188,27 +188,37 @@ public final class MapActivity extends ComponentActivity {
         pointList.setOrientation(LinearLayout.VERTICAL);
         pointListScroll = new ScrollView(this);
         pointListScroll.setFillViewport(true);
-        pointListScroll.setVerticalScrollBarEnabled(false);
+        pointListScroll.setVerticalScrollBarEnabled(true);
+        pointListScroll.setScrollbarFadingEnabled(false);
+        pointListScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         pointListScroll.addView(pointList, new ScrollView.LayoutParams(-1, -2));
         sheet.addView(pointListScroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setGravity(Gravity.CENTER_VERTICAL);
+        actions.setBaselineAligned(false);
         editQuery = compactAction("Изменить маршрут");
         editPoints = compactAction("Редактировать точки");
         primaryAction = UiKit.button(this, "▶", UiKit.GREEN, 0xFFFFFFFF);
         primaryAction.setTextSize(22);
+        primaryAction.setMinWidth(0);
+        primaryAction.setMinHeight(0);
+        primaryAction.setPadding(0, 0, 0, 0);
         LinearLayout.LayoutParams editActionParams = new LinearLayout.LayoutParams(0,
                 UiKit.dp(this, compact ? 48 : 54), 1);
         editActionParams.rightMargin = UiKit.dp(this, 7);
         actions.addView(editQuery, editActionParams);
         LinearLayout.LayoutParams pointsActionParams = new LinearLayout.LayoutParams(0,
-                UiKit.dp(this, compact ? 48 : 54), 1);
+                UiKit.dp(this, compact ? 48 : 54), 1.12f);
         pointsActionParams.rightMargin = UiKit.dp(this, 7);
         actions.addView(editPoints, pointsActionParams);
         actions.addView(primaryAction, new LinearLayout.LayoutParams(
                 UiKit.dp(this, compact ? 52 : 58), UiKit.dp(this, compact ? 48 : 54)));
-        sheet.addView(actions);
+        LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, compact ? 52 : 58));
+        actionsParams.topMargin = UiKit.dp(this, 4);
+        sheet.addView(actions, actionsParams);
         pauseResume = UiKit.button(this, "Пауза", UiKit.SOFT, UiKit.TEXT);
         pauseResume.setVisibility(View.GONE);
         stopWalk = primaryAction;
@@ -257,6 +267,7 @@ public final class MapActivity extends ComponentActivity {
         if (application.sdkContext() == null) {
             mapPlaceholder.setText("Карта 2ГИС пока недоступна\nМаршрут и точки работают без неё");
         } else {
+            mapContainer.removeView(mapPlaceholder);
             String cityId = getIntent().getStringExtra(EXTRA_CITY_ID);
             double[] center = "moscow".equals(cityId) ? new double[]{55.7558, 37.6173}
                     : ("vladimir".equals(cityId) ? new double[]{56.1291, 40.4075}
@@ -265,6 +276,8 @@ public final class MapActivity extends ComponentActivity {
             options.setPosition(camera(center[0], center[1], 12.5f));
             mapView = new MapView(this, options);
             mapView.setId(R.id.route_map_view);
+            mapView.setClickable(true);
+            mapView.setFocusable(true);
             getLifecycle().addObserver(mapView);
             mapContainer.addView(mapView, 0, new FrameLayout.LayoutParams(-1, -1));
             mapView.getMapAsync(readyMap -> {
@@ -283,8 +296,9 @@ public final class MapActivity extends ComponentActivity {
 
     private Button compactAction(String text) {
         Button button = UiKit.button(this, text, 0xFFFFFFFF, UiKit.GREEN_DARK);
-        button.setTextSize(11);
-        button.setPadding(UiKit.dp(this, 5), 0, UiKit.dp(this, 5), 0);
+        button.setTextSize(12);
+        button.setSingleLine(true);
+        button.setPadding(UiKit.dp(this, 3), 0, UiKit.dp(this, 3), 0);
         button.setMinWidth(0);
         button.setMinHeight(0);
         button.setBackground(UiKit.bordered(0xFFFFFFFF, UiKit.GREEN, 14, this));
@@ -356,12 +370,12 @@ public final class MapActivity extends ComponentActivity {
         pointList.removeAllViews();
         if (route == null || route.points.isEmpty()) return;
         int start = currentOrder > 0 ? currentOrder : 1;
-        int end = Math.min(route.points.size(), start + 3);
+        int end = route.points.size();
         for (int i = start; i < end; i++) {
             ApiClient.PlaceOption point = route.points.get(i);
             LinearLayout row = new LinearLayout(this);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(0, UiKit.dp(this, 2), 0, UiKit.dp(this, 2));
+            row.setPadding(0, UiKit.dp(this, 4), UiKit.dp(this, 5), UiKit.dp(this, 4));
             TextView number = UiKit.label(this, String.valueOf(i + 1), 14, 0xFFFFFFFF);
             number.setGravity(Gravity.CENTER);
             number.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -370,16 +384,15 @@ public final class MapActivity extends ComponentActivity {
             row.addView(number, new LinearLayout.LayoutParams(
                     UiKit.dp(this, 32), UiKit.dp(this, 32)));
             String suffix = point.food ? " • заведение" : "";
-            if (i == end - 1 && end < route.points.size()) {
-                suffix += "  • ещё " + (route.points.size() - end);
-            }
             TextView name = UiKit.label(this, point.name + suffix, 13, UiKit.TEXT);
             name.setMaxLines(2);
             name.setEllipsize(android.text.TextUtils.TruncateAt.END);
             name.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 8), 0);
             row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
-            pointList.addView(row, new LinearLayout.LayoutParams(-1, 0, 1));
+            pointList.addView(row, new LinearLayout.LayoutParams(
+                    -1, UiKit.dp(this, 48)));
         }
+        pointListScroll.post(() -> pointListScroll.scrollTo(0, 0));
     }
 
     private void enterPointEditing() {

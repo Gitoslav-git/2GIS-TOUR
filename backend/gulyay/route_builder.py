@@ -66,10 +66,10 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     skipped_for_budget = False
     local_now = now or datetime.now(city_timezone())
 
-    # Stop near the requested budget and cap first-build traffic to 10 real Routing checks.
+    # Stop near the requested budget and cap first-build traffic to six real Routing checks.
     target_seconds = preview.durationMinutes * 60
     satisfactory_seconds = math.floor(target_seconds * 0.9)
-    for candidate in candidates[:10]:
+    for candidate in candidates[:6]:
         if len(route_points) >= 8 or elapsed_seconds >= satisfactory_seconds:
             break
         visit_minutes = 60 if candidate.isFood else 40

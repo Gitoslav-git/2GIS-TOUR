@@ -96,8 +96,8 @@ def places(cityId: str, q: str = Query(min_length=2, max_length=120),
         return failure("GEO_UNAVAILABLE", "Ключ 2ГИС не принят сервером", 503, request_id,
                        {"reason": "authentication"})
     except GeoRateLimited as exc:
-        return failure("RATE_LIMITED", f"Лимит запросов 2ГИС. Повторите через {exc.retry_after_seconds} сек.",
-                       429, request_id, {"retryAfterSeconds": exc.retry_after_seconds,
+        return failure("DGIS_RATE_LIMITED", f"2ГИС временно ограничил запросы. Повторите через {exc.retry_after_seconds} сек.",
+                       503, request_id, {"retryAfterSeconds": exc.retry_after_seconds,
                                          "dependency": "2gis"},
                        {"Retry-After": str(exc.retry_after_seconds)})
     except (GeoInvalidResponse, GeoUnavailable):
@@ -356,9 +356,9 @@ def revise_route(route_id: UUID, revision: RouteRevision,
             return failure("GEO_UNAVAILABLE", "Ключ 2ГИС не принят сервером", 503, request_id,
                            {"reason": "authentication"})
         except GeoRateLimited as exc:
-            return failure("RATE_LIMITED",
-                           f"Лимит запросов 2ГИС. Повторите через {exc.retry_after_seconds} сек.",
-                           429, request_id, {"retryAfterSeconds": exc.retry_after_seconds,
+            return failure("DGIS_RATE_LIMITED",
+                           f"2ГИС временно ограничил запросы. Повторите через {exc.retry_after_seconds} сек.",
+                           503, request_id, {"retryAfterSeconds": exc.retry_after_seconds,
                                              "dependency": "2gis"},
                            {"Retry-After": str(exc.retry_after_seconds)})
         except (GeoInvalidResponse, GeoUnavailable):
@@ -411,7 +411,7 @@ def _build(payload: CreateRoute, intent_provider: OpenAIIntentProvider,
                        {"reason": "authentication"})
     except GeoRateLimited as exc:
         seconds = exc.retry_after_seconds
-        return failure("RATE_LIMITED", f"Лимит запросов 2ГИС. Повторите через {seconds} сек.", 429,
+        return failure("DGIS_RATE_LIMITED", f"2ГИС временно ограничил запросы. Повторите через {seconds} сек.", 503,
                        request_id, {"retryAfterSeconds": seconds, "dependency": "2gis"},
                        {"Retry-After": str(seconds)})
     except GeoConstraintNotFound:

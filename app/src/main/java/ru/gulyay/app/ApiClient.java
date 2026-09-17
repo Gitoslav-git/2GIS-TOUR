@@ -535,7 +535,8 @@ final class ApiClient {
 
     private static String humanError(String code, String message) {
         switch (code) {
-            case "RATE_LIMITED": return message.isEmpty() ? "Лимит запросов 2ГИС. Подождите и повторите." : message;
+            case "RATE_LIMITED": return message.isEmpty() ? "Слишком много запросов приложения. Подождите и повторите." : message;
+            case "DGIS_RATE_LIMITED": return message.isEmpty() ? "2ГИС временно ограничил запросы. Подождите и повторите." : message;
             case "GEO_UNAVAILABLE": return message.isEmpty() ? "Данные 2ГИС недоступны. Попробуйте позже." : message;
             case "GEO_CONSTRAINT_NOT_FOUND": return "Не удалось найти указанную часть города. Сформулируйте район или ориентир точнее.";
             case "LLM_UNAVAILABLE": return "Разбор запроса недоступен. Проверьте ключ LLM и работу backend.";

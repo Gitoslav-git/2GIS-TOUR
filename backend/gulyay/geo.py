@@ -5,6 +5,7 @@ There is deliberately no straight-line or synthetic-place fallback.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
@@ -17,6 +18,9 @@ from typing import Callable, Protocol
 import httpx
 
 from .models import PlaceCandidate, QueryPreview, RouteLeg, SearchArea
+
+
+LOGGER = logging.getLogger("gulyay.2gis")
 
 
 class GeoUnavailable(Exception):
@@ -105,15 +109,19 @@ _ROUTING_CACHE = _TtlCache()
 _UPSTREAM_SLOTS = threading.BoundedSemaphore(2)
 _RATE_LIMIT_LOCK = threading.Lock()
 _RATE_LIMITED_UNTIL = 0.0
+_UPSTREAM_PACE_LOCK = threading.Lock()
+_NEXT_UPSTREAM_AT = 0.0
 
 
 def clear_geo_caches() -> None:
     """Test/support hook; production caches normally expire without manual clearing."""
-    global _RATE_LIMITED_UNTIL
+    global _RATE_LIMITED_UNTIL, _NEXT_UPSTREAM_AT
     _PLACES_CACHE.clear()
     _ROUTING_CACHE.clear()
     with _RATE_LIMIT_LOCK:
         _RATE_LIMITED_UNTIL = 0.0
+    with _UPSTREAM_PACE_LOCK:
+        _NEXT_UPSTREAM_AT = 0.0
 
 
 class DgisGeoProvider:
@@ -126,7 +134,11 @@ class DgisGeoProvider:
         self.transport = transport
         self.sleeper = sleeper
         self.clock = clock
-        self.max_retries = _bounded_int("DGIS_MAX_RETRIES", 2, 0, 4)
+        self.max_retries = _bounded_int("DGIS_MAX_RETRIES", 1, 0, 4)
+        # Tests use a mock transport. Only real upstream traffic needs pacing.
+        self.min_request_interval = (0.0 if transport is not None else
+                                     _bounded_float("DGIS_MIN_REQUEST_INTERVAL_SECONDS",
+                                                    0.75, 0.0, 5.0))
         self.places_ttl = _bounded_int("DGIS_PLACES_CACHE_SECONDS", 900, 60, 86400)
         self.routing_ttl = _bounded_int("DGIS_ROUTING_CACHE_SECONDS", 1800, 60, 86400)
 
@@ -149,6 +161,7 @@ class DgisGeoProvider:
                 raise GeoRateLimited(remaining)
             try:
                 with _UPSTREAM_SLOTS:
+                    self._pace_upstream()
                     with self._client() as client:
                         response = client.request(method, url, **kwargs)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
@@ -158,18 +171,29 @@ class DgisGeoProvider:
                 continue
 
             if response.status_code == 429:
-                retry_after = _retry_after(response, default=min(2 ** attempt, 5))
-                if attempt < self.max_retries:
-                    self.sleeper(retry_after)
-                    continue
+                # Never retry a quota response immediately: it only extends the block.
+                retry_after = _retry_after(response, default=30)
                 with _RATE_LIMIT_LOCK:
                     _RATE_LIMITED_UNTIL = max(_RATE_LIMITED_UNTIL, self.clock() + retry_after)
+                LOGGER.warning("2GIS rate limit reached: host=%s retry_after=%ss",
+                               httpx.URL(url).host, retry_after)
                 raise GeoRateLimited(retry_after)
             if response.status_code in (502, 503, 504) and attempt < self.max_retries:
                 self.sleeper(min(0.5 * (2 ** attempt), 2.0))
                 continue
             return self._read_json(response)
         raise GeoUnavailable()
+
+    def _pace_upstream(self) -> None:
+        global _NEXT_UPSTREAM_AT
+        if self.min_request_interval <= 0:
+            return
+        with _UPSTREAM_PACE_LOCK:
+            now = self.clock()
+            delay = max(0.0, _NEXT_UPSTREAM_AT - now)
+            _NEXT_UPSTREAM_AT = max(now, _NEXT_UPSTREAM_AT) + self.min_request_interval
+        if delay > 0:
+            self.sleeper(delay)
 
     @staticmethod
     def _read_json(response: httpx.Response) -> dict:
@@ -264,11 +288,11 @@ class DgisGeoProvider:
         else:
             # A generic walk needs schedule diversity: outdoor places remain available
             # when museums have already closed.
-            queries = ["достопримечательности", "парки и скверы", "памятники"]
+            queries = ["достопримечательности", "парки и скверы"]
         if preview.unusualPlaces:
-            queries.append("необычные достопримечательности")
-        # At most three interest searches plus one food search keeps first-build traffic bounded.
-        requests = [(query, False) for query in queries[:3]]
+            queries = ["необычные достопримечательности", *queries]
+        # At most two interest searches plus one food search keeps first-build traffic bounded.
+        requests = [(query, False) for query in queries[:2]]
         if preview.includeFood:
             requests.append(("кафе ресторан", True))
 
@@ -361,6 +385,14 @@ class DgisGeoProvider:
 def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
     try:
         value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def _bounded_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
     except ValueError:
         return default
     return max(minimum, min(maximum, value))

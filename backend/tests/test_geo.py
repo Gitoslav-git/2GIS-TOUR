@@ -86,7 +86,7 @@ def test_generic_walk_searches_outdoor_places_to_fill_evening_route():
     generic = preview(center=True).model_copy(update={"interests": []})
     area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
     provider.search_places("tula", generic, area)
-    assert queries == ["достопримечательности", "парки и скверы", "памятники"]
+    assert queries == ["достопримечательности", "парки и скверы"]
 
 
 def test_manual_search_returns_only_provider_candidates_near_selected_city():
@@ -203,7 +203,22 @@ def test_places_and_routing_results_are_cached():
     assert calls == {"places": 1, "routing": 1}
 
 
-def test_rate_limit_retries_then_opens_circuit(monkeypatch):
+def test_upstream_calls_are_globally_paced_when_enabled():
+    now, sleeps = [100.0], []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+    provider = DgisGeoProvider("p", "r", transport, sleeper=sleep, clock=lambda: now[0])
+    provider.min_request_interval = 0.75
+    provider._request("GET", "https://catalog.api.2gis.com/test")
+    provider._request("GET", "https://catalog.api.2gis.com/test")
+    assert sleeps == [0.75]
+
+
+def test_rate_limit_does_not_retry_and_opens_circuit(monkeypatch):
     monkeypatch.setenv("DGIS_MAX_RETRIES", "1")
     calls, sleeps = [], []
     def limited(request):
@@ -214,10 +229,10 @@ def test_rate_limit_retries_then_opens_circuit(monkeypatch):
     with pytest.raises(GeoRateLimited) as first:
         provider.resolve_city_center("tula")
     assert first.value.retry_after_seconds == 3
-    assert sleeps == [3] and len(calls) == 2
+    assert sleeps == [] and len(calls) == 1
     with pytest.raises(GeoRateLimited):
         provider.resolve_city_center("tula")
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("status,error", [(401, GeoAuthenticationError), (500, GeoUnavailable)])

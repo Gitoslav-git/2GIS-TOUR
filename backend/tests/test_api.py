@@ -104,6 +104,7 @@ def test_client_is_limited_to_five_expensive_requests_per_minute():
     limited = client.get("/v1/places", headers=headers,
                          params={"cityId": "tula", "q": "кремль"})
     assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "RATE_LIMITED"
     assert limited.json()["error"]["details"]["dependency"] == "client"
     assert 1 <= int(limited.headers["Retry-After"]) <= 60
 
@@ -341,10 +342,11 @@ def test_2gis_rate_limit_has_retry_contract():
     session = str(uuid4())
     result = client.post("/v1/routes", headers={"X-Device-Session": session}, json={
         "cityId": "tula", "query": "История два часа", "deviceSessionId": session})
-    assert result.status_code == 429
+    assert result.status_code == 503
     assert result.headers["Retry-After"] == "17"
-    assert result.json()["error"]["code"] == "RATE_LIMITED"
+    assert result.json()["error"]["code"] == "DGIS_RATE_LIMITED"
     assert result.json()["error"]["details"]["retryAfterSeconds"] == 17
+    assert result.json()["error"]["details"]["dependency"] == "2gis"
 
 
 def test_route_requires_matching_guest_session():

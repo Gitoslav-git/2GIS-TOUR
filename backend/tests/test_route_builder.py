@@ -178,6 +178,19 @@ def test_route_adds_another_real_place_to_fill_requested_time():
     assert route.unusedMinutes == 30
 
 
+def test_first_build_checks_at_most_six_routing_candidates():
+    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True})
+              for index in range(1, 11)]
+    geo = FakeGeo(places)
+    route = build_route(
+        CreateRoute(cityId="tula", query="История 10 часов"),
+        preferences(durationMinutes=600), geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert len(geo.walking_starts) == 6
+    assert len(route.points) == 6
+
+
 def test_walking_limit_skips_long_leg_without_reporting_geo_failure():
     near = PlaceCandidate(placeId="near", name="Рядом", lat=54.194, lon=37.618,
                           rubrics=[], schedule={"is_24x7": True}, isFood=False)

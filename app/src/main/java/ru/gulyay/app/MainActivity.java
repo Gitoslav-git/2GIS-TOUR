@@ -72,33 +72,35 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(column);
+        column.setBackgroundColor(0xFFFAFBFA);
 
         int p = UiKit.dp(this, 20);
+        int screenHeightDp = getResources().getConfiguration().screenHeightDp;
+        boolean compact = screenHeightDp <= 720;
+        boolean veryCompact = screenHeightDp <= 640;
         FrameLayout hero = new FrameLayout(this);
         hero.setBackground(UiKit.hero(this));
-        column.addView(hero, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 270)));
-        TextView brand = UiKit.label(this, "● Гуляй", 31, 0xFFFFFFFF);
+        column.addView(hero, new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, veryCompact ? 150 : (compact ? 170 : 205))));
+        TextView brand = UiKit.label(this, "● Гуляй", compact ? 27 : 30, 0xFFFFFFFF);
         brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         FrameLayout.LayoutParams brandParams = new FrameLayout.LayoutParams(-2, -2);
         brandParams.leftMargin = p;
-        brandParams.topMargin = UiKit.dp(this, 28);
+        brandParams.topMargin = UiKit.dp(this, compact ? 16 : 24);
         hero.addView(brand, brandParams);
         TextView subtitle = UiKit.label(this, "Маршрут под настроение", 15, 0xE6FFFFFF);
         FrameLayout.LayoutParams subtitleParams = new FrameLayout.LayoutParams(-2, -2);
         subtitleParams.leftMargin = p;
-        subtitleParams.topMargin = UiKit.dp(this, 72);
+        subtitleParams.topMargin = UiKit.dp(this, compact ? 54 : 66);
         hero.addView(subtitle, subtitleParams);
         Button profile = UiKit.button(this, "☺", 0xE6FFFFFF, UiKit.TEXT);
         profile.setTextSize(22);
         profile.setMinWidth(UiKit.dp(this, 52));
         FrameLayout.LayoutParams profileParams = new FrameLayout.LayoutParams(
                 UiKit.dp(this, 52), UiKit.dp(this, 52), Gravity.TOP | Gravity.END);
-        profileParams.topMargin = UiKit.dp(this, 24);
+        profileParams.topMargin = UiKit.dp(this, compact ? 13 : 20);
         profileParams.rightMargin = p;
         hero.addView(profile, profileParams);
 
@@ -108,20 +110,21 @@ public final class MainActivity extends Activity {
         city.setPadding(UiKit.dp(this, 16), 0, UiKit.dp(this, 12), 0);
         city.setBackground(UiKit.rounded(0xEFFFFFFF, 18, this));
         FrameLayout.LayoutParams cityParams = new FrameLayout.LayoutParams(
-                -1, UiKit.dp(this, 56), Gravity.BOTTOM);
-        cityParams.setMargins(p, 0, p, UiKit.dp(this, 24));
+                -1, UiKit.dp(this, compact ? 48 : 54), Gravity.BOTTOM);
+        cityParams.setMargins(p, 0, p, UiKit.dp(this, compact ? 14 : 20));
         hero.addView(city, cityParams);
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(p, UiKit.dp(this, 22), p, UiKit.dp(this, 14));
-        column.addView(content);
-        TextView heading = UiKit.label(this, "Куда пойдём?", 26, UiKit.TEXT);
+        content.setPadding(p, UiKit.dp(this, compact ? 10 : 16), p,
+                UiKit.dp(this, compact ? 5 : 9));
+        column.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
+        TextView heading = UiKit.label(this, "Куда пойдём?", compact ? 22 : 25, UiKit.TEXT);
         heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         content.addView(heading);
         TextView intro = UiKit.label(this,
                 "Расскажите, как хотите провести прогулку", 15, UiKit.MUTED);
-        intro.setPadding(0, UiKit.dp(this, 3), 0, UiKit.dp(this, 14));
+        intro.setPadding(0, UiKit.dp(this, 1), 0, UiKit.dp(this, compact ? 5 : 8));
         content.addView(intro);
 
         locationButton = new Button(this);
@@ -129,23 +132,28 @@ public final class MainActivity extends Activity {
         locationStatus = new TextView(this);
         locationStatus.setText("Определяем город. Если не получится — выберите его в списке.");
         locationStatus.setTextColor(UiKit.MUTED);
-        locationStatus.setTextSize(12);
+        locationStatus.setTextSize(compact ? 11 : 12);
+        locationStatus.setMaxLines(compact ? 1 : 2);
+        locationStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
         content.addView(locationStatus);
         locationButton.setVisibility(View.GONE);
 
         query = new EditText(this);
         query.setHint("Например: хочу гулять 2 часа по центру и зайти поесть");
-        query.setMinLines(3);
-        query.setTextSize(16);
+        query.setMinLines(compact ? 2 : 3);
+        query.setMaxLines(compact ? 2 : 3);
+        query.setTextSize(compact ? 14 : 16);
         query.setGravity(Gravity.TOP);
         query.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14), UiKit.dp(this, 16), UiKit.dp(this, 14));
         query.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE0E5E1, 16, this));
-        LinearLayout.LayoutParams queryParams = new LinearLayout.LayoutParams(-1, -2);
-        queryParams.topMargin = UiKit.dp(this, 12);
+        LinearLayout.LayoutParams queryParams = new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, veryCompact ? 58 : (compact ? 64 : 82)));
+        queryParams.topMargin = UiKit.dp(this, compact ? 5 : 8);
         content.addView(query, queryParams);
 
         TextView filtersTitle = UiKit.label(this, "Быстрые фильтры", 14, UiKit.MUTED);
-        filtersTitle.setPadding(0, UiKit.dp(this, 14), 0, UiKit.dp(this, 8));
+        filtersTitle.setPadding(0, UiKit.dp(this, compact ? 6 : 9), 0,
+                UiKit.dp(this, compact ? 3 : 5));
         content.addView(filtersTitle);
         HorizontalScrollView filtersScroll = new HorizontalScrollView(this);
         filtersScroll.setHorizontalScrollBarEnabled(false);
@@ -156,19 +164,28 @@ public final class MainActivity extends Activity {
         addFilterStub(filters, "С детьми");
         addFilterStub(filters, "Поесть");
         addFilterStub(filters, "Необычное");
-        content.addView(filtersScroll);
+        addFilterStub(filters, "Без музеев");
+        addFilterStub(filters, "Мало ходить");
+        content.addView(filtersScroll, new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, compact ? 38 : 42)));
 
         submit = UiKit.button(this, "Построить маршрут", UiKit.GREEN, 0xFFFFFFFF);
-        LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 56));
-        submitParams.topMargin = UiKit.dp(this, 18);
+        LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, compact ? 48 : 54));
+        submitParams.topMargin = UiKit.dp(this, compact ? 8 : 12);
         content.addView(submit, submitParams);
         result = new TextView(this);
         result.setTextSize(14);
         result.setTextColor(UiKit.MUTED);
-        result.setPadding(0, UiKit.dp(this, 10), 0, UiKit.dp(this, 12));
-        content.addView(result);
+        result.setMaxLines(1);
+        result.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        result.setPadding(0, UiKit.dp(this, compact ? 3 : 6), 0,
+                UiKit.dp(this, compact ? 3 : 6));
+        content.addView(result, new LinearLayout.LayoutParams(-1,
+                UiKit.dp(this, compact ? 22 : 28)));
 
-        TextView historyTitle = UiKit.label(this, "История маршрутов", 20, UiKit.TEXT);
+        TextView historyTitle = UiKit.label(this, "История маршрутов",
+                compact ? 17 : 20, UiKit.TEXT);
         historyTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         content.addView(historyTitle);
         TextView history = UiKit.label(this,
@@ -176,7 +193,8 @@ public final class MainActivity extends Activity {
         history.setGravity(Gravity.CENTER);
         history.setBackground(UiKit.rounded(UiKit.SOFT, 16, this));
         LinearLayout.LayoutParams historyParams = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 86));
-        historyParams.topMargin = UiKit.dp(this, 10);
+        historyParams.height = UiKit.dp(this, compact ? 52 : 68);
+        historyParams.topMargin = UiKit.dp(this, compact ? 4 : 7);
         content.addView(history, historyParams);
 
         editPointsButton = new Button(this);
@@ -240,16 +258,15 @@ public final class MainActivity extends Activity {
 
         LinearLayout navigation = new LinearLayout(this);
         navigation.setGravity(Gravity.CENTER);
-        navigation.setPadding(p, UiKit.dp(this, 6), p, UiKit.dp(this, 10));
+        navigation.setPadding(p, UiKit.dp(this, 2), p, UiKit.dp(this, 2));
         navigation.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE6EAE7, 0, this));
-        Button homeTab = UiKit.button(this, "⌂  Главная", 0xFFFFFFFF, UiKit.GREEN_DARK);
-        Button routesTab = UiKit.button(this, "◇  Маршруты", 0xFFFFFFFF, UiKit.MUTED);
-        Button profileTab = UiKit.button(this, "○  Профиль", 0xFFFFFFFF, UiKit.MUTED);
-        navigation.addView(homeTab, new LinearLayout.LayoutParams(0, UiKit.dp(this, 50), 1));
-        navigation.addView(routesTab, new LinearLayout.LayoutParams(0, UiKit.dp(this, 50), 1));
-        navigation.addView(profileTab, new LinearLayout.LayoutParams(0, UiKit.dp(this, 50), 1));
+        Button homeTab = navigationTab("⌂\nГлавная", UiKit.GREEN_DARK);
+        Button profileTab = navigationTab("♙\nПрофиль", UiKit.MUTED);
+        int navigationHeight = UiKit.dp(this, veryCompact ? 48 : 54);
+        navigation.addView(homeTab, new LinearLayout.LayoutParams(0, navigationHeight, 1));
+        navigation.addView(profileTab, new LinearLayout.LayoutParams(0, navigationHeight, 1));
         column.addView(navigation);
-        setContentView(scroll);
+        setContentView(column);
 
         if (savedInstanceState != null) {
             city.setSelection(savedInstanceState.getInt("city"));
@@ -315,16 +332,27 @@ public final class MainActivity extends Activity {
     private void addFilterStub(LinearLayout parent, String text) {
         Button chip = UiKit.button(this, text, UiKit.SOFT, UiKit.TEXT);
         chip.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
-        chip.setMinHeight(UiKit.dp(this, 42));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, UiKit.dp(this, 42));
+        chip.setTextSize(14);
+        chip.setMinHeight(0);
+        chip.setMinWidth(0);
+        chip.setPadding(UiKit.dp(this, 16), 0, UiKit.dp(this, 16), 0);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -1);
         params.rightMargin = UiKit.dp(this, 8);
         parent.addView(chip, params);
-        chip.setOnClickListener(view -> {
-            boolean selected = !view.isSelected();
-            view.setSelected(selected);
-            chip.setTextColor(selected ? 0xFFFFFFFF : UiKit.TEXT);
-            chip.setBackground(UiKit.rounded(selected ? UiKit.GREEN : UiKit.SOFT, 14, this));
-        });
+    }
+
+    private Button navigationTab(String text, int color) {
+        Button tab = new Button(this);
+        tab.setText(text);
+        tab.setTextColor(color);
+        tab.setTextSize(12);
+        tab.setAllCaps(false);
+        tab.setGravity(Gravity.CENTER);
+        tab.setPadding(0, 0, 0, 0);
+        tab.setMinHeight(0);
+        tab.setMinWidth(0);
+        tab.setBackgroundColor(0x00000000);
+        return tab;
     }
 
     private void generate() {

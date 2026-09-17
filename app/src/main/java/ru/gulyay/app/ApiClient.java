@@ -63,6 +63,9 @@ final class ApiClient {
         final String errorCode;
         final List<PlaceOption> points;
         final List<GeoCoordinate> path;
+        int totalMinutes;
+        int requestedMinutes;
+        int totalDistanceMeters;
 
         Result(boolean success, String message, String routeId, int routeVersion) {
             this(success, message, routeId, routeVersion, 0, null,
@@ -92,6 +95,9 @@ final class ApiClient {
             this.errorCode = errorCode;
             this.points = points;
             this.path = path;
+            this.totalMinutes = -1;
+            this.requestedMinutes = -1;
+            this.totalDistanceMeters = -1;
         }
     }
 
@@ -308,9 +314,11 @@ final class ApiClient {
             if (status >= 400) {
                 return routeError(response, status);
             }
-            return new Result(true, routeSummary(response, cityId), response.getString("routeId"),
+            Result result = new Result(true, routeSummary(response, cityId), response.getString("routeId"),
                     response.getInt("routeVersion"), 0, null, routePoints(response),
                     routePath(response));
+            fillRouteMetrics(result, response);
+            return result;
         } finally {
             connection.disconnect();
         }
@@ -379,9 +387,11 @@ final class ApiClient {
             int status = connection.getResponseCode();
             JSONObject response = readJson(connection, status);
             if (status >= 400) return routeError(response, status);
-            return new Result(true, routeSummary(response, cityId), response.getString("routeId"),
+            Result result = new Result(true, routeSummary(response, cityId), response.getString("routeId"),
                     response.getInt("routeVersion"), 0, null, routePoints(response),
                     routePath(response));
+            fillRouteMetrics(result, response);
+            return result;
         } finally {
             connection.disconnect();
         }
@@ -438,6 +448,18 @@ final class ApiClient {
                     item.optBoolean("isFood"), item.getDouble("lat"), item.getDouble("lon")));
         }
         return points;
+    }
+
+    private static void fillRouteMetrics(Result result, JSONObject response) throws Exception {
+        result.totalMinutes = response.optInt("totalMinutes", -1);
+        result.requestedMinutes = response.optInt("requestedMinutes", result.totalMinutes);
+        JSONArray legs = response.optJSONArray("legs");
+        if (legs == null) return;
+        int distance = 0;
+        for (int i = 0; i < legs.length(); i++) {
+            distance += legs.getJSONObject(i).optInt("distanceMeters", 0);
+        }
+        result.totalDistanceMeters = distance;
     }
 
     private static List<GeoCoordinate> routePath(JSONObject response) throws Exception {

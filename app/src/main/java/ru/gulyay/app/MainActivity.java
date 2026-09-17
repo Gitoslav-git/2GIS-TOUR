@@ -39,6 +39,7 @@ public final class MainActivity extends Activity {
     private EditText query;
     private TextView result;
     private Button submit;
+    private Button returnToRouteButton;
     private Button editPointsButton;
     private Button findPlaceButton;
     private Button addPlaceButton;
@@ -69,6 +70,7 @@ public final class MainActivity extends Activity {
     private LocationManager locationManager;
     private LocationListener locationListener;
     private boolean locationResolved;
+    private boolean queryEditMode;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -155,10 +157,19 @@ public final class MainActivity extends Activity {
         filtersTitle.setPadding(0, UiKit.dp(this, compact ? 6 : 9), 0,
                 UiKit.dp(this, compact ? 3 : 5));
         content.addView(filtersTitle);
+        FrameLayout filtersViewport = new FrameLayout(this);
+        filtersViewport.setBackgroundColor(0xFFFAFBFA);
+        filtersViewport.setClipChildren(true);
+        filtersViewport.setClipToPadding(true);
         HorizontalScrollView filtersScroll = new HorizontalScrollView(this);
         filtersScroll.setHorizontalScrollBarEnabled(false);
+        filtersScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        filtersScroll.setClipChildren(true);
+        filtersScroll.setClipToPadding(true);
+        filtersScroll.setPadding(0, UiKit.dp(this, 2), UiKit.dp(this, 12), UiKit.dp(this, 2));
         LinearLayout filters = new LinearLayout(this);
         filters.setOrientation(LinearLayout.HORIZONTAL);
+        filters.setPadding(0, 0, UiKit.dp(this, 4), 0);
         filtersScroll.addView(filters);
         addFilterStub(filters, "2 часа");
         addFilterStub(filters, "С детьми");
@@ -166,14 +177,30 @@ public final class MainActivity extends Activity {
         addFilterStub(filters, "Необычное");
         addFilterStub(filters, "Без музеев");
         addFilterStub(filters, "Мало ходить");
-        content.addView(filtersScroll, new LinearLayout.LayoutParams(
-                -1, UiKit.dp(this, compact ? 38 : 42)));
+        filtersViewport.addView(filtersScroll, new FrameLayout.LayoutParams(-1, -1));
+        content.addView(filtersViewport, new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, compact ? 42 : 46)));
 
         submit = UiKit.button(this, "Построить маршрут", UiKit.GREEN, 0xFFFFFFFF);
+        submit.setTextSize(compact ? 13 : 14);
+        returnToRouteButton = UiKit.button(this, "Вернуться к маршруту", UiKit.SOFT,
+                UiKit.GREEN_DARK);
+        returnToRouteButton.setTextSize(compact ? 12 : 13);
+        returnToRouteButton.setVisibility(View.GONE);
+        LinearLayout routeActions = new LinearLayout(this);
+        routeActions.setOrientation(LinearLayout.HORIZONTAL);
+        routeActions.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(
+                0, UiKit.dp(this, compact ? 48 : 54), 1f);
+        routeActions.addView(submit, submitParams);
+        LinearLayout.LayoutParams returnParams = new LinearLayout.LayoutParams(
+                0, UiKit.dp(this, compact ? 48 : 54), 1f);
+        returnParams.leftMargin = UiKit.dp(this, 8);
+        routeActions.addView(returnToRouteButton, returnParams);
+        LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
                 -1, UiKit.dp(this, compact ? 48 : 54));
-        submitParams.topMargin = UiKit.dp(this, compact ? 8 : 12);
-        content.addView(submit, submitParams);
+        actionsParams.topMargin = UiKit.dp(this, compact ? 6 : 10);
+        content.addView(routeActions, actionsParams);
         result = new TextView(this);
         result.setTextSize(14);
         result.setTextColor(UiKit.MUTED);
@@ -290,6 +317,7 @@ public final class MainActivity extends Activity {
                 }
             }
             routeLocationDirty = savedInstanceState.getBoolean("routeLocationDirty", false);
+            queryEditMode = savedInstanceState.getBoolean("queryEditMode", false);
             if (routeId != null) submit.setText("Изменить маршрут");
         } else {
             restoreRouteState();
@@ -301,6 +329,7 @@ public final class MainActivity extends Activity {
         startWalkButton.setEnabled(routeId != null);
         mapButton.setEnabled(routeId != null);
         submit.setOnClickListener(view -> generate());
+        returnToRouteButton.setOnClickListener(view -> returnToCurrentRoute());
         locationButton.setOnClickListener(view -> toggleLocation());
         city.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
@@ -325,6 +354,7 @@ public final class MainActivity extends Activity {
         addPlaceButton.setOnClickListener(view -> addSelectedPlace());
         applyPointsButton.setOnClickListener(view -> applyPointChanges());
         applyCooldown();
+        updateQueryEditActions();
         showLocationRebuildIfNeeded();
         beginAutomaticLocationDetection();
     }
@@ -335,6 +365,8 @@ public final class MainActivity extends Activity {
         chip.setTextSize(14);
         chip.setMinHeight(0);
         chip.setMinWidth(0);
+        chip.setElevation(0f);
+        chip.setStateListAnimator(null);
         chip.setPadding(UiKit.dp(this, 16), 0, UiKit.dp(this, 16), 0);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -1);
         params.rightMargin = UiKit.dp(this, 8);
@@ -379,6 +411,7 @@ public final class MainActivity extends Activity {
         }
         boolean revise = routeId != null && cityId.equals(routeCityId) && !routeLocationDirty;
         String previous = lastSuccessfulResult;
+        final String activeWalkBeforeChange = activeWalkIdForCurrentRoute();
         result.setText(revise ? "Пересчитываем маршрут…" : "Разбираем пожелания и строим маршрут…");
         final String owner = sessionId();
         network.execute(() -> {
@@ -393,6 +426,11 @@ public final class MainActivity extends Activity {
                 response = new ApiClient.Result(false,
                         "Нет ответа от backend. Проверьте адрес сервера и доступность сети.", null, 0);
             }
+            if (response.success && activeWalkBeforeChange != null) {
+                try {
+                    ApiClient.walkAction(activeWalkBeforeChange, owner, "STOP");
+                } catch (Exception ignored) { }
+            }
             ApiClient.Result finalResponse = response;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
@@ -404,6 +442,10 @@ public final class MainActivity extends Activity {
                     routeLocationDirty = false;
                     lastSuccessfulResult = finalResponse.message;
                     result.setText(finalResponse.message);
+                    queryEditMode = false;
+                    persistQueryEditMode();
+                    updateQueryEditActions();
+                    if (activeWalkBeforeChange != null) clearActiveWalkState();
                     submit.setText("Изменить маршрут");
                     editPointsButton.setEnabled(true);
                     startWalkButton.setEnabled(true);
@@ -635,6 +677,7 @@ public final class MainActivity extends Activity {
     private void setNetworkBusy(boolean busy) {
         requestInFlight = busy;
         submit.setEnabled(!busy);
+        returnToRouteButton.setEnabled(!busy);
         editPointsButton.setEnabled(!busy && routeId != null);
         startWalkButton.setEnabled(!busy && routeId != null);
         mapButton.setEnabled(!busy && routeId != null);
@@ -657,6 +700,7 @@ public final class MainActivity extends Activity {
         if (remaining <= 0) {
             if (!requestInFlight) {
                 submit.setEnabled(true);
+                returnToRouteButton.setEnabled(true);
                 editPointsButton.setEnabled(routeId != null);
                 startWalkButton.setEnabled(routeId != null);
                 mapButton.setEnabled(routeId != null);
@@ -668,6 +712,7 @@ public final class MainActivity extends Activity {
             return;
         }
         submit.setEnabled(false);
+        returnToRouteButton.setEnabled(false);
         editPointsButton.setEnabled(false);
         startWalkButton.setEnabled(false);
         mapButton.setEnabled(false);
@@ -702,6 +747,7 @@ public final class MainActivity extends Activity {
         preferences.edit().remove("startLatBits").remove("startLonBits")
                 .remove("startAccuracyBits").apply();
         routeLocationDirty = preferences.getBoolean("routeLocationDirty", false);
+        queryEditMode = preferences.getBoolean("queryEditMode", false);
         if (routeId == null || routeVersion < 1 || routeCityId == null || lastSuccessfulResult == null) {
             routeId = null;
             return;
@@ -728,6 +774,7 @@ public final class MainActivity extends Activity {
                     startAccuracyMeters == null ? 100.0 : startAccuracyMeters);
         }
         out.putBoolean("routeLocationDirty", routeLocationDirty);
+        out.putBoolean("queryEditMode", queryEditMode);
         super.onSaveInstanceState(out);
     }
 
@@ -950,6 +997,45 @@ public final class MainActivity extends Activity {
         startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
     }
 
+    private void returnToCurrentRoute() {
+        if (routeId == null || routeCityId == null || requestInFlight) return;
+        String savedQuery = getPreferences(MODE_PRIVATE).getString("routeQuery", null);
+        if (savedQuery != null) query.setText(savedQuery);
+        if (lastSuccessfulResult != null) result.setText(lastSuccessfulResult);
+        queryEditMode = false;
+        persistQueryEditMode();
+        updateQueryEditActions();
+        String activeWalkId = activeWalkIdForCurrentRoute();
+        if (activeWalkId != null) {
+            openWalkMap(activeWalkId);
+        } else {
+            openMap();
+        }
+    }
+
+    private String activeWalkIdForCurrentRoute() {
+        if (routeId == null) return null;
+        SharedPreferences walk = getSharedPreferences("active_walk", MODE_PRIVATE);
+        String activeWalkId = walk.getString("walkId", null);
+        String activeRouteId = walk.getString("routeId", null);
+        return activeWalkId != null && routeId.equals(activeRouteId) ? activeWalkId : null;
+    }
+
+    private void clearActiveWalkState() {
+        getSharedPreferences("active_walk", MODE_PRIVATE).edit().clear().apply();
+    }
+
+    private void persistQueryEditMode() {
+        getPreferences(MODE_PRIVATE).edit().putBoolean("queryEditMode", queryEditMode).apply();
+    }
+
+    private void updateQueryEditActions() {
+        if (returnToRouteButton == null) return;
+        boolean visible = queryEditMode && routeId != null;
+        returnToRouteButton.setVisibility(visible ? View.VISIBLE : View.GONE);
+        submit.setText(routeId == null ? "Построить маршрут" : "Изменить маршрут");
+    }
+
     private void startWalkOrContinue() {
         if (requestInFlight || routeId == null || routeCityId == null) return;
         SharedPreferences walk = getSharedPreferences("active_walk", MODE_PRIVATE);
@@ -980,7 +1066,8 @@ public final class MainActivity extends Activity {
                 if (finalResponse.success) {
                     getSharedPreferences("active_walk", MODE_PRIVATE).edit()
                             .putString("walkId", finalResponse.walkId)
-                            .putString("routeId", requestedRouteId).apply();
+                            .putString("routeId", requestedRouteId)
+                            .putInt("routeVersion", requestedVersion).apply();
                     startWalkButton.setText("Продолжить прогулку");
                     result.setText(lastSuccessfulResult == null ? finalResponse.message
                             : lastSuccessfulResult + "\n\n" + finalResponse.message);
@@ -1043,6 +1130,7 @@ public final class MainActivity extends Activity {
         routeCityId = null;
         lastSuccessfulResult = null;
         routeLocationDirty = false;
+        queryEditMode = false;
         retryAllowedAtMillis = 0;
         currentPoints.clear();
         foundPlaces.clear();
@@ -1059,8 +1147,9 @@ public final class MainActivity extends Activity {
         getPreferences(MODE_PRIVATE).edit()
                 .remove("routeId").remove("routeVersion").remove("routeCityId")
                 .remove("lastSuccessfulResult").remove("routeQuery")
-                .remove("routeLocationDirty").apply();
-        getSharedPreferences("active_walk", MODE_PRIVATE).edit().clear().apply();
+                .remove("routeLocationDirty").remove("queryEditMode").apply();
+        clearActiveWalkState();
+        updateQueryEditActions();
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -1070,9 +1159,12 @@ public final class MainActivity extends Activity {
         if (MapActivity.ACTION_CANCEL_ROUTE.equals(action)) {
             clearLocalRouteState("Маршрут отменён. Можно составить новый.");
         } else if (MapActivity.ACTION_EDIT_QUERY.equals(action)) {
+            queryEditMode = true;
+            persistQueryEditMode();
+            updateQueryEditActions();
             query.requestFocus();
             query.setSelection(query.getText().length());
-            result.setText("Измените пожелания и нажмите «Построить маршрут».");
+            result.setText("Измените пожелания или вернитесь к текущему маршруту.");
         } else if (MapActivity.ACTION_EDIT_POINTS.equals(action)) {
             loadPointEditor();
         }
@@ -1089,7 +1181,8 @@ public final class MainActivity extends Activity {
         startWalkButton.setText(currentWalkActive
                 ? "Продолжить прогулку" : "Начать прогулку");
         if (currentWalkActive) {
-            submit.setEnabled(false);
+            submit.setEnabled(!requestInFlight);
+            returnToRouteButton.setEnabled(!requestInFlight);
             editPointsButton.setEnabled(false);
             resetRouteButton.setEnabled(false);
         } else if (!requestInFlight) {

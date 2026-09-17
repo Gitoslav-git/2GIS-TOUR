@@ -867,7 +867,7 @@ public final class MapActivity extends ComponentActivity {
         primaryAction.setText("×");
         primaryAction.setTextColor(0xFFFFFFFF);
         primaryAction.setBackground(UiKit.rounded(UiKit.RED, 14, this));
-        editQuery.setEnabled(false);
+        editQuery.setEnabled(active || paused);
         editPoints.setEnabled(false);
         if ("COMPLETED".equals(walk.status) || "STOPPED".equals(walk.status)) {
             clearActiveWalk();

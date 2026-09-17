@@ -68,6 +68,8 @@ import ru.dgis.sdk.map.ZIndex;
 import ru.dgis.sdk.map.Zoom;
 
 public final class MapActivity extends ComponentActivity {
+    private static final long POSITION_WINDOW_MILLIS = 60_000L;
+    private static final long MIN_POSITION_INTERVAL_MILLIS = 5_000L;
     static final String EXTRA_ROUTE_ID = "routeId";
     static final String EXTRA_CITY_ID = "cityId";
     static final String EXTRA_SESSION_ID = "sessionId";
@@ -204,6 +206,8 @@ public final class MapActivity extends ComponentActivity {
         primaryAction.setTextSize(22);
         primaryAction.setMinWidth(0);
         primaryAction.setMinHeight(0);
+        primaryAction.setElevation(0f);
+        primaryAction.setStateListAnimator(null);
         primaryAction.setPadding(0, 0, 0, 0);
         LinearLayout.LayoutParams editActionParams = new LinearLayout.LayoutParams(0,
                 UiKit.dp(this, compact ? 48 : 54), 1);
@@ -301,6 +305,8 @@ public final class MapActivity extends ComponentActivity {
         button.setPadding(UiKit.dp(this, 3), 0, UiKit.dp(this, 3), 0);
         button.setMinWidth(0);
         button.setMinHeight(0);
+        button.setElevation(0f);
+        button.setStateListAnimator(null);
         button.setBackground(UiKit.bordered(0xFFFFFFFF, UiKit.GREEN, 14, this));
         return button;
     }
@@ -913,12 +919,12 @@ public final class MapActivity extends ComponentActivity {
             boolean requested = false;
             if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER,
-                        5000L, 0f, locationListener, Looper.getMainLooper());
+                        30_000L, 5f, locationListener, Looper.getMainLooper());
                 requested = true;
             }
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER,
-                        5000L, 0f, locationListener, Looper.getMainLooper());
+                        30_000L, 5f, locationListener, Looper.getMainLooper());
                 requested = true;
             }
             if (!requested) {
@@ -933,6 +939,7 @@ public final class MapActivity extends ComponentActivity {
 
     private void sendPosition(Location location) {
         if (positionInFlight || walk == null || !"ACTIVE".equals(walk.status)) return;
+        if (!claimPositionSubmission()) return;
         positionInFlight = true;
         String walkId = walk.walkId;
         String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
@@ -963,6 +970,28 @@ public final class MapActivity extends ComponentActivity {
                 syncLocationTracking();
             });
         });
+    }
+
+    private boolean claimPositionSubmission() {
+        long now = System.currentTimeMillis();
+        long cutoff = now - POSITION_WINDOW_MILLIS;
+        if (routeViewModel.previousPositionSentAt > now
+                || routeViewModel.latestPositionSentAt > now) {
+            routeViewModel.previousPositionSentAt = 0L;
+            routeViewModel.latestPositionSentAt = 0L;
+        }
+        if (routeViewModel.previousPositionSentAt > cutoff) return false;
+        if (routeViewModel.latestPositionSentAt > now - MIN_POSITION_INTERVAL_MILLIS) {
+            return false;
+        }
+        if (routeViewModel.latestPositionSentAt > cutoff) {
+            routeViewModel.previousPositionSentAt = routeViewModel.latestPositionSentAt;
+            routeViewModel.latestPositionSentAt = now;
+        } else {
+            routeViewModel.previousPositionSentAt = 0L;
+            routeViewModel.latestPositionSentAt = now;
+        }
+        return true;
     }
 
     private void sendWalkAction(String action) {
@@ -1068,6 +1097,16 @@ public final class MapActivity extends ComponentActivity {
         locationListener = null;
     }
 
+    @Override protected void onStart() {
+        super.onStart();
+        if (walk != null && walk.success) syncLocationTracking();
+    }
+
+    @Override protected void onStop() {
+        stopLocationTracking();
+        super.onStop();
+    }
+
     private void clearActiveWalk() {
         getSharedPreferences("active_walk", MODE_PRIVATE).edit().clear().apply();
         stopLocationTracking();
@@ -1157,5 +1196,7 @@ public final class MapActivity extends ComponentActivity {
     public static final class RouteViewModel extends ViewModel {
         ApiClient.Result route;
         ApiClient.WalkResult walk;
+        long previousPositionSentAt;
+        long latestPositionSentAt;
     }
 }

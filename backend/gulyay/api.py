@@ -35,6 +35,7 @@ IDEMPOTENT_REVISIONS: dict[tuple[UUID, UUID], Route] = {}
 RECENT_ROUTES: dict[tuple[UUID, str], tuple[float, Route]] = {}
 STATE_LOCK = threading.RLock()
 CLIENT_REQUESTS: dict[UUID, deque[float]] = defaultdict(deque)
+POSITION_REQUESTS: dict[UUID, deque[float]] = defaultdict(deque)
 
 
 def failure(code: str, message: str, status: int, request_id: str | None = None,
@@ -230,6 +231,9 @@ def add_walk_position(walk_id: UUID, payload: WalkPosition,
     request_id = str(x_request_id) if x_request_id else None
     if x_device_session is None:
         return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+    limited = _position_rate_limit(walk_id, request_id)
+    if limited:
+        return limited
     with STATE_LOCK:
         state = repository.get_walk(walk_id, x_device_session)
         if state is None:
@@ -461,6 +465,26 @@ def _client_rate_limit(session: UUID | None, request_id: str | None) -> JSONResp
                 "RATE_LIMITED", f"Не больше 5 запросов в минуту. Повторите через {retry_after} сек.",
                 429, request_id,
                 {"retryAfterSeconds": retry_after, "dependency": "client"},
+                {"Retry-After": str(retry_after)},
+            )
+        window.append(now)
+    return None
+
+
+def _position_rate_limit(walk_id: UUID, request_id: str | None) -> JSONResponse | None:
+    """Accept at most two geolocation submissions per rolling minute and walk."""
+    now = time.monotonic()
+    with STATE_LOCK:
+        window = POSITION_REQUESTS[walk_id]
+        while window and window[0] <= now - 60:
+            window.popleft()
+        if len(window) >= 2:
+            retry_after = max(1, int(61 - (now - window[0])))
+            return failure(
+                "RATE_LIMITED",
+                f"Геопозиция принимается не чаще двух раз в минуту. Повторите через {retry_after} сек.",
+                429, request_id,
+                {"retryAfterSeconds": retry_after, "dependency": "geolocation"},
                 {"Retry-After": str(retry_after)},
             )
         window.append(now)

@@ -10,6 +10,7 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.Looper;
 import android.graphics.Typeface;
 import android.view.Gravity;
@@ -37,7 +38,9 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final int LOCATION_PERMISSION_REQUEST = 75;
     private static final int ROUTE_SCREEN_REQUEST = 76;
+    private static final long GEO_ATTEMPT_WINDOW_MILLIS = 60_000L;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private Spinner city;
     private EditText query;
     private TextView result;
@@ -72,6 +75,7 @@ public final class MainActivity extends Activity {
     private boolean routeLocationDirty;
     private LocationManager locationManager;
     private LocationListener locationListener;
+    private Runnable locationTimeout;
     private boolean locationResolved;
     private boolean queryEditMode;
 
@@ -190,6 +194,8 @@ public final class MainActivity extends Activity {
         submit.setSingleLine(true);
         submit.setMinWidth(0);
         submit.setMinHeight(0);
+        submit.setElevation(0f);
+        submit.setStateListAnimator(null);
         submit.setPadding(UiKit.dp(this, 5), 0, UiKit.dp(this, 5), 0);
         returnToRouteButton = UiKit.button(this, "Вернуться к маршруту", UiKit.SOFT,
                 UiKit.GREEN_DARK);
@@ -197,12 +203,16 @@ public final class MainActivity extends Activity {
         returnToRouteButton.setSingleLine(true);
         returnToRouteButton.setMinWidth(0);
         returnToRouteButton.setMinHeight(0);
+        returnToRouteButton.setElevation(0f);
+        returnToRouteButton.setStateListAnimator(null);
         returnToRouteButton.setPadding(UiKit.dp(this, 4), 0, UiKit.dp(this, 4), 0);
         returnToRouteButton.setVisibility(View.GONE);
         LinearLayout routeActions = new LinearLayout(this);
         routeActions.setOrientation(LinearLayout.HORIZONTAL);
         routeActions.setGravity(Gravity.CENTER_VERTICAL);
         routeActions.setBaselineAligned(false);
+        routeActions.setClipChildren(true);
+        routeActions.setClipToPadding(true);
         LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(
                 0, UiKit.dp(this, compact ? 48 : 54), 1f);
         routeActions.addView(submit, submitParams);
@@ -212,7 +222,8 @@ public final class MainActivity extends Activity {
         routeActions.addView(returnToRouteButton, returnParams);
         LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
                 -1, UiKit.dp(this, compact ? 48 : 54));
-        actionsParams.topMargin = UiKit.dp(this, compact ? 6 : 10);
+        actionsParams.topMargin = UiKit.dp(this, compact ? 4 : 8);
+        actionsParams.bottomMargin = UiKit.dp(this, 4);
         content.addView(routeActions, actionsParams);
         result = new TextView(this);
         result.setTextSize(14);
@@ -864,6 +875,10 @@ public final class MainActivity extends Activity {
         locationResolved = false;
         locationButton.setEnabled(false);
         locationStatus.setText("Определяем город и уточняем текущую позицию…");
+        if (locationTimeout != null) {
+            uiHandler.removeCallbacks(locationTimeout);
+            locationTimeout = null;
+        }
         if (locationListener != null) {
             try { locationManager.removeUpdates(locationListener); } catch (SecurityException ignored) { }
             locationListener = null;
@@ -886,18 +901,37 @@ public final class MainActivity extends Activity {
             @Override public void onStatusChanged(String providerName, int status, Bundle extras) { }
         };
         try {
+            int requestedProviders = 0;
             if (gpsEnabled) {
-                locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER,
-                        locationListener, Looper.getMainLooper());
+                if (claimGeoAttempt()) {
+                    locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER,
+                            locationListener, Looper.getMainLooper());
+                    requestedProviders++;
+                }
             }
             if (networkEnabled) {
-                locationManager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER,
-                        locationListener, Looper.getMainLooper());
+                if (claimGeoAttempt()) {
+                    locationManager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER,
+                            locationListener, Looper.getMainLooper());
+                    requestedProviders++;
+                }
             }
-            locationButton.postDelayed(() -> {
-                if (locationListener == null) return;
-                locationManager.removeUpdates(locationListener);
+            if (requestedProviders == 0) {
                 locationListener = null;
+                locationButton.setEnabled(true);
+                locationStatus.setText("Геопозиция запрашивается не чаще двух раз в минуту. "
+                        + "Повторите через " + geoRetryAfterSeconds() + " сек.");
+                return;
+            }
+            locationTimeout = () -> {
+                if (locationListener == null) {
+                    locationTimeout = null;
+                    return;
+                }
+                try { locationManager.removeUpdates(locationListener); }
+                catch (SecurityException ignored) { }
+                locationListener = null;
+                locationTimeout = null;
                 locationButton.setEnabled(true);
                 if (!locationResolved && selectedCityId() == null) {
                     locationStatus.setText("Локация не определена. Выберите доступный город вручную.");
@@ -905,12 +939,49 @@ public final class MainActivity extends Activity {
                     locationStatus.setText("Город определён по последней позиции. " +
                             "Если в пожеланиях нет старта, маршрут начнётся от центра города.");
                 }
-            }, 20_000L);
+            };
+            uiHandler.postDelayed(locationTimeout, 20_000L);
         } catch (SecurityException error) {
+            if (locationManager != null && locationListener != null) {
+                try { locationManager.removeUpdates(locationListener); }
+                catch (SecurityException ignored) { }
+                locationListener = null;
+            }
             locationButton.setEnabled(true);
             clearLocationToUnknown();
             locationStatus.setText("Нет разрешения на геопозицию. Выберите город вручную.");
         }
+    }
+
+    private boolean claimGeoAttempt() {
+        long now = System.currentTimeMillis();
+        SharedPreferences throttle = getSharedPreferences("geo_attempt_throttle", MODE_PRIVATE);
+        long previous = throttle.getLong("previous", 0L);
+        long latest = throttle.getLong("latest", 0L);
+        long cutoff = now - GEO_ATTEMPT_WINDOW_MILLIS;
+        if (previous > now || latest > now) {
+            previous = 0L;
+            latest = 0L;
+        }
+        if (previous > cutoff) return false;
+        if (latest > cutoff) {
+            previous = latest;
+            latest = now;
+        } else {
+            previous = 0L;
+            latest = now;
+        }
+        throttle.edit().putLong("previous", previous).putLong("latest", latest).apply();
+        return true;
+    }
+
+    private int geoRetryAfterSeconds() {
+        long now = System.currentTimeMillis();
+        SharedPreferences throttle = getSharedPreferences("geo_attempt_throttle", MODE_PRIVATE);
+        long previous = throttle.getLong("previous", 0L);
+        if (previous <= 0L || previous > now) return 1;
+        return Math.max(1, (int) Math.ceil(
+                (previous + GEO_ATTEMPT_WINDOW_MILLIS - now) / 1000.0));
     }
 
     private Location bestLastKnownLocation(boolean gpsEnabled, boolean networkEnabled) {
@@ -945,6 +1016,10 @@ public final class MainActivity extends Activity {
         if (locationManager != null && locationListener != null) {
             locationManager.removeUpdates(locationListener);
             locationListener = null;
+        }
+        if (locationTimeout != null) {
+            uiHandler.removeCallbacks(locationTimeout);
+            locationTimeout = null;
         }
         locationResolved = true;
         startLat = location.getLatitude();
@@ -1229,6 +1304,10 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (locationTimeout != null) {
+            uiHandler.removeCallbacks(locationTimeout);
+            locationTimeout = null;
+        }
         if (locationManager != null && locationListener != null) {
             locationManager.removeUpdates(locationListener);
             locationListener = null;

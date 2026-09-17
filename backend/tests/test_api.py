@@ -4,7 +4,8 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from gulyay.api import (CLIENT_REQUESTS, IDEMPOTENT_REVISIONS, IDEMPOTENT_ROUTES, RECENT_ROUTES,
+from gulyay.api import (CLIENT_REQUESTS, IDEMPOTENT_REVISIONS, IDEMPOTENT_ROUTES,
+                        POSITION_REQUESTS, RECENT_ROUTES,
                         app, get_geo_provider, get_intent_provider,
                         get_route_repository)
 from gulyay.geo import GeoRateLimited, GeoUnavailable
@@ -78,6 +79,7 @@ def reset_state():
     IDEMPOTENT_ROUTES.clear()
     IDEMPOTENT_REVISIONS.clear()
     RECENT_ROUTES.clear()
+    POSITION_REQUESTS.clear()
     CLIENT_REQUESTS.clear()
 
 
@@ -182,6 +184,12 @@ def test_walk_start_arrival_pause_resume_and_stop():
     assert second.json()["pointReached"] is True
     assert second.json()["walk"]["status"] == "COMPLETED"
     assert len(second.json()["walk"]["visits"]) == 1
+    limited = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
+        "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,
+        "measuredAt": (first_time + timedelta(seconds=10)).isoformat(),
+    })
+    assert limited.status_code == 429
+    assert limited.json()["error"]["details"]["dependency"] == "geolocation"
 
 
 def test_walk_actions_require_valid_state_and_active_walk_is_unique():

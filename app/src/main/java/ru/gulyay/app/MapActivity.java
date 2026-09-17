@@ -2,6 +2,7 @@ package ru.gulyay.app;
 
 import android.Manifest;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -10,18 +11,28 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 import androidx.activity.ComponentActivity;
 import androidx.lifecycle.ViewModel;
 import androidx.lifecycle.ViewModelProvider;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -85,7 +96,18 @@ public final class MapActivity extends ComponentActivity {
     private TextView screenTitle;
     private TextView routeSummary;
     private TextView mapRouteSummary;
+    private TextView nextLabel;
+    private LinearLayout pointHero;
     private LinearLayout pointList;
+    private ScrollView pointListScroll;
+    private LinearLayout actions;
+    private final List<ApiClient.PlaceOption> editingPoints = new ArrayList<>();
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private boolean pointEditing;
+    private boolean applyingPointChanges;
+    private float dragLastY;
+    private Runnable pendingPlaceSearch;
+    private int searchGeneration;
     private boolean startingWalk;
     private LocationManager locationManager;
     private LocationListener locationListener;
@@ -135,10 +157,10 @@ public final class MapActivity extends ComponentActivity {
         handleParams.bottomMargin = UiKit.dp(this, compact ? 5 : 8);
         sheet.addView(handle, handleParams);
 
-        TextView nextLabel = UiKit.label(this, "ПЕРВАЯ ТОЧКА", 12, UiKit.GREEN_DARK);
+        nextLabel = UiKit.label(this, "ПЕРВАЯ ТОЧКА", 12, UiKit.GREEN_DARK);
         nextLabel.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         sheet.addView(nextLabel);
-        LinearLayout pointHero = new LinearLayout(this);
+        pointHero = new LinearLayout(this);
         pointHero.setGravity(Gravity.CENTER_VERTICAL);
         routeSummary = UiKit.label(this, "Загружаем маршрут…", compact ? 19 : 22, UiKit.TEXT);
         routeSummary.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -164,9 +186,13 @@ public final class MapActivity extends ComponentActivity {
         sheet.addView(status, statusParams);
         pointList = new LinearLayout(this);
         pointList.setOrientation(LinearLayout.VERTICAL);
-        sheet.addView(pointList, new LinearLayout.LayoutParams(-1, 0, 1));
+        pointListScroll = new ScrollView(this);
+        pointListScroll.setFillViewport(true);
+        pointListScroll.setVerticalScrollBarEnabled(false);
+        pointListScroll.addView(pointList, new ScrollView.LayoutParams(-1, -2));
+        sheet.addView(pointListScroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        LinearLayout actions = new LinearLayout(this);
+        actions = new LinearLayout(this);
         actions.setGravity(Gravity.CENTER_VERTICAL);
         editQuery = compactAction("Изменить маршрут");
         editPoints = compactAction("Редактировать точки");
@@ -206,9 +232,15 @@ public final class MapActivity extends ComponentActivity {
         root.addView(topBar, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
         setContentView(root);
 
-        close.setOnClickListener(view -> confirmCancelRoute());
+        close.setOnClickListener(view -> {
+            if (pointEditing) cancelPointEditing();
+            else confirmCancelRoute();
+        });
         editQuery.setOnClickListener(view -> returnForEdit(ACTION_EDIT_QUERY));
-        editPoints.setOnClickListener(view -> returnForEdit(ACTION_EDIT_POINTS));
+        editPoints.setOnClickListener(view -> {
+            if (pointEditing) applyPointChangesInline();
+            else enterPointEditing();
+        });
         primaryAction.setOnClickListener(view -> {
             if (walk != null && walk.success && ("ACTIVE".equals(walk.status)
                     || "PAUSED".equals(walk.status))) confirmCancelRoute();
@@ -348,6 +380,404 @@ public final class MapActivity extends ComponentActivity {
             row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
             pointList.addView(row, new LinearLayout.LayoutParams(-1, 0, 1));
         }
+    }
+
+    private void enterPointEditing() {
+        if (route == null || !route.success || applyingPointChanges) return;
+        if (walk != null && walk.success && ("ACTIVE".equals(walk.status)
+                || "PAUSED".equals(walk.status))) {
+            Toast.makeText(this, "Сначала завершите активную прогулку.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        editingPoints.clear();
+        editingPoints.addAll(route.points);
+        pointEditing = true;
+        screenTitle.setText("Редактирование маршрута");
+        mapRouteSummary.setText("Меняйте порядок прямо здесь\nЗажмите ≡ и перетащите точку");
+        nextLabel.setText("ТОЧКИ МАРШРУТА");
+        pointHero.setVisibility(View.GONE);
+        status.setVisibility(View.GONE);
+        editQuery.setVisibility(View.GONE);
+        primaryAction.setVisibility(View.GONE);
+        editPoints.setText("Подтвердить");
+        renderEditablePointList();
+    }
+
+    private void cancelPointEditing() {
+        if (!pointEditing || applyingPointChanges) return;
+        editingPoints.clear();
+        pointEditing = false;
+        restoreRouteLayout();
+        showRouteStatus();
+    }
+
+    private void restoreRouteLayout() {
+        nextLabel.setText("ПЕРВАЯ ТОЧКА");
+        pointHero.setVisibility(View.VISIBLE);
+        status.setVisibility(View.VISIBLE);
+        editQuery.setVisibility(View.VISIBLE);
+        primaryAction.setVisibility(View.VISIBLE);
+        editPoints.setText("Редактировать точки");
+        editPoints.setEnabled(true);
+    }
+
+    private void renderEditablePointList() {
+        pointList.removeAllViews();
+        for (int i = 0; i < editingPoints.size(); i++) {
+            LinearLayout row = editablePointRow(editingPoints.get(i), i);
+            pointList.addView(row, new LinearLayout.LayoutParams(
+                    -1, UiKit.dp(this, 54)));
+        }
+        Button add = new Button(this);
+        add.setText("＋  Добавить точку");
+        add.setTextSize(15);
+        add.setTextColor(UiKit.GREEN_DARK);
+        add.setAllCaps(false);
+        add.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        add.setPadding(UiKit.dp(this, 8), 0, UiKit.dp(this, 8), 0);
+        add.setBackgroundColor(0x00000000);
+        add.setOnClickListener(view -> showPlaceSearch());
+        pointList.addView(add, new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, 52)));
+    }
+
+    private LinearLayout editablePointRow(ApiClient.PlaceOption point, int index) {
+        LinearLayout row = new LinearLayout(this);
+        row.setTag(index);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE6EBE7, 12, this));
+        row.setPadding(UiKit.dp(this, 8), 0, UiKit.dp(this, 4), 0);
+
+        TextView number = UiKit.label(this, String.valueOf(index + 1), 13, UiKit.GREEN_DARK);
+        number.setGravity(Gravity.CENTER);
+        number.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        number.setBackground(UiKit.rounded(0xFFE9F8EE, 18, this));
+        row.addView(number, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 32), UiKit.dp(this, 32)));
+
+        TextView name = UiKit.label(this, point.name, 14, UiKit.TEXT);
+        name.setMaxLines(2);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        name.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 4), 0);
+        row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+
+        Button remove = new Button(this);
+        remove.setText("×");
+        remove.setTextSize(23);
+        remove.setTextColor(UiKit.MUTED);
+        remove.setMinWidth(0);
+        remove.setMinHeight(0);
+        remove.setPadding(0, 0, 0, 0);
+        remove.setBackgroundColor(0x00000000);
+        remove.setOnClickListener(view -> removeEditablePoint(row));
+        row.addView(remove, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 42), UiKit.dp(this, 48)));
+
+        TextView drag = UiKit.label(this, "≡", 28, UiKit.MUTED);
+        drag.setGravity(Gravity.CENTER);
+        drag.setOnTouchListener((view, event) -> handlePointDrag(row, event));
+        row.addView(drag, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 40), UiKit.dp(this, 50)));
+        return row;
+    }
+
+    private void removeEditablePoint(LinearLayout row) {
+        if (editingPoints.size() <= 1) {
+            Toast.makeText(this, "В маршруте должна остаться хотя бы одна точка.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        int index = (Integer) row.getTag();
+        if (index < 0 || index >= editingPoints.size()) return;
+        editingPoints.remove(index);
+        renderEditablePointList();
+    }
+
+    private boolean handlePointDrag(LinearLayout row, MotionEvent event) {
+        if (!pointEditing || applyingPointChanges) return false;
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            dragLastY = event.getRawY();
+            row.setAlpha(0.72f);
+            pointListScroll.requestDisallowInterceptTouchEvent(true);
+            return true;
+        }
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            float delta = event.getRawY() - dragLastY;
+            if (Math.abs(delta) < UiKit.dp(this, 30)) return true;
+            int index = (Integer) row.getTag();
+            int target = index + (delta > 0 ? 1 : -1);
+            if (target >= 0 && target < editingPoints.size()) {
+                Collections.swap(editingPoints, index, target);
+                pointList.removeView(row);
+                pointList.addView(row, target);
+                refreshEditableRowPositions();
+                dragLastY = event.getRawY();
+            }
+            return true;
+        }
+        if (event.getActionMasked() == MotionEvent.ACTION_UP
+                || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+            row.setAlpha(1f);
+            pointListScroll.requestDisallowInterceptTouchEvent(false);
+            return true;
+        }
+        return true;
+    }
+
+    private void refreshEditableRowPositions() {
+        for (int i = 0; i < editingPoints.size(); i++) {
+            View child = pointList.getChildAt(i);
+            if (!(child instanceof LinearLayout)) continue;
+            LinearLayout row = (LinearLayout) child;
+            row.setTag(i);
+            View number = row.getChildAt(0);
+            if (number instanceof TextView) ((TextView) number).setText(String.valueOf(i + 1));
+        }
+    }
+
+    private void applyPointChangesInline() {
+        if (!pointEditing || applyingPointChanges || route == null || editingPoints.isEmpty()) return;
+        applyingPointChanges = true;
+        editPoints.setEnabled(false);
+        editPoints.setText("Пересчитываем…");
+        mapRouteSummary.setText("Проверяем точки и пересчитываем переходы…");
+        List<ApiClient.PlaceOption> requested = new ArrayList<>(editingPoints);
+        String routeId = getIntent().getStringExtra(EXTRA_ROUTE_ID);
+        String cityId = getIntent().getStringExtra(EXTRA_CITY_ID);
+        String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+        int baseVersion = route.routeVersion;
+        network.execute(() -> {
+            ApiClient.Result response;
+            boolean refreshedAfterConflict = false;
+            try {
+                response = ApiClient.revisePoints(routeId, baseVersion, cityId,
+                        requested, sessionId);
+                if (!response.success && "VERSION_CONFLICT".equals(response.errorCode)) {
+                    response = ApiClient.getRoute(routeId, cityId, sessionId);
+                    refreshedAfterConflict = response.success;
+                }
+            } catch (Exception error) {
+                response = new ApiClient.Result(false,
+                        "Не удалось сохранить точки. Исходный маршрут не изменён.", null, 0);
+            }
+            ApiClient.Result finalResponse = response;
+            boolean finalRefreshedAfterConflict = refreshedAfterConflict;
+            runOnUiThread(() -> {
+                applyingPointChanges = false;
+                if (isFinishing() || isDestroyed()) return;
+                if (!finalResponse.success) {
+                    editPoints.setEnabled(true);
+                    editPoints.setText("Подтвердить");
+                    mapRouteSummary.setText(finalResponse.message);
+                    return;
+                }
+                route = finalResponse;
+                routeViewModel.route = route;
+                if (finalRefreshedAfterConflict) {
+                    editingPoints.clear();
+                    editingPoints.addAll(route.points);
+                    editPoints.setEnabled(true);
+                    editPoints.setText("Подтвердить");
+                    mapRouteSummary.setText("Маршрут уже изменился\nАктуальные точки загружены — повторите правки");
+                    renderEditablePointList();
+                    renderRoute();
+                    return;
+                }
+                editingPoints.clear();
+                pointEditing = false;
+                restoreRouteLayout();
+                showRouteStatus();
+                renderRoute();
+            });
+        });
+    }
+
+    private void showPlaceSearch() {
+        if (!pointEditing || applyingPointChanges) return;
+        if (editingPoints.size() >= 8) {
+            Toast.makeText(this, "В маршруте может быть не больше восьми точек.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(UiKit.dp(this, 18), UiKit.dp(this, 18),
+                UiKit.dp(this, 18), UiKit.dp(this, 18));
+        root.setBackgroundColor(0xFFFFFFFF);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        Button back = new Button(this);
+        back.setText("‹");
+        back.setTextSize(30);
+        back.setTextColor(UiKit.TEXT);
+        back.setPadding(0, 0, 0, 0);
+        back.setMinWidth(0);
+        back.setBackgroundColor(0x00000000);
+        header.addView(back, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 44), UiKit.dp(this, 48)));
+        TextView title = UiKit.label(this, "Добавить точку", 22, UiKit.TEXT);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        Button cancel = new Button(this);
+        cancel.setText("Отмена");
+        cancel.setTextColor(UiKit.GREEN_DARK);
+        cancel.setTextSize(14);
+        cancel.setAllCaps(false);
+        cancel.setBackgroundColor(0x00000000);
+        header.addView(cancel, new LinearLayout.LayoutParams(-2, UiKit.dp(this, 48)));
+        root.addView(header);
+
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setTextSize(16);
+        input.setHint("Название места или адрес");
+        input.setPadding(UiKit.dp(this, 14), 0, UiKit.dp(this, 14), 0);
+        input.setBackground(UiKit.bordered(0xFFF5F7F5, 0xFFDDE4DF, 14, this));
+        root.addView(input, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 54)));
+
+        TextView searchStatus = UiKit.label(this,
+                "Начните вводить — покажем реальные места 2ГИС", 13, UiKit.MUTED);
+        searchStatus.setPadding(UiKit.dp(this, 4), UiKit.dp(this, 12),
+                UiKit.dp(this, 4), UiKit.dp(this, 8));
+        root.addView(searchStatus);
+
+        LinearLayout results = new LinearLayout(this);
+        results.setOrientation(LinearLayout.VERTICAL);
+        ScrollView resultsScroll = new ScrollView(this);
+        resultsScroll.addView(results, new ScrollView.LayoutParams(-1, -2));
+        root.addView(resultsScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        dialog.setContentView(root);
+        back.setOnClickListener(view -> dialog.dismiss());
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        input.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { }
+            @Override public void afterTextChanged(Editable value) {
+                schedulePlaceSearch(dialog, value.toString(), results, searchStatus);
+            }
+        });
+        input.setOnEditorActionListener((view, actionId, event) -> {
+            String text = input.getText().toString().trim();
+            if (text.length() >= 2) {
+                if (pendingPlaceSearch != null) uiHandler.removeCallbacks(pendingPlaceSearch);
+                runPlaceSearch(dialog, text, ++searchGeneration, results, searchStatus);
+            }
+            return true;
+        });
+        dialog.setOnDismissListener(value -> {
+            searchGeneration++;
+            if (pendingPlaceSearch != null) uiHandler.removeCallbacks(pendingPlaceSearch);
+            pendingPlaceSearch = null;
+        });
+        dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setLayout(WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT);
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        }
+        input.requestFocus();
+        input.postDelayed(() -> {
+            InputMethodManager keyboard = (InputMethodManager)
+                    getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (keyboard != null) {
+                keyboard.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+            }
+        }, 180L);
+    }
+
+    private void schedulePlaceSearch(Dialog dialog, String rawText, LinearLayout results,
+                                     TextView searchStatus) {
+        if (pendingPlaceSearch != null) uiHandler.removeCallbacks(pendingPlaceSearch);
+        int generation = ++searchGeneration;
+        String text = rawText.trim();
+        results.removeAllViews();
+        if (text.length() < 2) {
+            searchStatus.setText("Введите хотя бы два символа");
+            return;
+        }
+        searchStatus.setText("Ищем в 2ГИС…");
+        pendingPlaceSearch = () -> runPlaceSearch(dialog, text, generation,
+                results, searchStatus);
+        uiHandler.postDelayed(pendingPlaceSearch, 800L);
+    }
+
+    private void runPlaceSearch(Dialog dialog, String text, int generation,
+                                LinearLayout results, TextView searchStatus) {
+        String cityId = getIntent().getStringExtra(EXTRA_CITY_ID);
+        String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+        network.execute(() -> {
+            ApiClient.SearchResult response;
+            try {
+                response = ApiClient.searchPlaces(cityId, text, sessionId);
+            } catch (Exception error) {
+                response = new ApiClient.SearchResult(false,
+                        "Не удалось выполнить поиск. Проверьте backend.", 0,
+                        Collections.emptyList());
+            }
+            ApiClient.SearchResult finalResponse = response;
+            runOnUiThread(() -> {
+                if (!dialog.isShowing() || generation != searchGeneration
+                        || isFinishing() || isDestroyed()) return;
+                results.removeAllViews();
+                searchStatus.setText(finalResponse.message);
+                if (!finalResponse.success) return;
+                for (ApiClient.PlaceOption place : finalResponse.items) {
+                    results.addView(placeSearchRow(dialog, place, searchStatus),
+                            new LinearLayout.LayoutParams(-1, UiKit.dp(this, 62)));
+                }
+            });
+        });
+    }
+
+    private View placeSearchRow(Dialog dialog, ApiClient.PlaceOption place,
+                                TextView searchStatus) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 6), 0);
+        row.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE7ECE8, 12, this));
+        TextView pin = UiKit.label(this, "●", 18, UiKit.GREEN);
+        pin.setGravity(Gravity.CENTER);
+        row.addView(pin, new LinearLayout.LayoutParams(UiKit.dp(this, 34), -1));
+        TextView name = UiKit.label(this, place.name + (place.food ? "\nЗаведение" : "\nМесто 2ГИС"),
+                15, UiKit.TEXT);
+        name.setMaxLines(2);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        Button add = UiKit.button(this, "+", UiKit.GREEN, 0xFFFFFFFF);
+        add.setTextSize(22);
+        add.setPadding(0, 0, 0, 0);
+        add.setMinWidth(0);
+        add.setMinHeight(0);
+        row.addView(add, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 44), UiKit.dp(this, 44)));
+        View.OnClickListener listener = view -> addPlaceFromSearch(dialog, place, searchStatus);
+        row.setOnClickListener(listener);
+        add.setOnClickListener(listener);
+        return row;
+    }
+
+    private void addPlaceFromSearch(Dialog dialog, ApiClient.PlaceOption place,
+                                    TextView searchStatus) {
+        for (ApiClient.PlaceOption current : editingPoints) {
+            if (current.placeId.equals(place.placeId)) {
+                searchStatus.setText("Эта точка уже есть в маршруте");
+                return;
+            }
+        }
+        if (editingPoints.size() >= 8) {
+            searchStatus.setText("В маршруте может быть не больше восьми точек");
+            return;
+        }
+        editingPoints.add(place);
+        dialog.dismiss();
+        renderEditablePointList();
+        pointListScroll.post(() -> pointListScroll.fullScroll(View.FOCUS_DOWN));
     }
 
     private void startWalk() {
@@ -613,7 +1043,8 @@ public final class MapActivity extends ComponentActivity {
     }
 
     @Override public void onBackPressed() {
-        confirmCancelRoute();
+        if (pointEditing) cancelPointEditing();
+        else confirmCancelRoute();
     }
 
     private void stopLocationTracking() {
@@ -704,6 +1135,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     @Override protected void onDestroy() {
+        if (pendingPlaceSearch != null) uiHandler.removeCallbacks(pendingPlaceSearch);
         stopLocationTracking();
         network.shutdownNow();
         super.onDestroy();

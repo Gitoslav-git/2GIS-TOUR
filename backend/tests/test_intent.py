@@ -67,6 +67,14 @@ def test_extracts_preferences_without_claiming_real_locations():
     assert "placeId" not in result.text and "lat" not in result.text
 
 
+def test_borovsk_city_name_is_accepted_for_borovsk_request():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
+        parsed(cityText="Боровск", durationMinutes=120))
+    result = request(cityId="borovsk", query="Погулять по Боровску два часа")
+    assert result.status_code == 200
+    assert result.json()["cityId"] == "borovsk"
+
+
 def test_filter_takes_precedence_over_text_and_false_is_explicit():
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
         parsed(durationMinutes=120, includeFood=True, withChildren=True))

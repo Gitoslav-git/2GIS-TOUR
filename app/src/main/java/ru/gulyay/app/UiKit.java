@@ -16,6 +16,7 @@ final class UiKit {
     static final int SOFT = 0xFFF1F4F1;
     static final int MAP = 0xFFE7EFE9;
     static final int RED = 0xFFFF5757;
+    static final int RED_SOFT = 0xFFE36A6A;
 
     private UiKit() { }
 

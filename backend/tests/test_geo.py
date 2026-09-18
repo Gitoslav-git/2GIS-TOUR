@@ -63,6 +63,44 @@ def test_places_and_walking_route_use_real_provider_payloads():
     assert leg.geometry == [(37.617, 54.193), (37.618, 54.194), (37.619, 54.196)]
 
 
+def test_borovsk_city_center_is_resolved_by_exact_city_name():
+    def borovsk(request):
+        assert request.url.params.get("q") == "Боровск"
+        return httpx.Response(200, json={
+            "meta": {"code": 200},
+            "result": {"items": [{
+                "id": "borovsk-city", "name": "Боровск",
+                "point": {"lat": 55.2073, "lon": 36.4833},
+            }]},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(borovsk))
+    assert provider.resolve_city_center("borovsk") == (55.2073, 36.4833)
+
+
+def test_large_routing_geometry_is_bounded_and_keeps_ends():
+    coordinates = ", ".join(
+        f"{36.48 + index * 0.00001:.5f} {55.20 + index * 0.00001:.5f}"
+        for index in range(1000)
+    )
+
+    def large_route(request):
+        return httpx.Response(200, json={
+            "status": "OK", "result": [{
+                "total_distance": 5000, "total_duration": 3600,
+                "begin_pedestrian_path": {
+                    "geometry": {"selection": f"LINESTRING({coordinates})"},
+                },
+            }],
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(large_route))
+    leg = provider.walking_leg((55.20, 36.48), (55.20999, 36.48999), 0, 1)
+    assert len(leg.geometry) == 300
+    assert leg.geometry[0] == (36.48, 55.20)
+    assert leg.geometry[-1] == (36.48999, 55.20999)
+
+
 def test_center_request_uses_smaller_search_radius():
     radii = []
     def capture(request):

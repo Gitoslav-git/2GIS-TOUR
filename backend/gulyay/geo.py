@@ -68,7 +68,12 @@ class GeoProvider(Protocol):
                     from_order: int, to_order: int) -> RouteLeg: ...
 
 
-CITY_NAMES = {"tula": "Тула", "vladimir": "Владимир", "moscow": "Москва"}
+CITY_NAMES = {
+    "tula": "Тула",
+    "vladimir": "Владимир",
+    "moscow": "Москва",
+    "borovsk": "Боровск",
+}
 PLACES_URL = "https://catalog.api.2gis.com/3.0/items"
 PLACES_BY_ID_URL = "https://catalog.api.2gis.com/3.0/items/byid"
 ROUTING_URL = "https://routing.api.2gis.com/routing/7.0.0/global"
@@ -373,7 +378,7 @@ class DgisGeoProvider:
         distance, duration = route.get("total_distance"), route.get("total_duration")
         if not isinstance(distance, (int, float)) or not isinstance(duration, (int, float)):
             raise GeoInvalidResponse()
-        geometry = _route_geometry(route)
+        geometry = _bounded_geometry(_route_geometry(route))
         if len(geometry) < 2:
             raise GeoInvalidResponse("2GIS route has no detailed geometry")
         leg = RouteLeg(fromOrder=from_order, toOrder=to_order,
@@ -557,3 +562,18 @@ def _route_geometry(route: dict) -> list[tuple[float, float]]:
             if not points or points[-1] != point:
                 points.append(point)
     return points
+
+
+def _bounded_geometry(points: list[tuple[float, float]],
+                      max_points: int = 300) -> list[tuple[float, float]]:
+    """Keep a representative real route shape without sending an unbounded polyline."""
+    if len(points) <= max_points:
+        return points
+    sampled: list[tuple[float, float]] = []
+    last_index = len(points) - 1
+    for position in range(max_points):
+        index = round(position * last_index / (max_points - 1))
+        point = points[index]
+        if not sampled or sampled[-1] != point:
+            sampled.append(point)
+    return sampled

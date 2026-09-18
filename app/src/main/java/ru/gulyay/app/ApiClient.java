@@ -479,12 +479,30 @@ final class ApiClient {
                 }
             }
         }
-        return path;
+        return compactPath(path, 1200);
+    }
+
+    private static List<GeoCoordinate> compactPath(List<GeoCoordinate> path, int maxPoints) {
+        if (path.size() <= maxPoints) return path;
+        List<GeoCoordinate> compact = new ArrayList<>(maxPoints);
+        int lastIndex = path.size() - 1;
+        for (int position = 0; position < maxPoints; position++) {
+            int index = Math.round(position * lastIndex / (float) (maxPoints - 1));
+            GeoCoordinate point = path.get(index);
+            if (compact.isEmpty()) {
+                compact.add(point);
+            } else {
+                GeoCoordinate previous = compact.get(compact.size() - 1);
+                if (previous.lat != point.lat || previous.lon != point.lon) compact.add(point);
+            }
+        }
+        return compact;
     }
 
     private static String routeSummary(JSONObject response, String cityId) throws Exception {
         String city = cityId.equals("tula") ? "Тула" :
-                (cityId.equals("moscow") ? "Москва" : "Владимир");
+                (cityId.equals("moscow") ? "Москва" :
+                (cityId.equals("borovsk") ? "Боровск" : "Владимир"));
         int requested = response.optInt("requestedMinutes", response.getInt("totalMinutes"));
         int unused = response.optInt("unusedMinutes", Math.max(0, requested - response.getInt("totalMinutes")));
         StringBuilder summary = new StringBuilder("Маршрут готов: " + city + ", " +

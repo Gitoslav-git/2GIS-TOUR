@@ -114,6 +114,16 @@ public final class MapActivity extends ComponentActivity {
     private LocationManager locationManager;
     private LocationListener locationListener;
     private boolean positionInFlight;
+    private LinearLayout zoomControls;
+    private boolean routeCameraReady;
+    private double routeMinLat;
+    private double routeMaxLat;
+    private double routeMinLon;
+    private double routeMaxLon;
+    private double routeCenterLat;
+    private double routeCenterLon;
+    private float routeZoom = 12.5f;
+    private float routeMinZoom = 10.5f;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -143,6 +153,24 @@ public final class MapActivity extends ComponentActivity {
         mapSummaryParams.setMargins(UiKit.dp(this, 14), 0, UiKit.dp(this, 14),
                 UiKit.dp(this, 12));
         mapContainer.addView(mapRouteSummary, mapSummaryParams);
+
+        zoomControls = new LinearLayout(this);
+        zoomControls.setOrientation(LinearLayout.VERTICAL);
+        zoomControls.setVisibility(View.GONE);
+        Button zoomIn = mapControlButton("+");
+        Button zoomOut = mapControlButton("−");
+        zoomControls.addView(zoomIn, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 44), UiKit.dp(this, 44)));
+        LinearLayout.LayoutParams zoomOutParams = new LinearLayout.LayoutParams(
+                UiKit.dp(this, 44), UiKit.dp(this, 44));
+        zoomOutParams.topMargin = UiKit.dp(this, 6);
+        zoomControls.addView(zoomOut, zoomOutParams);
+        FrameLayout.LayoutParams zoomParams = new FrameLayout.LayoutParams(
+                -2, -2, Gravity.END | Gravity.CENTER_VERTICAL);
+        zoomParams.rightMargin = UiKit.dp(this, 12);
+        mapContainer.addView(zoomControls, zoomParams);
+        zoomIn.setOnClickListener(view -> changeMapZoom(1f));
+        zoomOut.setOnClickListener(view -> changeMapZoom(-1f));
 
         LinearLayout sheet = new LinearLayout(this);
         sheet.setOrientation(LinearLayout.VERTICAL);
@@ -273,17 +301,24 @@ public final class MapActivity extends ComponentActivity {
         } else {
             mapContainer.removeView(mapPlaceholder);
             String cityId = getIntent().getStringExtra(EXTRA_CITY_ID);
-            double[] center = "moscow".equals(cityId) ? new double[]{55.7558, 37.6173}
-                    : ("vladimir".equals(cityId) ? new double[]{56.1291, 40.4075}
-                    : new double[]{54.1930, 37.6178});
+            double[] center = cityCenter(cityId);
             MapOptions options = new MapOptions();
             options.setPosition(camera(center[0], center[1], 12.5f));
             mapView = new MapView(this, options);
             mapView.setId(R.id.route_map_view);
             mapView.setClickable(true);
             mapView.setFocusable(true);
+            mapView.setOnTouchListener((view, event) -> {
+                if (event.getActionMasked() == MotionEvent.ACTION_UP
+                        || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+                    uiHandler.postDelayed(this::enforceRouteCameraBounds, 120L);
+                    uiHandler.postDelayed(this::enforceRouteCameraBounds, 520L);
+                }
+                return false;
+            });
             getLifecycle().addObserver(mapView);
             mapContainer.addView(mapView, 0, new FrameLayout.LayoutParams(-1, -1));
+            zoomControls.setVisibility(View.VISIBLE);
             mapView.getMapAsync(readyMap -> {
                 map = readyMap;
                 renderRoute();
@@ -308,6 +343,16 @@ public final class MapActivity extends ComponentActivity {
         button.setElevation(0f);
         button.setStateListAnimator(null);
         button.setBackground(UiKit.bordered(0xFFFFFFFF, UiKit.GREEN, 14, this));
+        return button;
+    }
+
+    private Button mapControlButton(String text) {
+        Button button = UiKit.button(this, text, 0xF2FFFFFF, UiKit.TEXT);
+        button.setTextSize(24);
+        button.setMinWidth(0);
+        button.setMinHeight(0);
+        button.setPadding(0, 0, 0, 0);
+        button.setElevation(UiKit.dp(this, 2));
         return button;
     }
 
@@ -368,8 +413,10 @@ public final class MapActivity extends ComponentActivity {
 
     private String cityName() {
         String cityId = getIntent().getStringExtra(EXTRA_CITY_ID);
-        return "moscow".equals(cityId) ? "Москве" :
-                ("vladimir".equals(cityId) ? "Владимиру" : "Туле");
+        if ("moscow".equals(cityId)) return "Москве";
+        if ("vladimir".equals(cityId)) return "Владимиру";
+        if ("borovsk".equals(cityId)) return "Боровску";
+        return "Туле";
     }
 
     private void renderPointList(int currentOrder) {
@@ -1150,8 +1197,113 @@ public final class MapActivity extends ComponentActivity {
 
         if (!restoredCamera && !route.path.isEmpty()) {
             double[] bounds = routeBounds(route.path);
+            rememberRouteCameraBounds(route.path, bounds);
             map.getCamera().move(camera(bounds[0], bounds[1], (float) bounds[2]),
                     Duration.ofMilliseconds(0), CameraAnimationType.LINEAR);
+        } else if (!route.path.isEmpty()) {
+            rememberRouteCameraBounds(route.path, routeBounds(route.path));
+        }
+    }
+
+    private void rememberRouteCameraBounds(List<ApiClient.GeoCoordinate> path, double[] bounds) {
+        routeMinLat = 90;
+        routeMaxLat = -90;
+        routeMinLon = 180;
+        routeMaxLon = -180;
+        for (ApiClient.GeoCoordinate coordinate : path) {
+            routeMinLat = Math.min(routeMinLat, coordinate.lat);
+            routeMaxLat = Math.max(routeMaxLat, coordinate.lat);
+            routeMinLon = Math.min(routeMinLon, coordinate.lon);
+            routeMaxLon = Math.max(routeMaxLon, coordinate.lon);
+        }
+        double latPadding = Math.max(0.008, (routeMaxLat - routeMinLat) * 0.35);
+        double lonPadding = Math.max(0.012, (routeMaxLon - routeMinLon) * 0.35);
+        routeMinLat -= latPadding;
+        routeMaxLat += latPadding;
+        routeMinLon -= lonPadding;
+        routeMaxLon += lonPadding;
+        routeCenterLat = bounds[0];
+        routeCenterLon = bounds[1];
+        routeZoom = (float) bounds[2];
+        routeMinZoom = Math.max(10.5f, routeZoom - 1.5f);
+        routeCameraReady = true;
+    }
+
+    private void changeMapZoom(float delta) {
+        if (map == null) return;
+        CameraSnapshot snapshot = cameraSnapshot();
+        double lat = snapshot == null ? routeCenterLat : snapshot.lat;
+        double lon = snapshot == null ? routeCenterLon : snapshot.lon;
+        float currentZoom = snapshot == null ? routeZoom : snapshot.zoom;
+        float nextZoom = Math.max(routeMinZoom, Math.min(18f, currentZoom + delta));
+        if (routeCameraReady) {
+            lat = Math.max(routeMinLat, Math.min(routeMaxLat, lat));
+            lon = Math.max(routeMinLon, Math.min(routeMaxLon, lon));
+        }
+        routeCenterLat = lat;
+        routeCenterLon = lon;
+        routeZoom = nextZoom;
+        map.getCamera().move(camera(lat, lon, nextZoom), Duration.ofMilliseconds(180),
+                CameraAnimationType.LINEAR);
+    }
+
+    private void enforceRouteCameraBounds() {
+        if (map == null || !routeCameraReady || isFinishing() || isDestroyed()) return;
+        CameraSnapshot snapshot = cameraSnapshot();
+        if (snapshot == null) return;
+        double lat = Math.max(routeMinLat, Math.min(routeMaxLat, snapshot.lat));
+        double lon = Math.max(routeMinLon, Math.min(routeMaxLon, snapshot.lon));
+        float zoom = Math.max(routeMinZoom, Math.min(18f, snapshot.zoom));
+        routeCenterLat = lat;
+        routeCenterLon = lon;
+        routeZoom = zoom;
+        if (Math.abs(lat - snapshot.lat) < 0.000001
+                && Math.abs(lon - snapshot.lon) < 0.000001
+                && Math.abs(zoom - snapshot.zoom) < 0.01f) return;
+        map.getCamera().move(camera(lat, lon, zoom), Duration.ofMilliseconds(180),
+                CameraAnimationType.LINEAR);
+    }
+
+    private CameraSnapshot cameraSnapshot() {
+        try {
+            Object position = map.getCamera().getClass().getMethod("getPosition")
+                    .invoke(map.getCamera());
+            Object point = position.getClass().getMethod("getPoint").invoke(position);
+            Object latitude = point.getClass().getMethod("getLatitude").invoke(point);
+            Object longitude = point.getClass().getMethod("getLongitude").invoke(point);
+            Object zoom = position.getClass().getMethod("getZoom").invoke(position);
+            double lat = numericValue(latitude);
+            double lon = numericValue(longitude);
+            float zoomValue = (float) numericValue(zoom);
+            return new CameraSnapshot(lat, lon, zoomValue);
+        } catch (ReflectiveOperationException | ClassCastException ignored) {
+            return null;
+        }
+    }
+
+    private static double numericValue(Object value) throws ReflectiveOperationException {
+        if (value instanceof Number) return ((Number) value).doubleValue();
+        Object raw = value.getClass().getMethod("getValue").invoke(value);
+        if (!(raw instanceof Number)) throw new ClassCastException();
+        return ((Number) raw).doubleValue();
+    }
+
+    private static double[] cityCenter(String cityId) {
+        if ("moscow".equals(cityId)) return new double[]{55.7558, 37.6173};
+        if ("vladimir".equals(cityId)) return new double[]{56.1291, 40.4075};
+        if ("borovsk".equals(cityId)) return new double[]{55.2073, 36.4833};
+        return new double[]{54.1930, 37.6178};
+    }
+
+    private static final class CameraSnapshot {
+        final double lat;
+        final double lon;
+        final float zoom;
+
+        CameraSnapshot(double lat, double lon, float zoom) {
+            this.lat = lat;
+            this.lon = lon;
+            this.zoom = zoom;
         }
     }
 
@@ -1189,6 +1341,9 @@ public final class MapActivity extends ComponentActivity {
     @Override protected void onDestroy() {
         if (pendingPlaceSearch != null) uiHandler.removeCallbacks(pendingPlaceSearch);
         stopLocationTracking();
+        if (objects != null) objects.removeAll();
+        objects = null;
+        map = null;
         network.shutdownNow();
         super.onDestroy();
     }

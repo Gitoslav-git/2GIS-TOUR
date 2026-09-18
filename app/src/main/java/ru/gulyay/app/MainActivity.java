@@ -42,6 +42,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private Spinner city;
+    private TextView cityArrow;
     private EditText query;
     private TextView result;
     private Button submit;
@@ -114,15 +115,26 @@ public final class MainActivity extends Activity {
         profileParams.rightMargin = p;
         hero.addView(profile, profileParams);
 
+        FrameLayout cityPicker = new FrameLayout(this);
+        cityPicker.setBackground(UiKit.rounded(0xEFFFFFFF, 18, this));
         city = new Spinner(this);
         city.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"Локация не определена", "Тула", "Владимир", "Москва"}));
-        city.setPadding(UiKit.dp(this, 16), 0, UiKit.dp(this, 12), 0);
-        city.setBackground(UiKit.rounded(0xEFFFFFFF, 18, this));
+                new String[]{"Локация не определена", "Тула", "Владимир", "Москва",
+                        "Боровск, Калужская область"}));
+        city.setPadding(UiKit.dp(this, 16), 0, UiKit.dp(this, 48), 0);
+        city.setBackgroundColor(0x00000000);
+        cityPicker.addView(city, new FrameLayout.LayoutParams(-1, -1));
+        cityArrow = UiKit.label(this, "▼", 18, UiKit.RED_SOFT);
+        cityArrow.setGravity(Gravity.CENTER);
+        cityArrow.setClickable(true);
+        cityArrow.setOnClickListener(view -> city.performClick());
+        FrameLayout.LayoutParams arrowParams = new FrameLayout.LayoutParams(
+                UiKit.dp(this, 48), -1, Gravity.END | Gravity.CENTER_VERTICAL);
+        cityPicker.addView(cityArrow, arrowParams);
         FrameLayout.LayoutParams cityParams = new FrameLayout.LayoutParams(
                 -1, UiKit.dp(this, compact ? 48 : 54), Gravity.BOTTOM);
         cityParams.setMargins(p, 0, p, UiKit.dp(this, compact ? 14 : 20));
-        hero.addView(city, cityParams);
+        hero.addView(cityPicker, cityParams);
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -358,6 +370,7 @@ public final class MainActivity extends Activity {
         city.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
                                                   int position, long id) {
+                updateCityArrow();
                 String selected = selectedCityId();
                 if (selected != null && startLat != null && startLon != null
                         && !locationMatchesCity(selected, startLat, startLon)) {
@@ -367,6 +380,7 @@ public final class MainActivity extends Activity {
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
+        updateCityArrow();
         mapButton.setOnClickListener(view -> openMap());
         startWalkButton.setOnClickListener(view -> startWalkOrContinue());
         resetRouteButton.setOnClickListener(view -> confirmRouteReset());
@@ -449,7 +463,7 @@ public final class MainActivity extends Activity {
         String cityId = selectedCityId();
         if (cityId == null) {
             setNetworkBusy(false);
-            locationStatus.setText("Локация не определена. Выберите Тулу, Владимир или Москву в списке.");
+            locationStatus.setText("Локация не определена. Выберите доступный город в списке.");
             return;
         }
         if (startLat != null && startLon != null && !locationMatchesCity(cityId, startLat, startLon)) {
@@ -1053,20 +1067,30 @@ public final class MainActivity extends Activity {
 
     private String selectedCityId() {
         int position = city.getSelectedItemPosition();
-        return position == 3 ? "moscow" : (position == 2 ? "vladimir" :
-                (position == 1 ? "tula" : null));
+        if (position == 1) return "tula";
+        if (position == 2) return "vladimir";
+        if (position == 3) return "moscow";
+        if (position == 4) return "borovsk";
+        return null;
     }
 
     private static int cityPosition(String cityId) {
-        return "moscow".equals(cityId) ? 3 : ("vladimir".equals(cityId) ? 2 : 1);
+        if ("tula".equals(cityId)) return 1;
+        if ("vladimir".equals(cityId)) return 2;
+        if ("moscow".equals(cityId)) return 3;
+        if ("borovsk".equals(cityId)) return 4;
+        return 0;
     }
 
     private static String cityName(String cityId) {
-        return "moscow".equals(cityId) ? "Москва" :
-                ("vladimir".equals(cityId) ? "Владимир" : "Тула");
+        if ("moscow".equals(cityId)) return "Москва";
+        if ("vladimir".equals(cityId)) return "Владимир";
+        if ("borovsk".equals(cityId)) return "Боровск";
+        return "Тула";
     }
 
     private static String cityIdForLocation(double lat, double lon) {
+        if (locationMatchesCity("borovsk", lat, lon)) return "borovsk";
         if (locationMatchesCity("moscow", lat, lon)) return "moscow";
         if (locationMatchesCity("vladimir", lat, lon)) return "vladimir";
         if (locationMatchesCity("tula", lat, lon)) return "tula";
@@ -1077,9 +1101,16 @@ public final class MainActivity extends Activity {
         double centerLat = 54.1930, centerLon = 37.6178, limitKm = 50.0;
         if ("vladimir".equals(cityId)) { centerLat = 56.1291; centerLon = 40.4075; }
         if ("moscow".equals(cityId)) { centerLat = 55.7558; centerLon = 37.6173; limitKm = 80.0; }
+        if ("borovsk".equals(cityId)) { centerLat = 55.2073; centerLon = 36.4833; limitKm = 25.0; }
         double latKm = (lat - centerLat) * 111.32;
         double lonKm = (lon - centerLon) * 111.32 * Math.cos(Math.toRadians(centerLat));
         return Math.sqrt(latKm * latKm + lonKm * lonKm) <= limitKm;
+    }
+
+    private void updateCityArrow() {
+        if (cityArrow == null || city == null) return;
+        cityArrow.setTextColor(city.getSelectedItemPosition() == 0
+                ? UiKit.RED_SOFT : UiKit.MUTED);
     }
 
     private void markRouteLocationDirty() {

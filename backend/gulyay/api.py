@@ -26,9 +26,10 @@ from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, start_walk)
 
-app = FastAPI(title="Гуляй API", version="0.6")
+app = FastAPI(title="Гуляй API", version="0.6.8")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
-          City(cityId="moscow", name="Москва"))
+          City(cityId="moscow", name="Москва"),
+          City(cityId="borovsk", name="Боровск, Калужская область"))
 ROUTE_REPOSITORY = RouteRepository()
 IDEMPOTENT_ROUTES: dict[tuple[UUID, UUID], Route] = {}
 IDEMPOTENT_REVISIONS: dict[tuple[UUID, UUID], Route] = {}

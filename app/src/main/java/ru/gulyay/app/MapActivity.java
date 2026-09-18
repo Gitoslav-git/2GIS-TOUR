@@ -7,6 +7,9 @@ import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.location.Location;
 import android.location.LocationListener;
@@ -92,8 +95,10 @@ public final class MapActivity extends ComponentActivity {
     private MapView mapView;
     private Map map;
     private MapObjectManager objects;
-    private Image routeMarkerImage;
+    private final List<Image> routeMarkerImages = new ArrayList<>();
+    private Image startMarkerImage;
     private Image userMarkerImage;
+    private Marker userMarker;
     private ApiClient.Result route;
     private ApiClient.WalkResult walk;
     private RouteViewModel routeViewModel;
@@ -134,12 +139,16 @@ public final class MapActivity extends ComponentActivity {
     private float routeMinZoom = 10.5f;
     private boolean mapInitializationStarted;
     private boolean cameraSnapshotFailureLogged;
+    private double latestUserLat = Double.NaN;
+    private double latestUserLon = Double.NaN;
     private final Runnable cameraBoundsGuard = this::enforceRouteCameraBounds;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         restoredCamera = savedInstanceState != null;
         routeViewModel = new ViewModelProvider(this).get(RouteViewModel.class);
+        latestUserLat = getIntent().getDoubleExtra(EXTRA_USER_LAT, Double.NaN);
+        latestUserLon = getIntent().getDoubleExtra(EXTRA_USER_LON, Double.NaN);
 
         FrameLayout root = new FrameLayout(this);
         LinearLayout page = new LinearLayout(this);
@@ -379,9 +388,19 @@ public final class MapActivity extends ComponentActivity {
             logMemory("after-map-view");
             mapView.getMapAsync(readyMap -> {
                 if (isFinishing() || isDestroyed()) return Unit.INSTANCE;
-                map = readyMap;
-                renderRoute();
-                logMemory("map-ready");
+                try {
+                    map = readyMap;
+                    renderRoute();
+                    logMemory("map-ready");
+                } catch (RuntimeException | LinkageError error) {
+                    Log.e(MEMORY_LOG, "2GIS route rendering failed", error);
+                    showMapFallback("Не удалось отрисовать карту 2ГИС\n"
+                            + "Маршрут и точки сохранены");
+                } catch (OutOfMemoryError error) {
+                    Log.e(MEMORY_LOG, "Not enough memory to render route markers", error);
+                    showMapFallback("Эмулятору не хватило памяти для карты 2ГИС\n"
+                            + "Маршрут и точки сохранены");
+                }
                 return Unit.INSTANCE;
             });
         } catch (RuntimeException | LinkageError error) {
@@ -1010,6 +1029,7 @@ public final class MapActivity extends ComponentActivity {
                 + "              ●  точка " + walk.currentPointOrder);
         mapRouteSummary.setText("🚶  Маршрут запущен\nСледующая точка: "
                 + walk.currentPointOrder + " • радиус 75 м");
+        updateGuidance(latestUserLat, latestUserLon);
         renderPointList(walk.currentPointOrder);
         boolean active = "ACTIVE".equals(walk.status);
         boolean paused = "PAUSED".equals(walk.status);
@@ -1042,6 +1062,10 @@ public final class MapActivity extends ComponentActivity {
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         locationListener = new LocationListener() {
             @Override public void onLocationChanged(Location location) {
+                latestUserLat = location.getLatitude();
+                latestUserLon = location.getLongitude();
+                updateUserMarker(latestUserLat, latestUserLon);
+                updateGuidance(latestUserLat, latestUserLon);
                 sendPosition(location);
             }
             @Override public void onProviderDisabled(String provider) { }
@@ -1256,14 +1280,22 @@ public final class MapActivity extends ComponentActivity {
         else objects.removeAll();
 
         GulyayApplication application = (GulyayApplication) getApplication();
-        if (routeMarkerImage == null) {
-            routeMarkerImage = ImagesKt.imageFromResource(
-                    application.sdkContext(), R.drawable.route_marker, null);
+        routeMarkerImages.clear();
+        if (startMarkerImage == null) {
+            startMarkerImage = mapMarkerImage(application, "S", 0xFFFF8A34);
+        }
+        double startLat = routeStartLat();
+        double startLon = routeStartLon();
+        if (Double.isFinite(startLat) && Double.isFinite(startLon)) {
+            objects.addObject(new Marker(markerOptions(startLat, startLon,
+                    startMarkerImage, "Старт маршрута", route.points.size() + 20)));
         }
         for (int i = 0; i < route.points.size(); i++) {
             ApiClient.PlaceOption point = route.points.get(i);
             if (!Double.isFinite(point.lat) || !Double.isFinite(point.lon)) continue;
-            MarkerOptions options = markerOptions(point.lat, point.lon, routeMarkerImage,
+            Image numbered = mapMarkerImage(application, String.valueOf(i + 1), UiKit.GREEN_DARK);
+            routeMarkerImages.add(numbered);
+            MarkerOptions options = markerOptions(point.lat, point.lon, numbered,
                     (i + 1) + ". " + point.name, i + 2);
             objects.addObject(new Marker(options));
         }
@@ -1279,16 +1311,8 @@ public final class MapActivity extends ComponentActivity {
             objects.addObject(new Polyline(line));
         }
 
-        double userLat = getIntent().getDoubleExtra(EXTRA_USER_LAT, Double.NaN);
-        double userLon = getIntent().getDoubleExtra(EXTRA_USER_LON, Double.NaN);
-        if (Double.isFinite(userLat) && Double.isFinite(userLon)) {
-            if (userMarkerImage == null) {
-                userMarkerImage = ImagesKt.imageFromResource(
-                        application.sdkContext(), R.drawable.user_marker, null);
-            }
-            objects.addObject(new Marker(markerOptions(
-                    userLat, userLon, userMarkerImage, "Вы здесь", route.points.size() + 3)));
-        }
+        userMarker = null;
+        updateUserMarker(latestUserLat, latestUserLon);
 
         if (!restoredCamera && !route.path.isEmpty()) {
             double[] bounds = routeBounds(route.path);
@@ -1392,6 +1416,181 @@ public final class MapActivity extends ComponentActivity {
         return ((Number) raw).doubleValue();
     }
 
+    private Image mapMarkerImage(GulyayApplication application, String label, int color) {
+        int size = UiKit.dp(this, 42);
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        fill.setColor(color);
+        canvas.drawCircle(size / 2f, size / 2f, size * 0.43f, fill);
+        Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
+        border.setStyle(Paint.Style.STROKE);
+        border.setStrokeWidth(UiKit.dp(this, 3));
+        border.setColor(0xFFFFFFFF);
+        canvas.drawCircle(size / 2f, size / 2f, size * 0.43f, border);
+        Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        text.setColor(0xFFFFFFFF);
+        text.setTypeface(Typeface.DEFAULT_BOLD);
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setTextSize(UiKit.dp(this, label.length() > 1 ? 14 : 17));
+        Paint.FontMetrics metrics = text.getFontMetrics();
+        float baseline = size / 2f - (metrics.ascent + metrics.descent) / 2f;
+        canvas.drawText(label, size / 2f, baseline, text);
+        return ImagesKt.imageFromBitmap(application.sdkContext(), bitmap);
+    }
+
+    private void updateUserMarker(double lat, double lon) {
+        if (map == null || objects == null || !Double.isFinite(lat) || !Double.isFinite(lon)) {
+            return;
+        }
+        // At the beginning the orange start marker must stay visible. The blue user
+        // position appears after the person has actually moved away from it.
+        double startLat = routeStartLat();
+        double startLon = routeStartLon();
+        if (userMarker == null && Double.isFinite(startLat) && Double.isFinite(startLon)
+                && meters(startLat, startLon, lat, lon) < 15) {
+            return;
+        }
+        GeoPointWithElevation position = GeoPointWithElevationExtraKt.GeoPointWithElevation(
+                lat, lon, new Elevation());
+        if (userMarker != null) {
+            userMarker.setPosition(position);
+            return;
+        }
+        GulyayApplication application = (GulyayApplication) getApplication();
+        if (userMarkerImage == null) {
+            userMarkerImage = mapMarkerImage(application, "•", 0xFF2474FF);
+        }
+        userMarker = new Marker(markerOptions(
+                lat, lon, userMarkerImage, "Вы здесь", route.points.size() + 30));
+        objects.addObject(userMarker);
+    }
+
+    private void updateGuidance(double lat, double lon) {
+        if (walk == null || !walk.success || route == null || !route.success
+                || route.path.size() < 2 || walk.currentPointOrder < 1
+                || walk.currentPointOrder > route.points.size()) return;
+        if (!Double.isFinite(lat) || !Double.isFinite(lon)) {
+            lat = routeStartLat();
+            lon = routeStartLon();
+        }
+        ApiClient.PlaceOption target = route.points.get(walk.currentPointOrder - 1);
+        String hint = guidanceHint(lat, lon, target);
+        mapRouteSummary.setText("🚶  " + hint + "\nК точке " + walk.currentPointOrder
+                + ": " + target.name);
+    }
+
+    private String guidanceHint(double lat, double lon, ApiClient.PlaceOption target) {
+        if (!Double.isFinite(lat) || !Double.isFinite(lon)) {
+            return "Следуйте по линии маршрута";
+        }
+        int nearest = nearestPathIndex(lat, lon, 0);
+        int targetIndex = nearestPathIndex(target.lat, target.lon, nearest);
+        if (targetIndex <= nearest) targetIndex = route.path.size() - 1;
+        int targetMeters = (int) Math.round(pathDistance(nearest, targetIndex)
+                + meters(lat, lon, route.path.get(nearest).lat, route.path.get(nearest).lon));
+        if (targetMeters <= 35) return "Точка почти рядом";
+
+        TurnHint turn = nextTurn(nearest, targetIndex);
+        if (turn != null) {
+            if (turn.distanceMeters <= 40) {
+                return "Поверните " + turn.direction;
+            }
+            return "Идите прямо • через " + roundedMeters(turn.distanceMeters)
+                    + " поверните " + turn.direction;
+        }
+        return "Следуйте по линии маршрута • около " + roundedMeters(targetMeters);
+    }
+
+    private TurnHint nextTurn(int start, int end) {
+        if (end - start < 2) return null;
+        double previousBearing = Double.NaN;
+        double accumulated = 0;
+        for (int i = start; i < end; i++) {
+            ApiClient.GeoCoordinate from = route.path.get(i);
+            ApiClient.GeoCoordinate to = route.path.get(i + 1);
+            double segment = meters(from.lat, from.lon, to.lat, to.lon);
+            if (segment < 3) continue;
+            double currentBearing = bearing(from.lat, from.lon, to.lat, to.lon);
+            if (Double.isFinite(previousBearing) && accumulated >= 20) {
+                double delta = normalizeBearing(currentBearing - previousBearing);
+                if (Math.abs(delta) >= 35 && Math.abs(delta) <= 150) {
+                    return new TurnHint((int) Math.round(accumulated),
+                            delta > 0 ? "направо" : "налево");
+                }
+            }
+            previousBearing = currentBearing;
+            accumulated += segment;
+            if (accumulated > 700) break;
+        }
+        return null;
+    }
+
+    private int nearestPathIndex(double lat, double lon, int fromIndex) {
+        int best = Math.max(0, Math.min(fromIndex, route.path.size() - 1));
+        double bestDistance = Double.MAX_VALUE;
+        for (int i = best; i < route.path.size(); i++) {
+            ApiClient.GeoCoordinate point = route.path.get(i);
+            double distance = meters(lat, lon, point.lat, point.lon);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    private double pathDistance(int start, int end) {
+        double distance = 0;
+        for (int i = Math.max(0, start); i < end && i + 1 < route.path.size(); i++) {
+            ApiClient.GeoCoordinate from = route.path.get(i);
+            ApiClient.GeoCoordinate to = route.path.get(i + 1);
+            distance += meters(from.lat, from.lon, to.lat, to.lon);
+        }
+        return distance;
+    }
+
+    private static String roundedMeters(int meters) {
+        if (meters < 100) return Math.max(10, (int) Math.round(meters / 10.0) * 10) + " м";
+        if (meters < 1000) return ((int) Math.round(meters / 50.0) * 50) + " м";
+        return String.format(java.util.Locale.US, "%.1f км", meters / 1000.0);
+    }
+
+    private static double meters(double lat1, double lon1, double lat2, double lon2) {
+        double lat = Math.toRadians(lat2 - lat1);
+        double lon = Math.toRadians(lon2 - lon1);
+        double value = Math.sin(lat / 2) * Math.sin(lat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(lon / 2) * Math.sin(lon / 2);
+        return 6_371_000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+    }
+
+    private static double bearing(double lat1, double lon1, double lat2, double lon2) {
+        double first = Math.toRadians(lat1);
+        double second = Math.toRadians(lat2);
+        double deltaLon = Math.toRadians(lon2 - lon1);
+        double y = Math.sin(deltaLon) * Math.cos(second);
+        double x = Math.cos(first) * Math.sin(second)
+                - Math.sin(first) * Math.cos(second) * Math.cos(deltaLon);
+        return Math.toDegrees(Math.atan2(y, x));
+    }
+
+    private static double normalizeBearing(double value) {
+        while (value > 180) value -= 360;
+        while (value < -180) value += 360;
+        return value;
+    }
+
+    private double routeStartLat() {
+        if (route != null && Double.isFinite(route.startLat)) return route.startLat;
+        return route != null && !route.path.isEmpty() ? route.path.get(0).lat : Double.NaN;
+    }
+
+    private double routeStartLon() {
+        if (route != null && Double.isFinite(route.startLon)) return route.startLon;
+        return route != null && !route.path.isEmpty() ? route.path.get(0).lon : Double.NaN;
+    }
+
     private static double[] cityCenter(String cityId) {
         if ("moscow".equals(cityId)) return new double[]{55.7558, 37.6173};
         if ("vladimir".equals(cityId)) return new double[]{56.1291, 40.4075};
@@ -1417,9 +1616,19 @@ public final class MapActivity extends ComponentActivity {
                 lat, lon, new Elevation());
         return new MarkerOptions(
                 position, icon, null, new Anchor(0.5f, 1f), text, (TextStyle) null,
-                new Opacity(1f), true, false, new LogicalPixel(32f), text,
-                new ZIndex(zIndex), new LabelingPriority((byte) 1), true,
+                new Opacity(1f), true, false, new LogicalPixel(38f), text,
+                new ZIndex(zIndex), new LabelingPriority((byte) 100), true,
                 null, AnimationMode.NORMAL, false);
+    }
+
+    private static final class TurnHint {
+        final int distanceMeters;
+        final String direction;
+
+        TurnHint(int distanceMeters, String direction) {
+            this.distanceMeters = distanceMeters;
+            this.direction = direction;
+        }
     }
 
     private static CameraPosition camera(double lat, double lon, float zoom) {
@@ -1447,8 +1656,10 @@ public final class MapActivity extends ComponentActivity {
         stopLocationTracking();
         if (objects != null) objects.removeAll();
         objects = null;
-        routeMarkerImage = null;
+        routeMarkerImages.clear();
+        startMarkerImage = null;
         userMarkerImage = null;
+        userMarker = null;
         map = null;
         if (mapView != null) {
             if (mapView.getParent() == mapContainer) mapContainer.removeView(mapView);

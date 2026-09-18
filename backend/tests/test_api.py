@@ -210,6 +210,9 @@ def test_walk_actions_require_valid_state_and_active_walk_is_unique():
     repeated = client.post(f"/v1/routes/{route_id}/walks", headers=headers,
                            json={"routeVersion": 1})
     assert repeated.json()["walkId"] == walk_id
+    restored = client.get(f"/v1/routes/{route_id}/walks/active", headers=headers)
+    assert restored.status_code == 200
+    assert restored.json()["walkId"] == walk_id
     paused = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
                          json={"action": "PAUSE"})
     assert paused.status_code == 200 and paused.json()["status"] == "PAUSED"
@@ -219,6 +222,9 @@ def test_walk_actions_require_valid_state_and_active_walk_is_unique():
     stopped = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
                           json={"action": "STOP"})
     assert stopped.status_code == 200 and stopped.json()["status"] == "STOPPED"
+    assert client.get(
+        f"/v1/routes/{route_id}/walks/active", headers=headers,
+    ).status_code == 404
     invalid = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
                           json={"action": "RESUME"})
     assert invalid.status_code == 409

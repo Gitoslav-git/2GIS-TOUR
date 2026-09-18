@@ -67,6 +67,9 @@ final class ApiClient {
         int totalMinutes;
         int requestedMinutes;
         int totalDistanceMeters;
+        double startLat;
+        double startLon;
+        String startSource;
 
         Result(boolean success, String message, String routeId, int routeVersion) {
             this(success, message, routeId, routeVersion, 0, null,
@@ -99,6 +102,9 @@ final class ApiClient {
             this.totalMinutes = -1;
             this.requestedMinutes = -1;
             this.totalDistanceMeters = -1;
+            this.startLat = Double.NaN;
+            this.startLon = Double.NaN;
+            this.startSource = "LEGACY";
         }
     }
 
@@ -246,6 +252,11 @@ final class ApiClient {
 
     static WalkResult getWalk(String walkId, String sessionId) throws Exception {
         return sendWalk("/v1/walks/" + walkId, "GET", null, sessionId);
+    }
+
+    static WalkResult getActiveWalk(String routeId, String sessionId) throws Exception {
+        return sendWalk("/v1/routes/" + routeId + "/walks/active",
+                "GET", null, sessionId);
     }
 
     static WalkResult sendWalkPosition(String walkId, String sessionId,
@@ -459,6 +470,13 @@ final class ApiClient {
     private static void fillRouteMetrics(Result result, JSONObject response) throws Exception {
         result.totalMinutes = response.optInt("totalMinutes", -1);
         result.requestedMinutes = response.optInt("requestedMinutes", result.totalMinutes);
+        if (response.has("startLat") && !response.isNull("startLat")) {
+            result.startLat = response.getDouble("startLat");
+        }
+        if (response.has("startLon") && !response.isNull("startLon")) {
+            result.startLon = response.getDouble("startLon");
+        }
+        result.startSource = response.optString("startSource", "LEGACY");
         JSONArray legs = response.optJSONArray("legs");
         if (legs == null) return;
         int distance = 0;

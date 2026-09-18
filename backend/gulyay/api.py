@@ -26,7 +26,7 @@ from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, start_walk)
 
-app = FastAPI(title="Гуляй API", version="0.6.9")
+app = FastAPI(title="Гуляй API", version="0.6.9.a")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"),
           City(cityId="borovsk", name="Боровск, Калужская область"))
@@ -66,7 +66,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.6"}
+    return {"status": "ok", "version": "0.6.9.a"}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])
@@ -221,6 +221,22 @@ def get_walk(walk_id: UUID, x_device_session: UUID | None = Header(default=None)
     state = repository.get_walk(walk_id, x_device_session)
     if state is None:
         return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+    return state.session
+
+
+@app.get("/v1/routes/{route_id}/walks/active", response_model=WalkSession)
+def get_active_walk(route_id: UUID,
+                    x_device_session: UUID | None = Header(default=None),
+                    x_request_id: UUID | None = Header(default=None),
+                    repository: RouteRepository = Depends(
+                        get_route_repository)) -> WalkSession | JSONResponse:
+    """Restore a walk after the isolated Android map process was terminated."""
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None:
+        return failure("NOT_FOUND", "Активная прогулка не найдена", 404, request_id)
+    state = repository.find_active_walk(x_device_session)
+    if state is None or state.session.routeId != route_id:
+        return failure("NOT_FOUND", "Активная прогулка не найдена", 404, request_id)
     return state.session
 
 

@@ -42,6 +42,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private Spinner city;
+    private FrameLayout cityPicker;
     private TextView cityArrow;
     private EditText query;
     private TextView result;
@@ -115,7 +116,7 @@ public final class MainActivity extends Activity {
         profileParams.rightMargin = p;
         hero.addView(profile, profileParams);
 
-        FrameLayout cityPicker = new FrameLayout(this);
+        cityPicker = new FrameLayout(this);
         cityPicker.setBackground(UiKit.rounded(0xEFFFFFFF, 18, this));
         city = new Spinner(this);
         city.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
@@ -1108,9 +1109,12 @@ public final class MainActivity extends Activity {
     }
 
     private void updateCityArrow() {
-        if (cityArrow == null || city == null) return;
-        cityArrow.setTextColor(city.getSelectedItemPosition() == 0
-                ? UiKit.RED_SOFT : UiKit.MUTED);
+        if (cityArrow == null || city == null || cityPicker == null) return;
+        boolean unknown = city.getSelectedItemPosition() == 0;
+        cityArrow.setTextColor(UiKit.MUTED);
+        cityPicker.setBackground(unknown
+                ? UiKit.bordered(0xFFFFECEC, 0xFFE7A2A2, 18, this)
+                : UiKit.rounded(0xEFFFFFFF, 18, this));
     }
 
     private void markRouteLocationDirty() {
@@ -1151,8 +1155,41 @@ public final class MainActivity extends Activity {
         if (activeWalkId != null) {
             openWalkMap(activeWalkId);
         } else {
-            openMap();
+            recoverActiveWalkOrOpenRoute();
         }
+    }
+
+    private void recoverActiveWalkOrOpenRoute() {
+        if (routeId == null || routeCityId == null || requestInFlight) return;
+        final String requestedRouteId = routeId;
+        final String owner = sessionId();
+        setNetworkBusy(true);
+        result.setText("Восстанавливаем сохранённый маршрут…");
+        network.execute(() -> {
+            ApiClient.WalkResult response;
+            try {
+                response = ApiClient.getActiveWalk(requestedRouteId, owner);
+            } catch (Exception exception) {
+                response = new ApiClient.WalkResult(false,
+                        "Не удалось проверить активную прогулку.", null, null,
+                        0, 0, false, -1, null);
+            }
+            ApiClient.WalkResult finalResponse = response;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                finishNetwork(0);
+                if (finalResponse.success && finalResponse.walkId != null) {
+                    getSharedPreferences("active_walk", MODE_PRIVATE).edit()
+                            .putString("walkId", finalResponse.walkId)
+                            .putString("routeId", requestedRouteId)
+                            .putInt("routeVersion", routeVersion).apply();
+                    openWalkMap(finalResponse.walkId);
+                } else {
+                    if (lastSuccessfulResult != null) result.setText(lastSuccessfulResult);
+                    openMap();
+                }
+            });
+        });
     }
 
     private String activeWalkIdForCurrentRoute() {
@@ -1173,7 +1210,10 @@ public final class MainActivity extends Activity {
 
     private void updateQueryEditActions() {
         if (returnToRouteButton == null) return;
-        boolean visible = queryEditMode && routeId != null;
+        // The route screen runs in a dedicated process. If that process is killed by
+        // the native map, MainActivity becomes visible again without a result Intent.
+        // Keep the return action available whenever a saved route still exists.
+        boolean visible = routeId != null;
         returnToRouteButton.setVisibility(visible ? View.VISIBLE : View.GONE);
         submit.setText(routeId == null ? "Построить маршрут" : "Изменить маршрут");
     }
@@ -1296,7 +1336,17 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != ROUTE_SCREEN_REQUEST || resultCode != RESULT_OK || data == null) return;
+        if (requestCode != ROUTE_SCREEN_REQUEST) return;
+        if (resultCode != RESULT_OK || data == null) {
+            if (routeId != null) {
+                queryEditMode = true;
+                persistQueryEditMode();
+                updateQueryEditActions();
+                result.setText("Экран карты закрылся, но маршрут сохранён. "
+                        + "Нажмите «Вернуться к маршруту».");
+            }
+            return;
+        }
         String returnedWalkId = data.getStringExtra(MapActivity.EXTRA_WALK_ID);
         String returnedWalkRouteId = data.getStringExtra(MapActivity.EXTRA_ROUTE_ID);
         if (returnedWalkId != null && returnedWalkRouteId != null) {

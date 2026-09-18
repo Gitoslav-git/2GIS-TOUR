@@ -10,6 +10,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.Typeface;
 import android.location.Location;
 import android.location.LocationListener;
@@ -111,6 +112,10 @@ public final class MapActivity extends ComponentActivity {
     private TextView screenTitle;
     private TextView routeSummary;
     private TextView mapRouteSummary;
+    private LinearLayout guidancePanel;
+    private TextView guidanceTitle;
+    private TextView guidanceSubtitle;
+    private TextView guidanceTurnIcon;
     private TextView nextLabel;
     private LinearLayout pointHero;
     private LinearLayout pointList;
@@ -173,6 +178,49 @@ public final class MapActivity extends ComponentActivity {
         mapSummaryParams.setMargins(UiKit.dp(this, 14), 0, UiKit.dp(this, 14),
                 UiKit.dp(this, 12));
         mapContainer.addView(mapRouteSummary, mapSummaryParams);
+
+        guidancePanel = new LinearLayout(this);
+        guidancePanel.setOrientation(LinearLayout.HORIZONTAL);
+        guidancePanel.setGravity(Gravity.CENTER_VERTICAL);
+        guidancePanel.setPadding(UiKit.dp(this, 10), UiKit.dp(this, 8),
+                UiKit.dp(this, 10), UiKit.dp(this, 8));
+        guidancePanel.setBackground(UiKit.rounded(0xF7FFFFFF, 22, this));
+        guidancePanel.setVisibility(View.GONE);
+        TextView walkingIcon = UiKit.label(this, "🚶", 25, UiKit.GREEN_DARK);
+        walkingIcon.setGravity(Gravity.CENTER);
+        walkingIcon.setBackground(UiKit.rounded(0xFFE4F8EA, 28, this));
+        guidancePanel.addView(walkingIcon, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 54), UiKit.dp(this, 54)));
+        LinearLayout guidanceText = new LinearLayout(this);
+        guidanceText.setOrientation(LinearLayout.VERTICAL);
+        guidanceText.setGravity(Gravity.CENTER_VERTICAL);
+        guidanceText.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 8), 0);
+        guidanceTitle = UiKit.label(this, "Следуйте по маршруту", 16, UiKit.TEXT);
+        guidanceTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        guidanceTitle.setSingleLine(true);
+        guidanceTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        guidanceSubtitle = UiKit.label(this, "До первой точки", 13, UiKit.MUTED);
+        guidanceSubtitle.setSingleLine(true);
+        guidanceSubtitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        guidanceText.addView(guidanceTitle);
+        guidanceText.addView(guidanceSubtitle);
+        guidancePanel.addView(guidanceText, new LinearLayout.LayoutParams(0, -1, 1));
+        TextView guidanceDivider = UiKit.label(this, "", 1, 0x00000000);
+        guidanceDivider.setBackgroundColor(0xFFD5DAD7);
+        LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(
+                UiKit.dp(this, 1), UiKit.dp(this, 44));
+        dividerParams.rightMargin = UiKit.dp(this, 8);
+        guidancePanel.addView(guidanceDivider, dividerParams);
+        guidanceTurnIcon = UiKit.label(this, "↑", 34, UiKit.GREEN_DARK);
+        guidanceTurnIcon.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        guidanceTurnIcon.setGravity(Gravity.CENTER);
+        guidancePanel.addView(guidanceTurnIcon, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 48), UiKit.dp(this, 54)));
+        FrameLayout.LayoutParams guidanceParams = new FrameLayout.LayoutParams(
+                -1, UiKit.dp(this, 72), Gravity.BOTTOM);
+        guidanceParams.setMargins(UiKit.dp(this, 10), 0, UiKit.dp(this, 10),
+                UiKit.dp(this, 10));
+        mapContainer.addView(guidancePanel, guidanceParams);
 
         zoomControls = new LinearLayout(this);
         zoomControls.setOrientation(LinearLayout.VERTICAL);
@@ -492,6 +540,8 @@ public final class MapActivity extends ComponentActivity {
                 ? String.format(java.util.Locale.US, " • %.1f км", route.totalDistanceMeters / 1000.0)
                 : "";
         status.setText("◷  " + time + "                   ●  " + route.points.size() + " места");
+        guidancePanel.setVisibility(View.GONE);
+        mapRouteSummary.setVisibility(View.VISIBLE);
         mapRouteSummary.setText("🚶  Маршрут готов\n" + route.points.size() + " места • "
                 + time + distance);
         primaryAction.setText("▶");
@@ -563,6 +613,8 @@ public final class MapActivity extends ComponentActivity {
         editingPoints.clear();
         editingPoints.addAll(route.points);
         pointEditing = true;
+        guidancePanel.setVisibility(View.GONE);
+        mapRouteSummary.setVisibility(View.VISIBLE);
         screenTitle.setText("Редактирование маршрута");
         mapRouteSummary.setText("Меняйте порядок прямо здесь\nЗажмите ≡ и перетащите точку");
         nextLabel.setText("ТОЧКИ МАРШРУТА");
@@ -1027,9 +1079,14 @@ public final class MapActivity extends ComponentActivity {
         routeSummary.setText(pointName);
         status.setText("◷  Осталось ≈" + walk.remainingMinutes + " мин"
                 + "              ●  точка " + walk.currentPointOrder);
-        mapRouteSummary.setText("🚶  Маршрут запущен\nСледующая точка: "
-                + walk.currentPointOrder + " • радиус 75 м");
-        updateGuidance(latestUserLat, latestUserLon);
+        if ("COMPLETED".equals(walk.status) || "STOPPED".equals(walk.status)) {
+            guidancePanel.setVisibility(View.GONE);
+            mapRouteSummary.setVisibility(View.VISIBLE);
+            mapRouteSummary.setText("COMPLETED".equals(walk.status)
+                    ? "Маршрут завершён" : "Прогулка остановлена");
+        } else {
+            updateGuidance(latestUserLat, latestUserLon);
+        }
         renderPointList(walk.currentPointOrder);
         boolean active = "ACTIVE".equals(walk.status);
         boolean paused = "PAUSED".equals(walk.status);
@@ -1281,22 +1338,23 @@ public final class MapActivity extends ComponentActivity {
 
         GulyayApplication application = (GulyayApplication) getApplication();
         routeMarkerImages.clear();
-        if (startMarkerImage == null) {
-            startMarkerImage = mapMarkerImage(application, "S", 0xFFFF8A34);
-        }
         double startLat = routeStartLat();
         double startLon = routeStartLon();
-        if (Double.isFinite(startLat) && Double.isFinite(startLon)) {
-            objects.addObject(new Marker(markerOptions(startLat, startLon,
+        boolean startsFromUser = "USER_GEO".equals(route.startSource);
+        if (!startsFromUser && Double.isFinite(startLat) && Double.isFinite(startLon)) {
+            startMarkerImage = labeledPinImage(application, "S", "Старт маршрута", 0xFFFF8A34);
+            routeMarkerImages.add(startMarkerImage);
+            objects.addObject(new Marker(labeledMarkerOptions(startLat, startLon,
                     startMarkerImage, "Старт маршрута", route.points.size() + 20)));
         }
         for (int i = 0; i < route.points.size(); i++) {
             ApiClient.PlaceOption point = route.points.get(i);
             if (!Double.isFinite(point.lat) || !Double.isFinite(point.lon)) continue;
-            Image numbered = mapMarkerImage(application, String.valueOf(i + 1), UiKit.GREEN_DARK);
+            Image numbered = labeledPinImage(application, String.valueOf(i + 1),
+                    point.name, 0xFF00A83E);
             routeMarkerImages.add(numbered);
-            MarkerOptions options = markerOptions(point.lat, point.lon, numbered,
-                    (i + 1) + ". " + point.name, i + 2);
+            MarkerOptions options = labeledMarkerOptions(point.lat, point.lon, numbered,
+                    point.name, i + 2);
             objects.addObject(new Marker(options));
         }
 
@@ -1312,7 +1370,13 @@ public final class MapActivity extends ComponentActivity {
         }
 
         userMarker = null;
-        updateUserMarker(latestUserLat, latestUserLon);
+        double markerLat = latestUserLat;
+        double markerLon = latestUserLon;
+        if (startsFromUser && (!Double.isFinite(markerLat) || !Double.isFinite(markerLon))) {
+            markerLat = startLat;
+            markerLon = startLon;
+        }
+        updateUserMarker(markerLat, markerLon);
 
         if (!restoredCamera && !route.path.isEmpty()) {
             double[] bounds = routeBounds(route.path);
@@ -1416,39 +1480,110 @@ public final class MapActivity extends ComponentActivity {
         return ((Number) raw).doubleValue();
     }
 
-    private Image mapMarkerImage(GulyayApplication application, String label, int color) {
-        int size = UiKit.dp(this, 42);
-        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+    private Image labeledPinImage(GulyayApplication application, String label,
+                                  String placeName, int color) {
+        int width = UiKit.dp(this, 176);
+        int height = UiKit.dp(this, 62);
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
         fill.setColor(color);
-        canvas.drawCircle(size / 2f, size / 2f, size * 0.43f, fill);
+        float centerX = UiKit.dp(this, 23);
+        float centerY = UiKit.dp(this, 22);
+        float radius = UiKit.dp(this, 18);
+        Path pin = new Path();
+        pin.addCircle(centerX, centerY, radius, Path.Direction.CW);
+        pin.moveTo(centerX - UiKit.dp(this, 11), centerY + UiKit.dp(this, 13));
+        pin.lineTo(centerX, UiKit.dp(this, 58));
+        pin.lineTo(centerX + UiKit.dp(this, 11), centerY + UiKit.dp(this, 13));
+        pin.close();
+        canvas.drawPath(pin, fill);
         Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
         border.setStyle(Paint.Style.STROKE);
-        border.setStrokeWidth(UiKit.dp(this, 3));
+        border.setStrokeJoin(Paint.Join.ROUND);
+        border.setStrokeWidth(UiKit.dp(this, 2));
         border.setColor(0xFFFFFFFF);
-        canvas.drawCircle(size / 2f, size / 2f, size * 0.43f, border);
+        canvas.drawPath(pin, border);
         Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
         text.setColor(0xFFFFFFFF);
         text.setTypeface(Typeface.DEFAULT_BOLD);
         text.setTextAlign(Paint.Align.CENTER);
         text.setTextSize(UiKit.dp(this, label.length() > 1 ? 14 : 17));
         Paint.FontMetrics metrics = text.getFontMetrics();
-        float baseline = size / 2f - (metrics.ascent + metrics.descent) / 2f;
-        canvas.drawText(label, size / 2f, baseline, text);
+        float baseline = centerY - (metrics.ascent + metrics.descent) / 2f;
+        canvas.drawText(label, centerX, baseline, text);
+
+        String safeName = placeName == null || placeName.trim().isEmpty()
+                ? "Точка маршрута" : placeName.trim();
+        Paint name = new Paint(Paint.ANTI_ALIAS_FLAG);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setTextSize(UiKit.dp(this, 13));
+        name.setTextAlign(Paint.Align.LEFT);
+        float nameX = UiKit.dp(this, 47);
+        float maxNameWidth = width - nameX - UiKit.dp(this, 3);
+        List<String> lines = markerTextLines(safeName, name, maxNameWidth);
+        float firstBaseline = lines.size() > 1 ? UiKit.dp(this, 23) : UiKit.dp(this, 31);
+        for (int i = 0; i < lines.size(); i++) {
+            float y = firstBaseline + i * UiKit.dp(this, 17);
+            name.setStyle(Paint.Style.STROKE);
+            name.setStrokeJoin(Paint.Join.ROUND);
+            name.setStrokeWidth(UiKit.dp(this, 3));
+            name.setColor(0xEEFFFFFF);
+            canvas.drawText(lines.get(i), nameX, y, name);
+            name.setStyle(Paint.Style.FILL);
+            name.setColor(0xFF202522);
+            canvas.drawText(lines.get(i), nameX, y, name);
+        }
+        return ImagesKt.imageFromBitmap(application.sdkContext(), bitmap);
+    }
+
+    private static List<String> markerTextLines(String value, Paint paint, float maxWidth) {
+        List<String> lines = new ArrayList<>(2);
+        String rest = value.replace('\n', ' ').replaceAll("\\s+", " ").trim();
+        for (int line = 0; line < 2 && !rest.isEmpty(); line++) {
+            int count = paint.breakText(rest, true, maxWidth, null);
+            if (count >= rest.length()) {
+                lines.add(rest);
+                rest = "";
+                break;
+            }
+            int split = rest.lastIndexOf(' ', Math.max(1, count));
+            if (split <= 0) split = count;
+            String part = rest.substring(0, split).trim();
+            rest = rest.substring(split).trim();
+            if (line == 1 && !rest.isEmpty()) {
+                String suffix = "…";
+                while (!part.isEmpty() && paint.measureText(part + suffix) > maxWidth) {
+                    part = part.substring(0, part.length() - 1).trim();
+                }
+                part += suffix;
+                rest = "";
+            }
+            lines.add(part);
+        }
+        if (lines.isEmpty()) lines.add("Точка маршрута");
+        return lines;
+    }
+
+    private Image userLocationImage(GulyayApplication application) {
+        int size = UiKit.dp(this, 56);
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        float center = size / 2f;
+        Paint accuracy = new Paint(Paint.ANTI_ALIAS_FLAG);
+        accuracy.setColor(0x332474FF);
+        canvas.drawCircle(center, center, UiKit.dp(this, 26), accuracy);
+        Paint white = new Paint(Paint.ANTI_ALIAS_FLAG);
+        white.setColor(0xFFFFFFFF);
+        canvas.drawCircle(center, center, UiKit.dp(this, 12), white);
+        Paint blue = new Paint(Paint.ANTI_ALIAS_FLAG);
+        blue.setColor(0xFF2474FF);
+        canvas.drawCircle(center, center, UiKit.dp(this, 9), blue);
         return ImagesKt.imageFromBitmap(application.sdkContext(), bitmap);
     }
 
     private void updateUserMarker(double lat, double lon) {
         if (map == null || objects == null || !Double.isFinite(lat) || !Double.isFinite(lon)) {
-            return;
-        }
-        // At the beginning the orange start marker must stay visible. The blue user
-        // position appears after the person has actually moved away from it.
-        double startLat = routeStartLat();
-        double startLon = routeStartLon();
-        if (userMarker == null && Double.isFinite(startLat) && Double.isFinite(startLon)
-                && meters(startLat, startLon, lat, lon) < 15) {
             return;
         }
         GeoPointWithElevation position = GeoPointWithElevationExtraKt.GeoPointWithElevation(
@@ -1459,10 +1594,10 @@ public final class MapActivity extends ComponentActivity {
         }
         GulyayApplication application = (GulyayApplication) getApplication();
         if (userMarkerImage == null) {
-            userMarkerImage = mapMarkerImage(application, "•", 0xFF2474FF);
+            userMarkerImage = userLocationImage(application);
         }
-        userMarker = new Marker(markerOptions(
-                lat, lon, userMarkerImage, "Вы здесь", route.points.size() + 30));
+        userMarker = new Marker(userMarkerOptions(
+                lat, lon, userMarkerImage, route.points.size() + 30));
         objects.addObject(userMarker);
     }
 
@@ -1475,31 +1610,41 @@ public final class MapActivity extends ComponentActivity {
             lon = routeStartLon();
         }
         ApiClient.PlaceOption target = route.points.get(walk.currentPointOrder - 1);
-        String hint = guidanceHint(lat, lon, target);
-        mapRouteSummary.setText("🚶  " + hint + "\nК точке " + walk.currentPointOrder
-                + ": " + target.name);
+        GuidanceInfo guidance = guidanceInfo(lat, lon, target);
+        guidanceTitle.setText(guidance.title);
+        guidanceSubtitle.setText(guidance.subtitle);
+        guidanceTurnIcon.setText(guidance.icon);
+        mapRouteSummary.setVisibility(View.GONE);
+        guidancePanel.setVisibility(View.VISIBLE);
     }
 
-    private String guidanceHint(double lat, double lon, ApiClient.PlaceOption target) {
+    private GuidanceInfo guidanceInfo(double lat, double lon, ApiClient.PlaceOption target) {
         if (!Double.isFinite(lat) || !Double.isFinite(lon)) {
-            return "Следуйте по линии маршрута";
+            return new GuidanceInfo("Следуйте по линии маршрута",
+                    "До " + target.name, "↑");
         }
         int nearest = nearestPathIndex(lat, lon, 0);
         int targetIndex = nearestPathIndex(target.lat, target.lon, nearest);
         if (targetIndex <= nearest) targetIndex = route.path.size() - 1;
         int targetMeters = (int) Math.round(pathDistance(nearest, targetIndex)
                 + meters(lat, lon, route.path.get(nearest).lat, route.path.get(nearest).lon));
-        if (targetMeters <= 35) return "Точка почти рядом";
+        int walkingMinutes = Math.max(1, (int) Math.ceil(targetMeters / 80.0));
+        String subtitle = "До " + target.name + " — ≈" + walkingMinutes + " мин";
+        if (targetMeters <= 35) {
+            return new GuidanceInfo("Точка маршрута рядом", subtitle, "●");
+        }
 
         TurnHint turn = nextTurn(nearest, targetIndex);
         if (turn != null) {
+            String arrow = "направо".equals(turn.direction) ? "↱" : "↰";
             if (turn.distanceMeters <= 40) {
-                return "Поверните " + turn.direction;
+                return new GuidanceInfo("Поверните " + turn.direction, subtitle, arrow);
             }
-            return "Идите прямо • через " + roundedMeters(turn.distanceMeters)
-                    + " поверните " + turn.direction;
+            return new GuidanceInfo("Через " + roundedMeters(turn.distanceMeters)
+                    + " поверните " + turn.direction, subtitle, arrow);
         }
-        return "Следуйте по линии маршрута • около " + roundedMeters(targetMeters);
+        return new GuidanceInfo("Продолжайте прямо " + roundedMeters(targetMeters),
+                subtitle, "↑");
     }
 
     private TurnHint nextTurn(int start, int end) {
@@ -1610,15 +1755,39 @@ public final class MapActivity extends ComponentActivity {
         }
     }
 
-    private static MarkerOptions markerOptions(double lat, double lon, Image icon,
-                                                String text, int zIndex) {
+    private static MarkerOptions labeledMarkerOptions(double lat, double lon, Image icon,
+                                                       String name, int zIndex) {
         GeoPointWithElevation position = GeoPointWithElevationExtraKt.GeoPointWithElevation(
                 lat, lon, new Elevation());
         return new MarkerOptions(
-                position, icon, null, new Anchor(0.5f, 1f), text, (TextStyle) null,
-                new Opacity(1f), true, false, new LogicalPixel(38f), text,
+                position, icon, null, new Anchor(23f / 176f, 58f / 62f), null,
+                (TextStyle) null, new Opacity(1f), true, false,
+                new LogicalPixel(176f), name,
                 new ZIndex(zIndex), new LabelingPriority((byte) 100), true,
                 null, AnimationMode.NORMAL, false);
+    }
+
+    private static MarkerOptions userMarkerOptions(double lat, double lon, Image icon,
+                                                    int zIndex) {
+        GeoPointWithElevation position = GeoPointWithElevationExtraKt.GeoPointWithElevation(
+                lat, lon, new Elevation());
+        return new MarkerOptions(
+                position, icon, null, new Anchor(0.5f, 0.5f), null, (TextStyle) null,
+                new Opacity(1f), true, false, new LogicalPixel(56f), "Вы здесь",
+                new ZIndex(zIndex), new LabelingPriority((byte) 100), true,
+                null, AnimationMode.NORMAL, false);
+    }
+
+    private static final class GuidanceInfo {
+        final String title;
+        final String subtitle;
+        final String icon;
+
+        GuidanceInfo(String title, String subtitle, String icon) {
+            this.title = title;
+            this.subtitle = subtitle;
+            this.icon = icon;
+        }
     }
 
     private static final class TurnHint {

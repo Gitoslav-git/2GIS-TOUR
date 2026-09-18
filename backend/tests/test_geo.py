@@ -6,7 +6,7 @@ import pytest
 from gulyay.geo import (DgisGeoProvider, GeoAuthenticationError,
                         GeoInvalidResponse, GeoPlaceNotFound, GeoRateLimited,
                         GeoRouteNotFound, GeoUnavailable, clear_geo_caches)
-from gulyay.models import QueryPreview
+from gulyay.models import QueryPreview, RouteLeg
 
 
 def response(request: httpx.Request) -> httpx.Response:
@@ -96,9 +96,19 @@ def test_large_routing_geometry_is_bounded_and_keeps_ends():
 
     provider = DgisGeoProvider("p", "r", httpx.MockTransport(large_route))
     leg = provider.walking_leg((55.20, 36.48), (55.20999, 36.48999), 0, 1)
-    assert len(leg.geometry) == 300
+    assert len(leg.geometry) == 120
     assert leg.geometry[0] == (36.48, 55.20)
     assert leg.geometry[-1] == (36.48999, 55.20999)
+
+
+def test_legacy_route_leg_geometry_is_compacted_when_loaded():
+    points = [(36.48 + index * 0.00001, 55.20 + index * 0.00001)
+              for index in range(700)]
+    leg = RouteLeg(fromOrder=0, toOrder=1, distanceMeters=5000,
+                   durationSeconds=3600, geometry=points)
+    assert len(leg.geometry) == 120
+    assert leg.geometry[0] == points[0]
+    assert leg.geometry[-1] == points[-1]
 
 
 def test_center_request_uses_smaller_search_radius():

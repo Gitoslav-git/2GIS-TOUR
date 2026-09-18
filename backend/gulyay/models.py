@@ -131,6 +131,22 @@ class RouteLeg(StrictModel):
     durationSeconds: int
     geometry: list[tuple[float, float]]
 
+    @field_validator("geometry")
+    @classmethod
+    def bound_geometry_for_mobile_map(
+            cls, points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        """Also compacts routes restored from databases created by older releases."""
+        max_points = 120
+        if len(points) <= max_points:
+            return points
+        last_index = len(points) - 1
+        sampled: list[tuple[float, float]] = []
+        for position in range(max_points):
+            point = points[round(position * last_index / (max_points - 1))]
+            if not sampled or sampled[-1] != point:
+                sampled.append(point)
+        return sampled
+
 
 class Route(StrictModel):
     routeId: UUID

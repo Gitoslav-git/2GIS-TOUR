@@ -1,6 +1,7 @@
 package ru.gulyay.app;
 
 import android.Manifest;
+import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
@@ -11,10 +12,12 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
+import android.os.Debug;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -68,6 +71,7 @@ import ru.dgis.sdk.map.ZIndex;
 import ru.dgis.sdk.map.Zoom;
 
 public final class MapActivity extends ComponentActivity {
+    private static final String MEMORY_LOG = "GulyayMapMemory";
     private static final long POSITION_WINDOW_MILLIS = 60_000L;
     private static final long MIN_POSITION_INTERVAL_MILLIS = 5_000L;
     static final String EXTRA_ROUTE_ID = "routeId";
@@ -83,9 +87,13 @@ public final class MapActivity extends ComponentActivity {
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private TextView status;
+    private FrameLayout mapContainer;
+    private TextView mapPlaceholder;
     private MapView mapView;
     private Map map;
     private MapObjectManager objects;
+    private Image routeMarkerImage;
+    private Image userMarkerImage;
     private ApiClient.Result route;
     private ApiClient.WalkResult walk;
     private RouteViewModel routeViewModel;
@@ -124,6 +132,9 @@ public final class MapActivity extends ComponentActivity {
     private double routeCenterLon;
     private float routeZoom = 12.5f;
     private float routeMinZoom = 10.5f;
+    private boolean mapInitializationStarted;
+    private boolean cameraSnapshotFailureLogged;
+    private final Runnable cameraBoundsGuard = this::enforceRouteCameraBounds;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -136,10 +147,10 @@ public final class MapActivity extends ComponentActivity {
         root.addView(page, new FrameLayout.LayoutParams(-1, -1));
         boolean compact = getResources().getConfiguration().screenHeightDp <= 720;
 
-        FrameLayout mapContainer = new FrameLayout(this);
+        mapContainer = new FrameLayout(this);
         mapContainer.setBackground(UiKit.rounded(UiKit.MAP, 0, this));
         page.addView(mapContainer, new LinearLayout.LayoutParams(-1, 0, compact ? 0.47f : 0.54f));
-        TextView mapPlaceholder = UiKit.label(this,
+        mapPlaceholder = UiKit.label(this,
                 "Карта маршрута\nЗдесь появится фрагмент 2ГИС", 17, UiKit.MUTED);
         mapPlaceholder.setGravity(Gravity.CENTER);
         mapContainer.addView(mapPlaceholder, new FrameLayout.LayoutParams(-1, -1));
@@ -295,39 +306,14 @@ public final class MapActivity extends ComponentActivity {
         });
 
         boolean walkMode = getIntent().getStringExtra(EXTRA_WALK_ID) != null;
-        GulyayApplication application = (GulyayApplication) getApplication();
-        if (application.sdkContext() == null) {
-            mapPlaceholder.setText("Карта 2ГИС пока недоступна\nМаршрут и точки работают без неё");
-        } else {
-            mapContainer.removeView(mapPlaceholder);
-            String cityId = getIntent().getStringExtra(EXTRA_CITY_ID);
-            double[] center = cityCenter(cityId);
-            MapOptions options = new MapOptions();
-            options.setPosition(camera(center[0], center[1], 12.5f));
-            mapView = new MapView(this, options);
-            mapView.setId(R.id.route_map_view);
-            mapView.setClickable(true);
-            mapView.setFocusable(true);
-            mapView.setOnTouchListener((view, event) -> {
-                if (event.getActionMasked() == MotionEvent.ACTION_UP
-                        || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-                    uiHandler.postDelayed(this::enforceRouteCameraBounds, 120L);
-                    uiHandler.postDelayed(this::enforceRouteCameraBounds, 520L);
-                }
-                return false;
-            });
-            getLifecycle().addObserver(mapView);
-            mapContainer.addView(mapView, 0, new FrameLayout.LayoutParams(-1, -1));
-            zoomControls.setVisibility(View.VISIBLE);
-            mapView.getMapAsync(readyMap -> {
-                map = readyMap;
-                renderRoute();
-                return Unit.INSTANCE;
-            });
-        }
         route = routeViewModel.route;
         walk = routeViewModel.walk;
-        if (route == null) loadRoute(); else showRouteStatus();
+        if (route == null) {
+            loadRoute();
+        } else {
+            showRouteStatus();
+            initializeMapIfReady();
+        }
         if (walkMode) {
             if (walk == null) loadWalk(); else showWalkStatus();
         }
@@ -356,6 +342,92 @@ public final class MapActivity extends ComponentActivity {
         return button;
     }
 
+    private void initializeMapIfReady() {
+        if (mapInitializationStarted || mapView != null || map != null
+                || route == null || !route.success || isFinishing() || isDestroyed()) return;
+        mapInitializationStarted = true;
+        logMemory("before-sdk");
+        if (hasCriticalMemoryPressure()) {
+            mapPlaceholder.setText("Недостаточно свободной памяти для карты 2ГИС\n"
+                    + "Маршрут и точки доступны без неё");
+            Log.w(MEMORY_LOG, "Map initialization skipped: Android reports low memory");
+            return;
+        }
+
+        GulyayApplication application = (GulyayApplication) getApplication();
+        try {
+            ru.dgis.sdk.Context sdkContext = application.sdkContext();
+            if (sdkContext == null) {
+                String message = application.mapError();
+                mapPlaceholder.setText(message == null
+                        ? "Карта 2ГИС пока недоступна\nМаршрут и точки работают без неё"
+                        : message);
+                return;
+            }
+            logMemory("after-sdk");
+            double[] center = cityCenter(getIntent().getStringExtra(EXTRA_CITY_ID));
+            MapOptions options = new MapOptions();
+            options.setPosition(camera(center[0], center[1], 12.5f));
+            mapView = new MapView(this, options);
+            mapView.setId(R.id.route_map_view);
+            mapView.setClickable(true);
+            mapView.setFocusable(true);
+            getLifecycle().addObserver(mapView);
+            mapContainer.addView(mapView, 0, new FrameLayout.LayoutParams(-1, -1));
+            mapContainer.removeView(mapPlaceholder);
+            zoomControls.setVisibility(View.VISIBLE);
+            logMemory("after-map-view");
+            mapView.getMapAsync(readyMap -> {
+                if (isFinishing() || isDestroyed()) return Unit.INSTANCE;
+                map = readyMap;
+                renderRoute();
+                logMemory("map-ready");
+                return Unit.INSTANCE;
+            });
+        } catch (RuntimeException | LinkageError error) {
+            Log.e(MEMORY_LOG, "2GIS map initialization failed", error);
+            showMapFallback("Не удалось открыть карту 2ГИС\nМаршрут и точки доступны без неё");
+        } catch (OutOfMemoryError error) {
+            Log.e(MEMORY_LOG, "Not enough memory to create 2GIS MapView", error);
+            showMapFallback("Эмулятору не хватило памяти для карты 2ГИС\n"
+                    + "Маршрут и точки доступны без неё");
+        }
+    }
+
+    private void showMapFallback(String message) {
+        if (mapView != null) {
+            mapContainer.removeView(mapView);
+            mapView = null;
+        }
+        map = null;
+        zoomControls.setVisibility(View.GONE);
+        mapPlaceholder.setText(message);
+        if (mapPlaceholder.getParent() == null) {
+            mapContainer.addView(mapPlaceholder, 0, new FrameLayout.LayoutParams(-1, -1));
+        }
+    }
+
+    private boolean hasCriticalMemoryPressure() {
+        ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        if (manager == null) return false;
+        ActivityManager.MemoryInfo info = new ActivityManager.MemoryInfo();
+        manager.getMemoryInfo(info);
+        return info.lowMemory;
+    }
+
+    private void logMemory(String stage) {
+        ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        ActivityManager.MemoryInfo info = new ActivityManager.MemoryInfo();
+        if (manager != null) manager.getMemoryInfo(info);
+        Runtime runtime = Runtime.getRuntime();
+        long javaUsed = runtime.totalMemory() - runtime.freeMemory();
+        Log.i(MEMORY_LOG, stage
+                + " javaMb=" + javaUsed / 1_048_576L
+                + " nativeMb=" + Debug.getNativeHeapAllocatedSize() / 1_048_576L
+                + " availableMb=" + info.availMem / 1_048_576L
+                + " lowMemory=" + info.lowMemory);
+    }
+
     private void loadRoute() {
         String routeId = getIntent().getStringExtra(EXTRA_ROUTE_ID);
         String cityId = getIntent().getStringExtra(EXTRA_CITY_ID);
@@ -382,7 +454,7 @@ public final class MapActivity extends ComponentActivity {
                 }
                 routeViewModel.route = route;
                 showRouteStatus();
-                renderRoute();
+                initializeMapIfReady();
                 syncLocationTracking();
             });
         });
@@ -409,6 +481,20 @@ public final class MapActivity extends ComponentActivity {
         editQuery.setEnabled(true);
         editPoints.setEnabled(true);
         renderPointList(0);
+    }
+
+    @Override public boolean dispatchTouchEvent(MotionEvent event) {
+        boolean handled = super.dispatchTouchEvent(event);
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            uiHandler.removeCallbacks(cameraBoundsGuard);
+        } else if (routeCameraReady && (event.getActionMasked() == MotionEvent.ACTION_UP
+                || event.getActionMasked() == MotionEvent.ACTION_CANCEL)) {
+            uiHandler.removeCallbacks(cameraBoundsGuard);
+            uiHandler.postDelayed(cameraBoundsGuard, 40L);
+            uiHandler.postDelayed(cameraBoundsGuard, 260L);
+            uiHandler.postDelayed(cameraBoundsGuard, 900L);
+        }
+        return handled;
     }
 
     private String cityName() {
@@ -875,7 +961,7 @@ public final class MapActivity extends ComponentActivity {
                 routeViewModel.walk = walk;
                 getSharedPreferences("active_walk", MODE_PRIVATE).edit()
                         .putString("walkId", walk.walkId)
-                        .putString("routeId", routeId).apply();
+                        .putString("routeId", routeId).commit();
                 showWalkStatus();
                 syncLocationTracking();
             });
@@ -1090,6 +1176,11 @@ public final class MapActivity extends ComponentActivity {
     private void returnForEdit(String action) {
         Intent data = new Intent();
         data.putExtra(EXTRA_RESULT_ACTION, action);
+        if (walk != null && walk.success && ("ACTIVE".equals(walk.status)
+                || "PAUSED".equals(walk.status))) {
+            data.putExtra(EXTRA_WALK_ID, walk.walkId);
+            data.putExtra(EXTRA_ROUTE_ID, getIntent().getStringExtra(EXTRA_ROUTE_ID));
+        }
         setResult(RESULT_OK, data);
         finish();
     }
@@ -1155,7 +1246,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void clearActiveWalk() {
-        getSharedPreferences("active_walk", MODE_PRIVATE).edit().clear().apply();
+        getSharedPreferences("active_walk", MODE_PRIVATE).edit().clear().commit();
         stopLocationTracking();
     }
 
@@ -1165,18 +1256,20 @@ public final class MapActivity extends ComponentActivity {
         else objects.removeAll();
 
         GulyayApplication application = (GulyayApplication) getApplication();
-        Image routeIcon = ImagesKt.imageFromResource(
-                application.sdkContext(), R.drawable.route_marker, null);
+        if (routeMarkerImage == null) {
+            routeMarkerImage = ImagesKt.imageFromResource(
+                    application.sdkContext(), R.drawable.route_marker, null);
+        }
         for (int i = 0; i < route.points.size(); i++) {
             ApiClient.PlaceOption point = route.points.get(i);
             if (!Double.isFinite(point.lat) || !Double.isFinite(point.lon)) continue;
-            MarkerOptions options = markerOptions(point.lat, point.lon, routeIcon,
+            MarkerOptions options = markerOptions(point.lat, point.lon, routeMarkerImage,
                     (i + 1) + ". " + point.name, i + 2);
             objects.addObject(new Marker(options));
         }
 
         if (route.path.size() >= 2) {
-            List<GeoPoint> geometry = new ArrayList<>();
+            List<GeoPoint> geometry = new ArrayList<>(route.path.size());
             for (ApiClient.GeoCoordinate coordinate : route.path) {
                 geometry.add(GeoPointExtraKt.GeoPoint(coordinate.lat, coordinate.lon));
             }
@@ -1189,10 +1282,12 @@ public final class MapActivity extends ComponentActivity {
         double userLat = getIntent().getDoubleExtra(EXTRA_USER_LAT, Double.NaN);
         double userLon = getIntent().getDoubleExtra(EXTRA_USER_LON, Double.NaN);
         if (Double.isFinite(userLat) && Double.isFinite(userLon)) {
-            Image userIcon = ImagesKt.imageFromResource(
-                    application.sdkContext(), R.drawable.user_marker, null);
+            if (userMarkerImage == null) {
+                userMarkerImage = ImagesKt.imageFromResource(
+                        application.sdkContext(), R.drawable.user_marker, null);
+            }
             objects.addObject(new Marker(markerOptions(
-                    userLat, userLon, userIcon, "Вы здесь", route.points.size() + 3)));
+                    userLat, userLon, userMarkerImage, "Вы здесь", route.points.size() + 3)));
         }
 
         if (!restoredCamera && !route.path.isEmpty()) {
@@ -1216,8 +1311,8 @@ public final class MapActivity extends ComponentActivity {
             routeMinLon = Math.min(routeMinLon, coordinate.lon);
             routeMaxLon = Math.max(routeMaxLon, coordinate.lon);
         }
-        double latPadding = Math.max(0.008, (routeMaxLat - routeMinLat) * 0.35);
-        double lonPadding = Math.max(0.012, (routeMaxLon - routeMinLon) * 0.35);
+        double latPadding = Math.max(0.003, (routeMaxLat - routeMinLat) * 0.15);
+        double lonPadding = Math.max(0.005, (routeMaxLon - routeMinLon) * 0.15);
         routeMinLat -= latPadding;
         routeMaxLat += latPadding;
         routeMinLon -= lonPadding;
@@ -1225,7 +1320,7 @@ public final class MapActivity extends ComponentActivity {
         routeCenterLat = bounds[0];
         routeCenterLon = bounds[1];
         routeZoom = (float) bounds[2];
-        routeMinZoom = Math.max(10.5f, routeZoom - 1.5f);
+        routeMinZoom = routeZoom;
         routeCameraReady = true;
     }
 
@@ -1250,7 +1345,12 @@ public final class MapActivity extends ComponentActivity {
     private void enforceRouteCameraBounds() {
         if (map == null || !routeCameraReady || isFinishing() || isDestroyed()) return;
         CameraSnapshot snapshot = cameraSnapshot();
-        if (snapshot == null) return;
+        if (snapshot == null) {
+            map.getCamera().move(camera(routeCenterLat, routeCenterLon,
+                            Math.max(routeMinZoom, routeZoom)),
+                    Duration.ofMilliseconds(120), CameraAnimationType.LINEAR);
+            return;
+        }
         double lat = Math.max(routeMinLat, Math.min(routeMaxLat, snapshot.lat));
         double lon = Math.max(routeMinLon, Math.min(routeMaxLon, snapshot.lon));
         float zoom = Math.max(routeMinZoom, Math.min(18f, snapshot.zoom));
@@ -1276,7 +1376,11 @@ public final class MapActivity extends ComponentActivity {
             double lon = numericValue(longitude);
             float zoomValue = (float) numericValue(zoom);
             return new CameraSnapshot(lat, lon, zoomValue);
-        } catch (ReflectiveOperationException | ClassCastException ignored) {
+        } catch (ReflectiveOperationException | ClassCastException error) {
+            if (!cameraSnapshotFailureLogged) {
+                cameraSnapshotFailureLogged = true;
+                Log.w(MEMORY_LOG, "Cannot read 2GIS camera position; using safe route center", error);
+            }
             return null;
         }
     }
@@ -1339,12 +1443,19 @@ public final class MapActivity extends ComponentActivity {
     }
 
     @Override protected void onDestroy() {
-        if (pendingPlaceSearch != null) uiHandler.removeCallbacks(pendingPlaceSearch);
+        uiHandler.removeCallbacksAndMessages(null);
         stopLocationTracking();
         if (objects != null) objects.removeAll();
         objects = null;
+        routeMarkerImage = null;
+        userMarkerImage = null;
         map = null;
+        if (mapView != null) {
+            if (mapView.getParent() == mapContainer) mapContainer.removeView(mapView);
+            mapView = null;
+        }
         network.shutdownNow();
+        logMemory("destroyed");
         super.onDestroy();
     }
 

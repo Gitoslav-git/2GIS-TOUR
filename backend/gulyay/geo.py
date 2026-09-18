@@ -565,7 +565,7 @@ def _route_geometry(route: dict) -> list[tuple[float, float]]:
 
 
 def _bounded_geometry(points: list[tuple[float, float]],
-                      max_points: int = 300) -> list[tuple[float, float]]:
+                      max_points: int = 120) -> list[tuple[float, float]]:
     """Keep a representative real route shape without sending an unbounded polyline."""
     if len(points) <= max_points:
         return points

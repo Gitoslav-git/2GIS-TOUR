@@ -1297,6 +1297,13 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != ROUTE_SCREEN_REQUEST || resultCode != RESULT_OK || data == null) return;
+        String returnedWalkId = data.getStringExtra(MapActivity.EXTRA_WALK_ID);
+        String returnedWalkRouteId = data.getStringExtra(MapActivity.EXTRA_ROUTE_ID);
+        if (returnedWalkId != null && returnedWalkRouteId != null) {
+            getSharedPreferences("active_walk", MODE_PRIVATE).edit()
+                    .putString("walkId", returnedWalkId)
+                    .putString("routeId", returnedWalkRouteId).commit();
+        }
         String action = data.getStringExtra(MapActivity.EXTRA_RESULT_ACTION);
         if (MapActivity.ACTION_CANCEL_ROUTE.equals(action)) {
             clearLocalRouteState("Маршрут отменён. Можно составить новый.");

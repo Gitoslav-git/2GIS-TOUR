@@ -16,18 +16,24 @@ import ru.dgis.sdk.platform.StorageOptions;
 import ru.dgis.sdk.platform.VendorConfig;
 
 public final class GulyayApplication extends Application {
-    private Context sdkContext;
-    private String mapError;
+    private volatile Context sdkContext;
+    private volatile String mapError;
+    private boolean mapInitializationAttempted;
 
     @Override public void onCreate() {
         super.onCreate();
+    }
+
+    synchronized Context sdkContext() {
+        if (sdkContext != null || mapInitializationAttempted) return sdkContext;
+        mapInitializationAttempted = true;
         if (!hasMapKey()) {
             mapError = "В APK не добавлен мобильный ключ 2ГИС dgissdk.key. " +
                     "Добавьте GitHub Actions secret DGIS_SDK_KEY_BASE64 и пересоберите APK.";
-            return;
+            return null;
         }
         try {
-            // OpenGL is selected deliberately for predictable Android Emulator support.
+            // Initialize the native SDK only inside the map Activity process.
             sdkContext = DGis.initialize(
                     this,
                     new HttpOptions(),
@@ -43,9 +49,6 @@ public final class GulyayApplication extends Application {
         } catch (RuntimeException error) {
             mapError = "Не удалось запустить карту 2ГИС. Проверьте мобильный ключ и его подписку.";
         }
-    }
-
-    Context sdkContext() {
         return sdkContext;
     }
 

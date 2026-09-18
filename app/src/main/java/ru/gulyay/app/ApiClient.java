@@ -18,6 +18,7 @@ import java.util.TimeZone;
 import java.util.UUID;
 
 final class ApiClient {
+    private static final int MAX_RESPONSE_BYTES = 2_000_000;
     private ApiClient() { }
 
     static final class PlaceOption {
@@ -412,11 +413,16 @@ final class ApiClient {
     private static JSONObject readJson(HttpURLConnection connection, int status) throws Exception {
         InputStream stream = status < 400 ? connection.getInputStream() : connection.getErrorStream();
         if (stream == null) throw new IllegalStateException("Backend вернул пустой ответ");
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream(64 * 1024);
         byte[] chunk = new byte[4096];
         try (InputStream input = stream) {
             int n;
-            while ((n = input.read(chunk)) != -1) buffer.write(chunk, 0, n);
+            while ((n = input.read(chunk)) != -1) {
+                if (buffer.size() + n > MAX_RESPONSE_BYTES) {
+                    throw new IllegalStateException("Backend вернул слишком большой ответ");
+                }
+                buffer.write(chunk, 0, n);
+            }
         }
         String body = buffer.toString("UTF-8");
         if (body.trim().isEmpty()) throw new IllegalStateException("Backend вернул пустой ответ");
@@ -479,7 +485,7 @@ final class ApiClient {
                 }
             }
         }
-        return compactPath(path, 1200);
+        return compactPath(path, 360);
     }
 
     private static List<GeoCoordinate> compactPath(List<GeoCoordinate> path, int maxPoints) {

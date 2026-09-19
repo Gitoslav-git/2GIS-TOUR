@@ -1,6 +1,12 @@
 # Гуляй — Android Java и backend
 
-Версия Android `0.6.9.b` — корректирующий выпуск этапа `0.6` на пути к полному MVP `1.0`. Главный источник требований — `docs/source/2ГИС Системная аналитика.docx`; решения и открытые вопросы записаны в `docs/DECISIONS.md`, границы выпусков — в `docs/RELEASES.md`.
+Версия Android `0.6.9.c` — корректирующий выпуск этапа `0.6` на пути к полному MVP `1.0`. Главный источник требований — `docs/source/2ГИС Системная аналитика.docx`; решения и открытые вопросы записаны в `docs/DECISIONS.md`, границы выпусков — в `docs/RELEASES.md`.
+
+## Что исправлено в 0.6.9.c
+
+Debug APK больше не ограничен адресом Android Emulator `10.0.2.2`: при сборке можно передать локальный адрес компьютера, например `http://192.168.1.50:8000`, и тестировать приложение на физическом телефоне в той же сети Wi‑Fi. Разрешение незашифрованного HTTP действует только в debug-сборке; release по-прежнему принимает только HTTPS.
+
+Если соединение не установлено, приложение показывает адрес backend, фактически зашитый в APK, и пишет техническую причину в Logcat с тегом `GulyayNetwork`. Это позволяет отличить неверную сборочную переменную от недоступного сервера.
 
 ## Что исправлено в 0.6.9.b
 
@@ -138,7 +144,7 @@ Copy-Item "C:\путь\к\dgissdk.key" ".\app\src\main\assets\dgissdk.key"
 
 Добавьте скопированное значение в *Settings → Secrets and variables → Actions → Secrets → New repository secret* с именем `DGIS_SDK_KEY_BASE64`. Сам файл и Base64 нельзя публиковать в Git или сообщениях.
 
-## Backend на компьютере с эмулятором
+## Backend на компьютере для эмулятора или телефона
 
 Нужны Python 3.12+, Android Studio / SDK 35, JDK 17 и Gradle 8.13. Из корня проекта установите backend и запустите тесты:
 
@@ -158,12 +164,12 @@ $env:OPENAI_API_KEY="<ключ OpenAI API>"
 $env:OPENAI_MODEL="gpt-4o-mini"
 $env:DGIS_PLACES_API_KEY="<ключ Places API 2ГИС>"
 $env:DGIS_ROUTING_API_KEY="<ключ Routing API 2ГИС>"
-.\.venv\Scripts\python.exe -m uvicorn gulyay.api:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn gulyay.api:app --host 0.0.0.0 --port 8000
 ```
 
-Проверьте в браузере компьютера `http://127.0.0.1:8000/health`: ответ должен содержать версию `0.6.9.b`. Окно PowerShell нужно оставить открытым во время проверки. Ключи не вставляйте в приложение, репозиторий или скриншоты; они хранятся только в окружении backend.
+Проверьте в браузере компьютера `http://127.0.0.1:8000/health`: ответ должен содержать версию `0.6.9.c`. Для физического телефона откройте `http://<IPv4-компьютера>:8000/health` в браузере телефона. Окно PowerShell нужно оставить открытым во время проверки. Ключи не вставляйте в приложение, репозиторий или скриншоты; они хранятся только в окружении backend.
 
-## APK для Android Emulator
+## APK для Android Emulator или физического телефона
 
 Из корня проекта соберите отладочную сборку с адресом **запущенного на этом компьютере** backend. В bash:
 
@@ -171,9 +177,11 @@ $env:DGIS_ROUTING_API_KEY="<ключ Routing API 2ГИС>"
 DEBUG_BACKEND_BASE_URL=http://10.0.2.2:8000 gradle :app:assembleDebug
 ```
 
-В PowerShell: `$env:DEBUG_BACKEND_BASE_URL="http://10.0.2.2:8000"; $env:DGIS_SDK_VERSION="13.6.0"; gradle :app:assembleDebug`. Установите `app/build/outputs/apk/debug/app-debug.apk` на эмулятор. В APK по умолчанию остаётся `https://example.invalid`: такая сборка может показать интерфейс, но не сможет построить маршрут. Специальный адрес `10.0.2.2` доступен только из Android Emulator на том же компьютере. Для backend на внешнем сервере вместо локального адреса задайте `BACKEND_BASE_URL=https://<ваш-домен>` при сборке; опубликованный сервер должен работать по HTTPS. Локальный HTTP разрешён только для `10.0.2.2` в отладочной сборке.
+В PowerShell для эмулятора: `$env:DEBUG_BACKEND_BASE_URL="http://10.0.2.2:8000"; $env:DGIS_SDK_VERSION="13.6.0"; gradle :app:assembleDebug`.
 
-На GitHub Actions workflow **Verify and build APK** проверяет backend и собирает установочный APK в разделе **Artifacts** запуска. Чтобы APK работал с локальным backend эмулятора, задайте в *Settings → Secrets and variables → Actions → Variables* `DEBUG_BACKEND_BASE_URL=http://10.0.2.2:8000`; для карты добавьте секрет `DGIS_SDK_KEY_BASE64`. Для внешнего HTTPS-сервера используйте переменную `BACKEND_BASE_URL`. После успешной проверки этапа исходники можно отметить тегом `v0.6`; артефакт Action хранится 30 дней.
+Для физического телефона сначала выполните `ipconfig`, возьмите IPv4 компьютера в текущей сети Wi‑Fi и соберите APK так: `$env:DEBUG_BACKEND_BASE_URL="http://<IPv4-компьютера>:8000"; gradle :app:assembleDebug`. Телефон и компьютер должны находиться в одной сети, а backend должен быть запущен с `--host 0.0.0.0`. Установите `app/build/outputs/apk/debug/app-debug.apk`. В APK по умолчанию остаётся `https://example.invalid`: такая сборка показывает интерфейс, но не строит маршрут. Адрес `10.0.2.2` доступен только из Android Emulator. Для внешнего сервера используйте `BACKEND_BASE_URL=https://<ваш-домен>`; release-сборка не разрешает локальный HTTP.
+
+На GitHub Actions workflow **Verify and build APK** проверяет backend и собирает установочный APK в разделе **Artifacts** запуска. В *Settings → Secrets and variables → Actions → Variables* задайте `DEBUG_BACKEND_BASE_URL`: `http://10.0.2.2:8000` для эмулятора либо `http://<IPv4-компьютера>:8000` для физического телефона. Для карты добавьте секрет `DGIS_SDK_KEY_BASE64`. После изменения переменной обязательно запустите новую сборку и установите новый APK. Для внешнего HTTPS-сервера используйте переменную `BACKEND_BASE_URL`.
 
 Прохождение описано в `docs/WALK-0.6.md`, карта и геопозиция — в `docs/MAP-0.5.md`; предыдущие этапы — в `docs/GEO-0.4.md`, `docs/STORAGE-0.4.1.md` и `docs/EDIT-0.4.2.md`. `/v1/routes/interpret` сохранён для отдельной проверки разбора, а нормативный `POST /v1/routes` строит маршрут только из ответов 2ГИС.
 

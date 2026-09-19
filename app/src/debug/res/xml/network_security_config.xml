@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
-    <domain-config cleartextTrafficPermitted="true">
-        <domain>10.0.2.2</domain>
-    </domain-config>
+    <!-- Debug APK may connect to a developer PC on the local network.
+         Release builds use app/src/main and still reject cleartext HTTP. -->
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

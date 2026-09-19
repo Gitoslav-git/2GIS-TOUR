@@ -13,6 +13,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.graphics.Typeface;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -36,6 +37,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
+    private static final String NETWORK_LOG = "GulyayNetwork";
     private static final int LOCATION_PERMISSION_REQUEST = 75;
     private static final int ROUTE_SCREEN_REQUEST = 76;
     private static final long GEO_ATTEMPT_WINDOW_MILLIS = 60_000L;
@@ -485,8 +487,13 @@ public final class MainActivity extends Activity {
                         : ApiClient.createRoute(cityId, text, owner, startLat, startLon,
                                 startAccuracyMeters);
             } catch (Exception exception) {
+                Log.e(NETWORK_LOG, "Route request failed: "
+                        + BuildConfig.BACKEND_BASE_URL, exception);
+                String debugAddress = BuildConfig.DEBUG
+                        ? "\nАдрес в APK: " + BuildConfig.BACKEND_BASE_URL : "";
                 response = new ApiClient.Result(false,
-                        "Нет ответа от backend. Проверьте адрес сервера и доступность сети.", null, 0);
+                        "Нет ответа от backend. Проверьте адрес сервера и доступность сети."
+                                + debugAddress, null, 0);
             }
             if (response.success && activeWalkBeforeChange != null) {
                 try {

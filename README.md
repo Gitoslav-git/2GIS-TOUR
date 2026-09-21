@@ -1,6 +1,12 @@
 # Гуляй — Android Java и backend
 
-Версия Android `0.6.9.d` — корректирующий выпуск этапа `0.6` на пути к полному MVP `1.0`. Главный источник требований — `docs/source/2ГИС Системная аналитика.docx`; решения и открытые вопросы записаны в `docs/DECISIONS.md`, границы выпусков — в `docs/RELEASES.md`.
+Версия Android `0.6.9.e` — корректирующий выпуск этапа `0.6` на пути к полному MVP `1.0`. Главный источник требований — `docs/source/2ГИС Системная аналитика.docx`; решения и открытые вопросы записаны в `docs/DECISIONS.md`, границы выпусков — в `docs/RELEASES.md`.
+
+## Что исправлено в 0.6.9.e
+
+Телефон и Android Emulator используют единый внешний backend `https://deviator-coaster-venture.ngrok-free.dev`. Локальные адреса `10.0.2.2` и `192.168.0.123` больше не участвуют в текущей сборке. В Gradle и GitHub Actions осталась одна переменная `BACKEND_BASE_URL`, поэтому адрес можно заменить без изменения Java-кода.
+
+Во все запросы добавлен заголовок `ngrok-skip-browser-warning: true`, чтобы ngrok возвращал JSON backend, а не HTML-страницу предупреждения. Существующее логирование `GulyayNetwork` продолжает показывать фактический URL, endpoint, статус и тип ошибки.
 
 ## Что исправлено в 0.6.9.d
 
@@ -173,23 +179,21 @@ $env:DGIS_ROUTING_API_KEY="<ключ Routing API 2ГИС>"
 .\.venv\Scripts\python.exe -m uvicorn gulyay.api:app --host 0.0.0.0 --port 8000
 ```
 
-Проверьте в браузере компьютера `http://127.0.0.1:8000/health`: ответ должен содержать версию `0.6.9.d`. Для физического телефона откройте `http://192.168.0.123:8000/health` в браузере телефона. Окно PowerShell нужно оставить открытым во время проверки. Ключи не вставляйте в приложение, репозиторий или скриншоты; они хранятся только в окружении backend.
+Проверьте локально `http://127.0.0.1:8000/health`, а затем через туннель `https://deviator-coaster-venture.ngrok-free.dev/health`: ответ должен содержать версию `0.6.9.e`. Окна Uvicorn и ngrok нужно оставить открытыми во время проверки. Ключи не вставляйте в приложение, репозиторий или скриншоты; они хранятся только в окружении backend.
 
 ## APK для Android Emulator или физического телефона
 
-Из корня проекта соберите отладочную сборку с адресом **запущенного на этом компьютере** backend. В bash:
+Из корня проекта соберите отладочную сборку с внешним HTTPS-адресом backend. В bash:
 
 ```bash
-EMULATOR_BACKEND_BASE_URL=http://10.0.2.2:8000 \
-DEVICE_BACKEND_BASE_URL=http://192.168.0.123:8000 \
-gradle :app:assembleDebug
+BACKEND_BASE_URL=https://deviator-coaster-venture.ngrok-free.dev gradle :app:assembleDebug
 ```
 
-В PowerShell эти значения уже являются значениями по умолчанию, поэтому достаточно `gradle :app:assembleDebug`. Для другого компьютера перед сборкой задайте `$env:DEVICE_BACKEND_BASE_URL="http://<новый-IPv4>:8000"`. Отдельный эмуляторный адрес при необходимости меняется через `$env:EMULATOR_BACKEND_BASE_URL`.
+В PowerShell адрес уже является значением по умолчанию, поэтому достаточно `gradle :app:assembleDebug`. Для другого туннеля перед сборкой задайте `$env:BACKEND_BASE_URL="https://<новый-домен>"`.
 
-Телефон и компьютер должны находиться в одной сети, а backend должен быть запущен с `--host 0.0.0.0`. Установите `app/build/outputs/apk/debug/app-debug.apk`: этот же файл сам выберет адрес телефона или эмулятора. Для внешнего сервера используйте `BACKEND_BASE_URL=https://<ваш-домен>`; release-сборка не разрешает локальный HTTP.
+Телефон и компьютер могут находиться в разных сетях. Важно, чтобы работали Uvicorn и туннель ngrok. Установите `app/build/outputs/apk/debug/app-debug.apk`: один и тот же APK работает на телефоне и эмуляторе.
 
-На GitHub Actions workflow **Verify and build APK** проверяет backend и собирает установочный APK в разделе **Artifacts** запуска. Значения по умолчанию уже соответствуют текущим тестам. При изменении сети задайте в *Settings → Secrets and variables → Actions → Variables* `DEVICE_BACKEND_BASE_URL=http://<новый-IPv4>:8000`; для другого эмулятора используйте `EMULATOR_BACKEND_BASE_URL`. Для карты добавьте секрет `DGIS_SDK_KEY_BASE64`. После изменения переменной обязательно запустите новую сборку и установите новый APK. Для внешнего HTTPS-сервера используйте `BACKEND_BASE_URL`.
+На GitHub Actions workflow **Verify and build APK** проверяет backend и собирает установочный APK в разделе **Artifacts** запуска. В *Settings → Secrets and variables → Actions → Variables* оставьте одну переменную `BACKEND_BASE_URL` со значением `https://deviator-coaster-venture.ngrok-free.dev`. Старые `DEBUG_BACKEND_BASE_URL`, `EMULATOR_BACKEND_BASE_URL` и `DEVICE_BACKEND_BASE_URL` удалите. Для карты сохраните секрет `DGIS_SDK_KEY_BASE64`. После изменения переменной обязательно запустите новую сборку и установите новый APK.
 
 Для проверки подключения запустите backend, откройте приложение и нажмите **«Построить маршрут»**. В Uvicorn должна появиться строка `POST /v1/routes`. Одновременно можно смотреть клиентскую диагностику:
 
@@ -197,7 +201,7 @@ gradle :app:assembleDebug
 adb logcat -s GulyayNetwork
 ```
 
-На физическом устройстве первая строка должна содержать `mode=physical-device url=http://192.168.0.123:8000`, на эмуляторе — `mode=emulator url=http://10.0.2.2:8000`. Затем появятся `HTTP start` и либо `HTTP response`, либо `HTTP failure` с типом ошибки.
+И на физическом устройстве, и на эмуляторе первая строка должна содержать `url=https://deviator-coaster-venture.ngrok-free.dev`. Затем появятся `HTTP start` и либо `HTTP response`, либо `HTTP failure` с типом ошибки.
 
 Прохождение описано в `docs/WALK-0.6.md`, карта и геопозиция — в `docs/MAP-0.5.md`; предыдущие этапы — в `docs/GEO-0.4.md`, `docs/STORAGE-0.4.1.md` и `docs/EDIT-0.4.2.md`. `/v1/routes/interpret` сохранён для отдельной проверки разбора, а нормативный `POST /v1/routes` строит маршрут только из ответов 2ГИС.
 

@@ -44,9 +44,7 @@ jobs:
           fi
       - name: Build debug APK
         env:
-          BACKEND_BASE_URL: ${{ vars.BACKEND_BASE_URL || 'https://example.invalid' }}
-          EMULATOR_BACKEND_BASE_URL: ${{ vars.EMULATOR_BACKEND_BASE_URL || 'http://10.0.2.2:8000' }}
-          DEVICE_BACKEND_BASE_URL: ${{ vars.DEVICE_BACKEND_BASE_URL || 'http://192.168.0.123:8000' }}
+          BACKEND_BASE_URL: ${{ vars.BACKEND_BASE_URL || 'https://deviator-coaster-venture.ngrok-free.dev' }}
           DGIS_SDK_VERSION: ${{ vars.DGIS_SDK_VERSION || '13.6.0' }}
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4

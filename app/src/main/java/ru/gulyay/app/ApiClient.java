@@ -452,6 +452,7 @@ final class ApiClient {
         connection.setReadTimeout(60000);
         connection.setRequestProperty("X-Device-Session", sessionId);
         connection.setRequestProperty("X-Request-Id", UUID.randomUUID().toString());
+        connection.setRequestProperty("ngrok-skip-browser-warning", "true");
         return connection;
     }
 

@@ -1,18 +1,15 @@
 package ru.gulyay.app;
 
-import android.os.Build;
 import android.util.Log;
 
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.util.Locale;
 
 /** Single source of truth for every backend request made by the Android client. */
 final class BackendConfig {
     static final String LOG_TAG = "GulyayNetwork";
     private static final String UNCONFIGURED_URL = "https://example.invalid";
-    private static final boolean EMULATOR = detectEmulator();
-    private static final String BASE_URL = normalizeAndValidate(selectBaseUrl());
+    private static final String BASE_URL = normalizeAndValidate(BuildConfig.BACKEND_BASE_URL);
 
     private BackendConfig() { }
 
@@ -36,7 +33,8 @@ final class BackendConfig {
     }
 
     static void logSelection() {
-        Log.i(LOG_TAG, "Backend selected: mode=" + mode() + " url=" + BASE_URL);
+        Log.i(LOG_TAG, "Backend selected: mode="
+                + (BuildConfig.DEBUG ? "debug" : "release") + " url=" + BASE_URL);
     }
 
     static long logRequest(String method, String path) {
@@ -65,13 +63,6 @@ final class BackendConfig {
                 + (message == null || message.trim().isEmpty() ? "" : ": " + message.trim());
     }
 
-    private static String selectBaseUrl() {
-        if (!BuildConfig.DEBUG) return BuildConfig.BACKEND_BASE_URL;
-        return EMULATOR
-                ? BuildConfig.EMULATOR_BACKEND_BASE_URL
-                : BuildConfig.DEVICE_BACKEND_BASE_URL;
-    }
-
     private static String normalizeAndValidate(String raw) {
         String value = raw == null ? "" : raw.trim();
         while (value.endsWith("/") && value.length() > "https://x".length()) {
@@ -91,35 +82,6 @@ final class BackendConfig {
         } catch (MalformedURLException error) {
             throw new IllegalStateException("Invalid backend base URL", error);
         }
-    }
-
-    private static String mode() {
-        if (!BuildConfig.DEBUG) return "release";
-        return EMULATOR ? "emulator" : "physical-device";
-    }
-
-    private static boolean detectEmulator() {
-        String fingerprint = lower(Build.FINGERPRINT);
-        String model = lower(Build.MODEL);
-        String manufacturer = lower(Build.MANUFACTURER);
-        String brand = lower(Build.BRAND);
-        String device = lower(Build.DEVICE);
-        String product = lower(Build.PRODUCT);
-        return fingerprint.startsWith("generic")
-                || fingerprint.contains("emulator")
-                || fingerprint.contains("vbox")
-                || model.contains("google_sdk")
-                || model.contains("emulator")
-                || model.contains("android sdk built for")
-                || manufacturer.contains("genymotion")
-                || (brand.startsWith("generic") && device.startsWith("generic"))
-                || product.contains("sdk_gphone")
-                || product.contains("emulator")
-                || product.contains("simulator");
-    }
-
-    private static String lower(String value) {
-        return value == null ? "" : value.toLowerCase(Locale.US);
     }
 
     private static Throwable rootCause(Throwable error) {

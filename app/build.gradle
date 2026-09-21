@@ -1,22 +1,11 @@
 plugins { id 'com.android.application' }
 
 def backendUrl = providers.environmentVariable('BACKEND_BASE_URL')
-        .orElse('https://example.invalid').get()
+        .orElse('https://deviator-coaster-venture.ngrok-free.dev').get()
 if (!backendUrl.startsWith('https://')) {
     throw new GradleException('BACKEND_BASE_URL must be HTTPS')
 }
-def emulatorBackendUrl = providers.environmentVariable('EMULATOR_BACKEND_BASE_URL')
-        .orElse('http://10.0.2.2:8000').get()
-def deviceBackendUrl = providers.environmentVariable('DEVICE_BACKEND_BASE_URL')
-        .orElse('http://192.168.0.123:8000').get()
 def dgisSdkVersion = providers.environmentVariable('DGIS_SDK_VERSION').orElse('13.6.0').get()
-def validateDebugUrl = { String name, String value ->
-    if (!value.startsWith('https://') && !value.startsWith('http://')) {
-        throw new GradleException("${name} must start with http:// or https://")
-    }
-}
-validateDebugUrl('EMULATOR_BACKEND_BASE_URL', emulatorBackendUrl)
-validateDebugUrl('DEVICE_BACKEND_BASE_URL', deviceBackendUrl)
 android {
     namespace 'ru.gulyay.app'
     compileSdk 35
@@ -25,20 +14,11 @@ android {
         applicationId 'ru.gulyay.app'
         minSdk 23
         targetSdk 35
-        versionCode 25
-        versionName '0.6.9.d'
+        versionCode 26
+        versionName '0.6.9.e'
         buildConfigField 'String', 'BACKEND_BASE_URL', '"' + backendUrl.replace('"', '\\"') + '"'
-        buildConfigField 'String', 'EMULATOR_BACKEND_BASE_URL', '"https://example.invalid"'
-        buildConfigField 'String', 'DEVICE_BACKEND_BASE_URL', '"https://example.invalid"'
     }
-    buildTypes {
-        debug {
-            buildConfigField 'String', 'EMULATOR_BACKEND_BASE_URL',
-                    '"' + emulatorBackendUrl.replace('"', '\\"') + '"'
-            buildConfigField 'String', 'DEVICE_BACKEND_BASE_URL',
-                    '"' + deviceBackendUrl.replace('"', '\\"') + '"'
-        }
-    }
+    buildTypes { debug { } }
     buildFeatures { buildConfig true }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

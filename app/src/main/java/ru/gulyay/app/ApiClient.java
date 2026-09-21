@@ -5,7 +5,6 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
@@ -227,19 +226,27 @@ final class ApiClient {
     }
 
     static Result deleteRoute(String routeId, String sessionId) throws Exception {
-        if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
+        if (!BackendConfig.isConfigured()) {
             return new Result(false, "Сборка не подключена к backend.", null, 0);
         }
-        HttpURLConnection connection = open("/v1/routes/" + routeId, "DELETE", sessionId);
+        String path = "/v1/routes/" + routeId;
+        String method = "DELETE";
+        long startedAt = BackendConfig.logRequest(method, path);
+        HttpURLConnection connection = null;
         try {
+            connection = open(path, method, sessionId);
             int status = connection.getResponseCode();
+            BackendConfig.logResponse(method, path, status, startedAt);
             if (status == 204 || status == 404) {
                 return new Result(true, "Маршрут сброшен.", null, 0);
             }
             JSONObject response = readJson(connection, status);
             return routeError(response, status);
+        } catch (Exception error) {
+            BackendConfig.logFailure(method, path, startedAt, error);
+            throw error;
         } finally {
-            connection.disconnect();
+            if (connection != null) connection.disconnect();
         }
     }
 
@@ -280,15 +287,19 @@ final class ApiClient {
     }
 
     static SearchResult searchPlaces(String cityId, String query, String sessionId) throws Exception {
-        if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
+        if (!BackendConfig.isConfigured()) {
             return new SearchResult(false, "Сборка не подключена к backend.", 0,
                     Collections.emptyList());
         }
         String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8.name());
-        HttpURLConnection connection = open("/v1/places?cityId=" + cityId + "&q=" + encoded,
-                "GET", sessionId);
+        String path = "/v1/places?cityId=" + cityId + "&q=" + encoded;
+        String method = "GET";
+        long startedAt = BackendConfig.logRequest(method, path);
+        HttpURLConnection connection = null;
         try {
+            connection = open(path, method, sessionId);
             int status = connection.getResponseCode();
+            BackendConfig.logResponse(method, path, status, startedAt);
             JSONObject response = readJson(connection, status);
             if (status >= 400) {
                 return searchError(response, status);
@@ -303,25 +314,32 @@ final class ApiClient {
             String message = places.isEmpty() ? "Подходящих мест не найдено" :
                     "Найдено мест: " + places.size();
             return new SearchResult(true, message, 0, places);
+        } catch (Exception error) {
+            BackendConfig.logFailure(method, path, startedAt, error);
+            throw error;
         } finally {
-            connection.disconnect();
+            if (connection != null) connection.disconnect();
         }
     }
 
     private static Result send(String path, JSONObject payload, String sessionId,
                                String cityId) throws Exception {
-        if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
+        if (!BackendConfig.isConfigured()) {
             return new Result(false, "Для построения маршрута нужен адрес запущенного backend. Эта сборка пока не подключена к серверу.", null, 0);
         }
-        HttpURLConnection connection = open(path, "POST", sessionId);
-        connection.setDoOutput(true);
-        connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+        String method = "POST";
+        long startedAt = BackendConfig.logRequest(method, path);
+        HttpURLConnection connection = null;
         try {
+            connection = open(path, method, sessionId);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
             try (java.io.OutputStream output = connection.getOutputStream()) {
                 output.write(bytes);
             }
             int status = connection.getResponseCode();
+            BackendConfig.logResponse(method, path, status, startedAt);
             JSONObject response = readJson(connection, status);
             if (status >= 400) {
                 return routeError(response, status);
@@ -331,23 +349,28 @@ final class ApiClient {
                     routePath(response));
             fillRouteMetrics(result, response);
             return result;
+        } catch (Exception error) {
+            BackendConfig.logFailure(method, path, startedAt, error);
+            throw error;
         } finally {
-            connection.disconnect();
+            if (connection != null) connection.disconnect();
         }
     }
 
     private static WalkResult sendWalk(String path, String method, JSONObject payload,
                                        String sessionId) throws Exception {
-        if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
+        if (!BackendConfig.isConfigured()) {
             return new WalkResult(false, "Сборка не подключена к backend.", null, null,
                     0, 0, false, -1, null);
         }
-        HttpURLConnection connection = open(path, method, sessionId);
-        if (payload != null) {
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        }
+        long startedAt = BackendConfig.logRequest(method, path);
+        HttpURLConnection connection = null;
         try {
+            connection = open(path, method, sessionId);
+            if (payload != null) {
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            }
             if (payload != null) {
                 byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
                 try (java.io.OutputStream output = connection.getOutputStream()) {
@@ -355,6 +378,7 @@ final class ApiClient {
                 }
             }
             int status = connection.getResponseCode();
+            BackendConfig.logResponse(method, path, status, startedAt);
             JSONObject response = readJson(connection, status);
             if (status >= 400) {
                 Result error = routeError(response, status);
@@ -373,8 +397,11 @@ final class ApiClient {
             String message = walkMessage(walkStatus, order, remaining, pointReached, distance);
             return new WalkResult(true, message, walk.getString("walkId"), walkStatus,
                     order, remaining, pointReached, distance, null);
+        } catch (Exception error) {
+            BackendConfig.logFailure(method, path, startedAt, error);
+            throw error;
         } finally {
-            connection.disconnect();
+            if (connection != null) connection.disconnect();
         }
     }
 
@@ -391,12 +418,16 @@ final class ApiClient {
     }
 
     private static Result getRouteResponse(String path, String sessionId, String cityId) throws Exception {
-        if (BuildConfig.BACKEND_BASE_URL.equals("https://example.invalid")) {
+        if (!BackendConfig.isConfigured()) {
             return new Result(false, "Сборка не подключена к backend.", null, 0);
         }
-        HttpURLConnection connection = open(path, "GET", sessionId);
+        String method = "GET";
+        long startedAt = BackendConfig.logRequest(method, path);
+        HttpURLConnection connection = null;
         try {
+            connection = open(path, method, sessionId);
             int status = connection.getResponseCode();
+            BackendConfig.logResponse(method, path, status, startedAt);
             JSONObject response = readJson(connection, status);
             if (status >= 400) return routeError(response, status);
             Result result = new Result(true, routeSummary(response, cityId), response.getString("routeId"),
@@ -404,15 +435,18 @@ final class ApiClient {
                     routePath(response));
             fillRouteMetrics(result, response);
             return result;
+        } catch (Exception error) {
+            BackendConfig.logFailure(method, path, startedAt, error);
+            throw error;
         } finally {
-            connection.disconnect();
+            if (connection != null) connection.disconnect();
         }
     }
 
     private static HttpURLConnection open(String path, String method, String sessionId)
             throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) new URL(
-                BuildConfig.BACKEND_BASE_URL + path).openConnection();
+        HttpURLConnection connection = (HttpURLConnection) BackendConfig.endpoint(path)
+                .openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(7000);
         connection.setReadTimeout(60000);

@@ -39,7 +39,7 @@ def response(request: httpx.Request) -> httpx.Response:
 
 def preview(center=True):
     return QueryPreview(cityId="tula", durationMinutes=180, durationSource="text",
-                        interests=["кремль"], includeFood=False, withChildren=False,
+                        interests=["LANDMARKS"], includeFood=False, withChildren=False,
                         unusualPlaces=False, centerOnly=center,
                         locationHint="центр" if center else None, warnings=[])
 
@@ -121,7 +121,7 @@ def test_center_request_uses_smaller_search_radius():
     center = (54.193, 37.617)
     provider.search_places("tula", preview(center=True), provider.resolve_search_area("tula", "центр", center))
     provider.search_places("tula", preview(center=False), provider.resolve_search_area("tula", None, center))
-    assert radii == ["3500", "12000"]
+    assert radii == ["3500", "3500", "12000", "12000"]
 
 
 def test_generic_walk_searches_outdoor_places_to_fill_evening_route():
@@ -152,7 +152,7 @@ def test_unsafe_llm_interests_never_reach_2gis_query():
     assert queries == ["достопримечательности", "парки и скверы"]
 
 
-def test_safe_interest_survives_boundary_filter():
+def test_normalized_concept_is_mapped_to_backend_owned_queries():
     queries = []
     def capture(request):
         if request.url.host == "catalog.api.2gis.com":
@@ -160,11 +160,11 @@ def test_safe_interest_survives_boundary_filter():
         return response(request)
     provider = DgisGeoProvider("p", "r", httpx.MockTransport(capture))
     mixed = preview(center=True).model_copy(update={
-        "interests": ["архитектура модерна", "между точками максимум 15 минут"],
+        "interests": ["ARCHITECTURE", "между точками максимум 15 минут"],
     })
     area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
     provider.search_places("tula", mixed, area)
-    assert queries == ["архитектура модерна"]
+    assert queries == ["памятники архитектуры", "исторические здания"]
 
 
 def test_manual_search_returns_only_provider_candidates_near_selected_city():
@@ -192,6 +192,23 @@ def test_automatic_search_rejects_ritual_and_unrelated_branches():
     area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
     places = provider.search_places("tula", preview(), area)
     assert [place.placeId for place in places] == ["museum"]
+
+
+def test_hard_exclusion_is_applied_after_2gis_returns_candidates():
+    def museum(request):
+        items = [{
+            "id": "museum", "name": "Городской музей",
+            "point": {"lat": 54.196, "lon": 37.619},
+            "rubrics": [{"name": "Музеи"}], "schedule": {"is_24x7": True},
+            "is_routing_available": True,
+        }]
+        return httpx.Response(200, json={"meta": {"code": 200},
+                                        "result": {"items": items}})
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(museum))
+    no_museums = preview().model_copy(update={"hardExclusions": ["MUSEUMS"]})
+    area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
+    assert provider.search_places("tula", no_museums, area) == []
 
 
 def test_food_search_does_not_turn_unrelated_branch_into_restaurant():

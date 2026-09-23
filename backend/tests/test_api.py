@@ -22,12 +22,31 @@ class FakeIntent:
 
     def extract(self, query):
         self.calls += 1
-        return IntentExtraction(cityText="Тула", durationMinutes=120, interests=["история"],
-                                includeFood=False, withChildren=False, unusualPlaces=False,
-                                centerOnly=True, locationHint="центр",
-                                startLocationHint=None, directionHint=None,
-                                startLocationAmbiguous=False, preferShortWalks=False,
-                                maxWalkingMinutes=None)
+        return IntentExtraction.model_validate({
+            "schemaVersion": "1.0", "cityText": "Тула",
+            "duration": {"mode": "TARGET", "targetMinutes": 120,
+                         "maxMinutes": None, "minMinutes": None},
+            "start": {"explicitLocationText": None, "isExplicit": False,
+                      "isAmbiguous": False},
+            "area": {"preference": "CENTER", "locationText": "центр",
+                     "strength": "SOFT"},
+            "directionHint": None,
+            "mobility": {"transportMode": "WALKING", "walkingEffort": "NORMAL",
+                         "compactness": "NORMAL", "minimizeTotalWalking": False,
+                         "preferredLegMinutes": None, "maxLegMinutes": None,
+                         "maxLegDistanceMeters": None, "maxTotalWalkingMinutes": None,
+                         "maxTotalWalkingDistanceMeters": None},
+            "interests": [{"concept": "HISTORIC_PLACES", "priority": "HIGH",
+                           "strength": "SOFT", "sourceText": "история",
+                           "broadeningAllowed": True}],
+            "exclusions": [],
+            "food": {"mode": "NONE", "timing": "ANY", "exactTime": None,
+                     "preferences": [], "excludedPreferences": []},
+            "routeStyle": {"pace": "NORMAL", "placeDensity": "NORMAL",
+                           "variety": "NORMAL", "popularityPreference": "NOT_SPECIFIED"},
+            "withChildren": False, "unusualPlaces": False,
+            "clarificationFields": [],
+        })
 
 
 class FakeGeo:

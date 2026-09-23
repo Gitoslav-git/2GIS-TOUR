@@ -37,6 +37,8 @@ def preferences(**updates):
                 includeFood=False, withChildren=False, unusualPlaces=False, centerOnly=False,
                 maxWalkingMinutes=None, warnings=[])
     data.update(updates)
+    if data.get("includeFood") and "foodMode" not in updates:
+        data["foodMode"] = "REQUIRED"
     return QueryPreview.model_validate(data)
 
 
@@ -46,9 +48,9 @@ def test_builds_route_only_from_provider_places_and_legs():
                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
     assert route.points[0].placeId == "2gis-1"
     assert route.legs[0].durationSeconds == 600
-    assert route.totalMinutes == 50
+    assert route.totalMinutes == 60
     assert route.requestedMinutes == 180
-    assert route.unusedMinutes == 130
+    assert route.unusedMinutes == 120
     assert route.approximateStart is True
 
 
@@ -218,11 +220,41 @@ def test_walking_limit_skips_long_leg_without_reporting_geo_failure():
     assert "Каждый пеший переход — не более 20 мин." in route.warnings
 
 
+def test_soft_short_walk_preference_does_not_destroy_five_hour_route():
+    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True})
+              for index in range(1, 7)]
+
+    class SoftWalkGeo(FakeGeo):
+        def walking_leg(self, start, end, from_order, to_order):
+            self.walking_starts.append(start)
+            seconds = 1500 if from_order == 2 else 900
+            return RouteLeg(fromOrder=from_order, toOrder=to_order,
+                            distanceMeters=2000 if seconds == 1500 else 1000,
+                            durationSeconds=seconds,
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    route = build_route(
+        CreateRoute(cityId="tula", query="Хочу гулять 5 часов, но много ходить не хочу"),
+        preferences(durationMinutes=300, targetDurationMinutes=300,
+                    maxDurationMinutes=300, preferShortWalks=True,
+                    compactness="HIGH", minimizeTotalWalking=True,
+                    preferredWalkingMinutes=20, maxWalkingMinutes=None),
+        SoftWalkGeo(places),
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert route.planningStatus == "SUCCESS"
+    assert route.durationUtilization >= 0.85
+    assert len(route.points) >= 5
+    assert any(leg.durationSeconds > 20 * 60 for leg in route.legs)
+
+
 def test_large_unused_budget_is_explained_instead_of_hidden():
     route = build_route(CreateRoute(cityId="tula", query="История 3 часа"), preferences(),
                         FakeGeo([candidate("Кремль", "2gis-1", schedule={"is_24x7": True})]),
                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
-    assert any("Осталось 130 мин." in warning for warning in route.warnings)
+    assert route.planningStatus == "DEGRADED"
+    assert "DURATION_TARGET" in route.unmetPreferences
+    assert any("Маршрут заполнен" in warning for warning in route.warnings)
 
 
 def test_manual_point_order_is_preserved_and_all_legs_are_rebuilt():
@@ -291,7 +323,7 @@ def test_point_edit_keeps_text_start_and_direction_explanation():
     assert any(warning.startswith("Старт по указанному ориентиру:")
                for warning in changed.warnings)
     assert "Направление прогулки: центр" in changed.warnings
-    assert "При подборе отданы предпочтения коротким пешим переходам" in changed.warnings
+    assert "Из полноценных вариантов выбран наиболее компактный маршрут" in changed.warnings
 
 
 def test_point_edit_recovers_exact_start_from_route_created_before_0_5_4():

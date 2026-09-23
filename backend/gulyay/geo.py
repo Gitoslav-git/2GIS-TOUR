@@ -18,7 +18,6 @@ from typing import Callable, Protocol
 import httpx
 
 from .models import PlaceCandidate, QueryPreview, RouteLeg, SearchArea
-from .query_policy import sanitize_interests
 
 
 LOGGER = logging.getLogger("gulyay.2gis")
@@ -78,6 +77,66 @@ CITY_NAMES = {
 PLACES_URL = "https://catalog.api.2gis.com/3.0/items"
 PLACES_BY_ID_URL = "https://catalog.api.2gis.com/3.0/items/byid"
 ROUTING_URL = "https://routing.api.2gis.com/routing/7.0.0/global"
+
+# LLM concepts are never sent to 2GIS directly. Every catalogue query is owned
+# and reviewed by the backend, so an unknown phrase cannot become an API filter.
+CONCEPT_QUERIES: dict[str, tuple[str, ...]] = {
+    "ARCHITECTURE": ("памятники архитектуры", "исторические здания"),
+    "HISTORIC_PLACES": ("исторические достопримечательности", "памятные места"),
+    "LANDMARKS": ("достопримечательности", "памятники"),
+    "MUSEUMS": ("музеи", "выставочные залы"),
+    "PARKS": ("парки и скверы", "набережные"),
+    "VIEWPOINTS": ("смотровые площадки", "панорамные места"),
+    "RELIGIOUS_PLACES": ("храмы и соборы", "монастыри"),
+    "STREET_ART": ("уличное искусство", "арт-объекты"),
+    "UNUSUAL_PLACES": ("необычные достопримечательности", "интересные места"),
+    "CHILD_FRIENDLY": ("достопримечательности для детей", "семейные развлечения"),
+    "CULTURE": ("культурные места", "театры и галереи"),
+    "NATURE": ("парки и природные места", "набережные"),
+    "SHOPPING": ("торговые галереи", "рынки"),
+    "ENTERTAINMENT": ("развлечения", "досуговые места"),
+}
+
+CONCEPT_WORDS: dict[str, tuple[str, ...]] = {
+    "ARCHITECTURE": ("архитект", "здание", "усадьб", "особняк"),
+    "HISTORIC_PLACES": ("истор", "кремль", "усадьб", "памятн"),
+    "LANDMARKS": ("достопримеч", "памятник", "скульптур", "кремль"),
+    "MUSEUMS": ("музей", "галере", "выстав"),
+    "PARKS": ("парк", "сквер", "сад", "набереж"),
+    "VIEWPOINTS": ("смотров", "панорам", "обзорн"),
+    "RELIGIOUS_PLACES": ("храм", "собор", "церков", "монастыр", "мечет", "синагог"),
+    "STREET_ART": ("стрит-арт", "уличн", "граффити", "арт-объект"),
+    "UNUSUAL_PLACES": ("необыч", "интересн", "арт-объект"),
+    "CHILD_FRIENDLY": ("дет", "семейн", "зоопарк", "планетар"),
+    "CULTURE": ("культур", "театр", "галере", "филармони", "библиотек"),
+    "NATURE": ("природ", "парк", "сад", "набереж", "ботаничес"),
+    "SHOPPING": ("торгов", "рынок", "магазин"),
+    "ENTERTAINMENT": ("развлеч", "досуг", "аттракцион"),
+}
+
+FOOD_QUERIES = {
+    "COFFEE": "кофейни",
+    "BREAKFAST": "кафе с завтраками",
+    "LUNCH": "кафе ресторан",
+    "DINNER": "рестораны",
+    "DESSERT": "кондитерские",
+    "VEGETARIAN": "вегетарианские кафе",
+    "LOCAL_CUISINE": "местная кухня рестораны",
+    "FAMILY": "семейные кафе",
+    "FAST_FOOD": "быстрое питание",
+}
+
+FOOD_WORDS = {
+    "COFFEE": ("кофе", "кофейн"),
+    "BREAKFAST": ("завтрак",),
+    "LUNCH": ("обед", "столов"),
+    "DINNER": ("ресторан", "ужин"),
+    "DESSERT": ("десерт", "кондитер", "выпеч"),
+    "VEGETARIAN": ("вегетариан", "веган"),
+    "LOCAL_CUISINE": ("местн", "русск", "региональн"),
+    "FAMILY": ("семейн", "детск"),
+    "FAST_FOOD": ("быстр", "бургер", "фастфуд"),
+}
 
 
 @dataclass
@@ -289,19 +348,35 @@ class DgisGeoProvider:
 
     def search_places(self, city_id: str, preview: QueryPreview,
                       area: SearchArea) -> list[PlaceCandidate]:
-        safe_interests = sanitize_interests(preview.interests)
-        if safe_interests:
-            queries = safe_interests[:2]
-        else:
-            # A generic walk needs schedule diversity: outdoor places remain available
-            # when museums have already closed.
+        concepts = sorted(
+            set(preview.interests),
+            key=lambda value: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(
+                preview.interestPriorities.get(value, "MEDIUM"), 1,
+            ),
+        )
+        if preview.withChildren and "CHILD_FRIENDLY" not in concepts:
+            concepts.insert(0, "CHILD_FRIENDLY")
+        if preview.unusualPlaces and "UNUSUAL_PLACES" not in concepts:
+            concepts.insert(0, "UNUSUAL_PLACES")
+        mapped_concepts = [concept for concept in concepts if concept in CONCEPT_QUERIES]
+        queries = [CONCEPT_QUERIES[concept][0] for concept in mapped_concepts]
+        if not queries:
             queries = ["достопримечательности", "парки и скверы"]
-        if preview.unusualPlaces:
-            queries = ["необычные достопримечательности", *queries]
+        elif len(queries) == 1:
+            # One related broad query gives adaptive broadening without a second
+            # LLM call and without ever leaking the user's raw text to 2GIS.
+            related = CONCEPT_QUERIES[mapped_concepts[0]][1]
+            if related != queries[0]:
+                queries.append(related)
         # At most two interest searches plus one food search keeps first-build traffic bounded.
         requests = [(query, False) for query in queries[:2]]
         if preview.includeFood:
-            requests.append(("кафе ресторан", True))
+            food_query = next(
+                (FOOD_QUERIES[value] for value in preview.foodPreferences
+                 if value in FOOD_QUERIES),
+                "кафе ресторан",
+            )
+            requests.append((food_query, True))
 
         result: list[PlaceCandidate] = []
         seen: set[str] = set()
@@ -314,7 +389,13 @@ class DgisGeoProvider:
             )
             for item in items:
                 candidate = _candidate_from_item(item, requested_as_food, require_tourist=True)
-                if candidate is None or candidate.placeId in seen:
+                if (candidate is None or candidate.placeId in seen
+                        or any(candidate_matches_concept(candidate, excluded)
+                               for excluded in preview.hardExclusions)
+                        or (candidate.isFood and any(
+                            candidate_matches_food(candidate, excluded)
+                            for excluded in preview.excludedFoodPreferences
+                        ))):
                     continue
                 result.append(candidate)
                 seen.add(candidate.placeId)
@@ -472,6 +553,23 @@ def _candidate_from_item(item: dict, requested_as_food: bool = False,
         placeId=place_id, name=name, lat=float(point["lat"]), lon=float(point["lon"]),
         rubrics=rubrics, schedule=schedule, isFood=is_food,
     )
+
+
+def candidate_matches_concept(candidate: PlaceCandidate, concept: str) -> bool:
+    """Conservative backend-owned matching used for exclusions and scoring."""
+    words = CONCEPT_WORDS.get(concept)
+    if not words:
+        return False
+    searchable = " ".join([candidate.name, *candidate.rubrics]).casefold().replace("ё", "е")
+    return any(word in searchable for word in words)
+
+
+def candidate_matches_food(candidate: PlaceCandidate, preference: str) -> bool:
+    words = FOOD_WORDS.get(preference)
+    if not words:
+        return False
+    searchable = " ".join([candidate.name, *candidate.rubrics]).casefold().replace("ё", "е")
+    return any(word in searchable for word in words)
 
 
 def _belongs_to_city(item: dict, city_id: str, center: tuple[float, float]) -> bool:

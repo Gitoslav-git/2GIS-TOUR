@@ -25,12 +25,63 @@ class FakeIntentProvider:
 
 
 def parsed(**updates):
-    values = dict(cityText=None, durationMinutes=None, interests=[],
-                  includeFood=None, withChildren=None, unusualPlaces=None, centerOnly=None,
-                  locationHint=None, startLocationHint=None, directionHint=None,
-                  startLocationAmbiguous=False, preferShortWalks=None,
-                  maxWalkingMinutes=None)
-    values.update(updates)
+    duration_minutes = updates.pop("durationMinutes", None)
+    clarification = updates.pop("clarificationFields", [])
+    if duration_minutes is not None and not 30 <= duration_minutes <= 720:
+        duration_minutes = None
+        clarification = [*clarification, "durationMinutes"]
+    raw_interests = updates.pop("interests", [])
+    concept_map = {
+        "храм": "RELIGIOUS_PLACES", "архитект": "ARCHITECTURE",
+        "истор": "HISTORIC_PLACES", "музе": "MUSEUMS", "парк": "PARKS",
+    }
+    interests = []
+    for value in raw_interests:
+        if isinstance(value, dict):
+            interests.append(value)
+            continue
+        concept = next((result for word, result in concept_map.items()
+                        if word in value.casefold()), None)
+        if concept:
+            interests.append({"concept": concept, "priority": "HIGH",
+                              "strength": "SOFT", "sourceText": value,
+                              "broadeningAllowed": True})
+    include_food = updates.pop("includeFood", None)
+    center_only = updates.pop("centerOnly", None)
+    location_hint = updates.pop("locationHint", None)
+    start_hint = updates.pop("startLocationHint", None)
+    ambiguous = updates.pop("startLocationAmbiguous", False)
+    prefer_short = updates.pop("preferShortWalks", None)
+    parsed_limit = updates.pop("maxWalkingMinutes", None)
+    values = {
+        "schemaVersion": "1.0", "cityText": updates.pop("cityText", None),
+        "duration": {"mode": "TARGET" if duration_minutes else "DEFAULT",
+                     "targetMinutes": duration_minutes, "maxMinutes": None,
+                     "minMinutes": None},
+        "start": {"explicitLocationText": start_hint, "isExplicit": bool(start_hint),
+                  "isAmbiguous": ambiguous},
+        "area": {"preference": "CENTER" if center_only else
+                 ("DISTRICT" if location_hint else "ANY"),
+                 "locationText": location_hint, "strength": "SOFT"},
+        "directionHint": updates.pop("directionHint", None),
+        "mobility": {"transportMode": "WALKING",
+                     "walkingEffort": "LOW" if prefer_short else "NOT_SPECIFIED",
+                     "compactness": "HIGH" if prefer_short else "NORMAL",
+                     "minimizeTotalWalking": bool(prefer_short),
+                     "preferredLegMinutes": parsed_limit if prefer_short else None,
+                     "maxLegMinutes": None, "maxLegDistanceMeters": None,
+                     "maxTotalWalkingMinutes": None,
+                     "maxTotalWalkingDistanceMeters": None},
+        "interests": interests, "exclusions": [],
+        "food": {"mode": "REQUIRED" if include_food else "NONE", "timing": "ANY",
+                 "exactTime": None, "preferences": [], "excludedPreferences": []},
+        "routeStyle": {"pace": "NORMAL", "placeDensity": "NORMAL",
+                       "variety": "NORMAL", "popularityPreference": "NOT_SPECIFIED"},
+        "withChildren": bool(updates.pop("withChildren", False)),
+        "unusualPlaces": bool(updates.pop("unusualPlaces", False)),
+        "clarificationFields": clarification,
+    }
+    assert not updates, updates
     return IntentExtraction.model_validate(values)
 
 
@@ -55,14 +106,13 @@ def test_extracts_preferences_without_claiming_real_locations():
     app.dependency_overrides[get_intent_provider] = lambda: provider
     result = request()
     assert result.status_code == 200
-    assert result.json() == {
-        "cityId": "tula", "durationMinutes": 120, "durationSource": "text",
-        "interests": ["храмы"], "includeFood": True, "withChildren": False,
-        "unusualPlaces": False, "centerOnly": False, "locationHint": None,
-        "startLocationHint": None, "directionHint": None, "preferShortWalks": False,
-        "maxWalkingMinutes": None,
-        "warnings": [],
-    }
+    body = result.json()
+    assert body["cityId"] == "tula"
+    assert body["durationMinutes"] == 120
+    assert body["durationMode"] == "TARGET"
+    assert body["interests"] == ["RELIGIOUS_PLACES"]
+    assert body["foodMode"] == "REQUIRED"
+    assert body["maxWalkingMinutes"] is None
     assert provider.calls == 1
     assert "placeId" not in result.text and "lat" not in result.text
 
@@ -141,7 +191,8 @@ def test_start_direction_and_short_walks_are_not_collapsed_into_center():
     assert result.json()["locationHint"] is None
     assert result.json()["centerOnly"] is False
     assert result.json()["preferShortWalks"] is True
-    assert result.json()["maxWalkingMinutes"] == 20
+    assert result.json()["preferredWalkingMinutes"] == 20
+    assert result.json()["maxWalkingMinutes"] is None
 
 
 def test_control_query_is_recovered_even_if_llm_misses_geo_semantics():
@@ -157,16 +208,18 @@ def test_control_query_is_recovered_even_if_llm_misses_geo_semantics():
     assert result.json()["directionHint"] == "центр"
     assert result.json()["centerOnly"] is False
     assert result.json()["preferShortWalks"] is True
-    assert result.json()["maxWalkingMinutes"] == 20
+    assert result.json()["preferredWalkingMinutes"] == 20
+    assert result.json()["maxWalkingMinutes"] is None
 
 
-@pytest.mark.parametrize("query,parsed_limit,expected", [
-    ("Желательно, чтобы до локаций идти было недалеко", None, 20),
-    ("Между точками должно быть максимум 15-20 минут", None, 20),
-    ("Чтобы идти было не больше 12 минут между локациями", None, 12),
-    ("Хочу короткие переходы", 17, 20),
+@pytest.mark.parametrize("query,parsed_limit,expected_max,expected_preferred", [
+    ("Желательно, чтобы до локаций идти было недалеко", None, None, 20),
+    ("Между точками должно быть максимум 15-20 минут", None, 20, 20),
+    ("Чтобы идти было не больше 12 минут между локациями", None, 12, 20),
+    ("Хочу короткие переходы", 17, None, 17),
 ])
-def test_walking_phrases_become_numeric_limit(query, parsed_limit, expected):
+def test_walking_phrases_keep_soft_and_hard_limits_separate(
+        query, parsed_limit, expected_max, expected_preferred):
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
         durationMinutes=120, preferShortWalks=True, maxWalkingMinutes=parsed_limit,
         locationHint="до локаций идти недалеко",
@@ -178,7 +231,8 @@ def test_walking_phrases_become_numeric_limit(query, parsed_limit, expected):
     assert result.json()["locationHint"] is None
     assert result.json()["startLocationHint"] is None
     assert result.json()["directionHint"] is None
-    assert result.json()["maxWalkingMinutes"] == expected
+    assert result.json()["maxWalkingMinutes"] == expected_max
+    assert result.json()["preferredWalkingMinutes"] == expected_preferred
 
 
 def test_walking_instruction_is_removed_from_interests_before_2gis_search():
@@ -189,9 +243,10 @@ def test_walking_instruction_is_removed_from_interests_before_2gis_search():
     ))
     result = request(query="Хочу посмотреть архитектуру, чтобы недалеко ходить")
     assert result.status_code == 200
-    assert result.json()["interests"] == ["архитектура"]
+    assert result.json()["interests"] == ["ARCHITECTURE"]
     assert result.json()["preferShortWalks"] is True
-    assert result.json()["maxWalkingMinutes"] == 20
+    assert result.json()["maxWalkingMinutes"] is None
+    assert result.json()["preferredWalkingMinutes"] == 20
 
 
 def test_only_unknown_conditions_fall_back_without_breaking_preview():
@@ -205,10 +260,10 @@ def test_only_unknown_conditions_fall_back_without_breaking_preview():
 
 
 @pytest.mark.parametrize("query,expected", [
-    ("Между точками должно быть не больше 800 метров", 10),
-    ("Хочу ходить максимум 1 км между локациями", 13),
+    ("Между точками должно быть не больше 800 метров", 800),
+    ("Хочу ходить максимум 1 км между локациями", 1000),
 ])
-def test_walking_distance_is_converted_to_minutes(query, expected):
+def test_walking_distance_remains_an_exact_hard_distance(query, expected):
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
         durationMinutes=120, interests=[query],
     ))
@@ -216,7 +271,8 @@ def test_walking_distance_is_converted_to_minutes(query, expected):
     assert result.status_code == 200
     assert result.json()["interests"] == []
     assert result.json()["preferShortWalks"] is True
-    assert result.json()["maxWalkingMinutes"] == expected
+    assert result.json()["maxWalkingMinutes"] is None
+    assert result.json()["maxWalkingDistanceMeters"] == expected
 
 
 def test_ambiguous_personal_start_requires_clarification():
@@ -298,3 +354,38 @@ def test_stronger_model_is_default_but_environment_can_override(monkeypatch):
     assert configured_model() == "gpt-5.4-mini"
     monkeypatch.setenv("OPENAI_MODEL", "gpt-5-mini")
     assert configured_model() == "gpt-5-mini"
+
+
+@pytest.mark.parametrize("query,parsed_mode,expected", [
+    ("Хочу гулять 3 часа", "TARGET", "TARGET"),
+    ("У меня максимум 3 часа", "TARGET", "MAXIMUM"),
+    ("Хочу погулять около трёх часов", "TARGET", "APPROXIMATE"),
+])
+def test_duration_semantics_are_not_collapsed_into_one_budget(query, parsed_mode, expected):
+    intent = parsed(durationMinutes=180)
+    intent = intent.model_copy(update={
+        "duration": intent.duration.model_copy(update={"mode": parsed_mode}),
+    })
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(intent)
+    result = request(query=query)
+    assert result.status_code == 200
+    assert result.json()["durationMode"] == expected
+    assert result.json()["targetDurationMinutes"] == 180
+
+
+def test_optional_food_and_soft_exclusion_stay_soft():
+    data = parsed(durationMinutes=180).model_dump()
+    data["food"].update({"mode": "OPTIONAL", "timing": "MIDDLE",
+                         "preferences": ["COFFEE"]})
+    data["exclusions"] = [{"concept": "MUSEUMS", "strength": "SOFT_NEGATIVE"}]
+    data["routeStyle"]["pace"] = "RELAXED"
+    intent = IntentExtraction.model_validate(data)
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(intent)
+    result = request(query="Не спеша погулять три часа, лучше без музеев, в середине можно кофе")
+    assert result.status_code == 200
+    assert result.json()["foodMode"] == "OPTIONAL"
+    assert result.json()["foodTiming"] == "MIDDLE"
+    assert result.json()["foodPreferences"] == ["COFFEE"]
+    assert result.json()["softExclusions"] == ["MUSEUMS"]
+    assert result.json()["hardExclusions"] == []
+    assert result.json()["routePace"] == "RELAXED"

@@ -45,45 +45,147 @@ class CreateRoute(StrictModel):
         return stripped
 
 
+InterestConcept = Literal[
+    "ARCHITECTURE", "HISTORIC_PLACES", "LANDMARKS", "MUSEUMS", "PARKS",
+    "VIEWPOINTS", "RELIGIOUS_PLACES", "STREET_ART", "UNUSUAL_PLACES",
+    "CHILD_FRIENDLY", "CULTURE", "NATURE", "SHOPPING", "ENTERTAINMENT",
+]
+
+
+class DurationIntent(StrictModel):
+    mode: Literal["TARGET", "MAXIMUM", "APPROXIMATE", "DEFAULT"]
+    targetMinutes: int | None = Field(ge=30, le=720)
+    maxMinutes: int | None = Field(ge=30, le=720)
+    minMinutes: int | None = Field(ge=30, le=720)
+
+
+class StartIntent(StrictModel):
+    explicitLocationText: str | None = Field(max_length=160)
+    isExplicit: bool
+    isAmbiguous: bool
+
+
+class AreaIntent(StrictModel):
+    preference: Literal[
+        "ANY", "CENTER", "NORTH", "SOUTH", "EAST", "WEST", "DISTRICT",
+        "NEAR_LOCATION",
+    ]
+    locationText: str | None = Field(max_length=120)
+    strength: Literal["SOFT", "HARD"]
+
+
+class MobilityIntent(StrictModel):
+    transportMode: Literal["WALKING", "DRIVING"]
+    walkingEffort: Literal["VERY_LOW", "LOW", "NORMAL", "HIGH", "NOT_SPECIFIED"]
+    compactness: Literal["LOW", "NORMAL", "HIGH"]
+    minimizeTotalWalking: bool
+    preferredLegMinutes: int | None = Field(ge=1, le=120)
+    maxLegMinutes: int | None = Field(ge=1, le=120)
+    maxLegDistanceMeters: int | None = Field(ge=50, le=20000)
+    maxTotalWalkingMinutes: int | None = Field(ge=1, le=720)
+    maxTotalWalkingDistanceMeters: int | None = Field(ge=100, le=50000)
+
+
+class InterestIntent(StrictModel):
+    concept: InterestConcept
+    priority: Literal["LOW", "MEDIUM", "HIGH"]
+    strength: Literal["SOFT", "HARD"]
+    sourceText: str = Field(min_length=1, max_length=120)
+    broadeningAllowed: bool
+
+
+class ExclusionIntent(StrictModel):
+    concept: InterestConcept
+    strength: Literal["SOFT_NEGATIVE", "HARD_EXCLUSION"]
+
+
+FoodPreference = Literal[
+    "COFFEE", "BREAKFAST", "LUNCH", "DINNER", "DESSERT", "VEGETARIAN",
+    "LOCAL_CUISINE", "FAMILY", "FAST_FOOD",
+]
+
+
+class FoodIntent(StrictModel):
+    mode: Literal["NONE", "OPTIONAL", "REQUIRED"]
+    timing: Literal["ANY", "START", "MIDDLE", "END", "EXACT_TIME"]
+    exactTime: str | None = Field(max_length=5, pattern=r"^\d{2}:\d{2}$")
+    preferences: list[FoodPreference] = Field(max_length=6)
+    excludedPreferences: list[FoodPreference] = Field(max_length=6)
+
+
+class RouteStyleIntent(StrictModel):
+    pace: Literal["RELAXED", "NORMAL", "INTENSIVE"]
+    placeDensity: Literal["LOW", "NORMAL", "HIGH"]
+    variety: Literal["LOW", "NORMAL", "HIGH"]
+    popularityPreference: Literal[
+        "POPULAR", "BALANCED", "NON_TOURISTIC", "NOT_SPECIFIED",
+    ]
+
+
 class IntentExtraction(StrictModel):
-    """LLM output. Only preferences: the model cannot supply provider place IDs or coordinates."""
+    """Strict LLM output: intent only, never provider facts or API parameters."""
 
-    cityText: str | None
-    durationMinutes: int | None
-    interests: list[str] = Field(max_length=12)
-    includeFood: bool | None
-    withChildren: bool | None
-    unusualPlaces: bool | None
-    centerOnly: bool | None
-    locationHint: str | None = Field(max_length=120)
-    startLocationHint: str | None = Field(max_length=160)
+    schemaVersion: Literal["1.0"]
+    cityText: str | None = Field(max_length=100)
+    duration: DurationIntent
+    start: StartIntent
+    area: AreaIntent
     directionHint: str | None = Field(max_length=120)
-    startLocationAmbiguous: bool
-    preferShortWalks: bool | None
-    maxWalkingMinutes: int | None = Field(ge=1, le=120)
-
-    @field_validator("interests")
-    @classmethod
-    def valid_interests(cls, values: list[str]) -> list[str]:
-        if any(not item.strip() or len(item) > 80 for item in values):
-            raise ValueError("Invalid interest")
-        return values
+    mobility: MobilityIntent
+    interests: list[InterestIntent] = Field(max_length=8)
+    exclusions: list[ExclusionIntent] = Field(max_length=8)
+    food: FoodIntent
+    routeStyle: RouteStyleIntent
+    withChildren: bool
+    unusualPlaces: bool
+    clarificationFields: list[Literal[
+        "cityId", "durationMinutes", "startLocationHint", "area",
+    ]] = Field(max_length=4)
 
 
 class QueryPreview(StrictModel):
     cityId: str
     durationMinutes: int
     durationSource: Literal["text", "filter", "default"]
+    durationMode: Literal["TARGET", "MAXIMUM", "APPROXIMATE", "DEFAULT"] = "TARGET"
+    targetDurationMinutes: int | None = Field(default=None, ge=30, le=720)
+    maxDurationMinutes: int | None = Field(default=None, ge=30, le=720)
+    minDurationMinutes: int | None = Field(default=None, ge=30, le=720)
     interests: list[str]
+    interestPriorities: dict[str, Literal["LOW", "MEDIUM", "HIGH"]] = Field(
+        default_factory=dict,
+    )
+    hardExclusions: list[str] = Field(default_factory=list)
+    softExclusions: list[str] = Field(default_factory=list)
     includeFood: bool
+    foodMode: Literal["NONE", "OPTIONAL", "REQUIRED"] = "NONE"
+    foodTiming: Literal["ANY", "START", "MIDDLE", "END", "EXACT_TIME"] = "ANY"
+    foodPreferences: list[str] = Field(default_factory=list)
+    excludedFoodPreferences: list[str] = Field(default_factory=list)
     withChildren: bool
     unusualPlaces: bool
     centerOnly: bool
+    areaStrength: Literal["SOFT", "HARD"] = "SOFT"
     locationHint: str | None = Field(default=None, max_length=120)
     startLocationHint: str | None = Field(default=None, max_length=160)
     directionHint: str | None = Field(default=None, max_length=120)
     preferShortWalks: bool = False
+    walkingEffort: Literal[
+        "VERY_LOW", "LOW", "NORMAL", "HIGH", "NOT_SPECIFIED",
+    ] = "NOT_SPECIFIED"
+    compactness: Literal["LOW", "NORMAL", "HIGH"] = "NORMAL"
+    minimizeTotalWalking: bool = False
+    preferredWalkingMinutes: int | None = Field(default=None, ge=1, le=120)
     maxWalkingMinutes: int | None = Field(default=None, ge=1, le=120)
+    maxWalkingDistanceMeters: int | None = Field(default=None, ge=50, le=20000)
+    maxTotalWalkingMinutes: int | None = Field(default=None, ge=1, le=720)
+    maxTotalWalkingDistanceMeters: int | None = Field(default=None, ge=100, le=50000)
+    routePace: Literal["RELAXED", "NORMAL", "INTENSIVE"] = "NORMAL"
+    placeDensity: Literal["LOW", "NORMAL", "HIGH"] = "NORMAL"
+    variety: Literal["LOW", "NORMAL", "HIGH"] = "NORMAL"
+    popularityPreference: Literal[
+        "POPULAR", "BALANCED", "NON_TOURISTIC", "NOT_SPECIFIED",
+    ] = "NOT_SPECIFIED"
     warnings: list[str]
 
 
@@ -161,6 +263,9 @@ class Route(StrictModel):
     startLon: float | None = Field(default=None, ge=-180, le=180)
     startSource: Literal["USER_GEO", "TEXT_ANCHOR", "CITY_CENTER", "LEGACY"] = "LEGACY"
     maxWalkingMinutes: int | None = Field(default=None, ge=1, le=120)
+    planningStatus: Literal["SUCCESS", "DEGRADED"] = "SUCCESS"
+    durationUtilization: float = Field(default=1.0, ge=0)
+    unmetPreferences: list[str] = Field(default_factory=list)
     requestedMinutes: int
     totalMinutes: int
     unusedMinutes: int

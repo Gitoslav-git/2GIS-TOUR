@@ -567,6 +567,11 @@ final class ApiClient {
         StringBuilder summary = new StringBuilder("Маршрут готов: " + city + ", " +
                 response.getInt("totalMinutes") + " из " + requested + " мин. · версия " + response.getInt("routeVersion") +
                 "\nПожелания: " + response.getString("query"));
+        if ("DEGRADED".equals(response.optString("planningStatus"))) {
+            int utilization = (int) Math.round(response.optDouble("durationUtilization", 0) * 100);
+            summary.append("\nМаршрут сокращён: удалось заполнить ")
+                    .append(utilization).append("% желаемого времени.");
+        }
         if (unused > 0) summary.append("\nСвободный резерв: ").append(unused).append(" мин.");
         JSONObject area = response.getJSONObject("searchArea");
         summary.append("\nОбласть поиска: ").append(area.getString("label"));

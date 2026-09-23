@@ -76,7 +76,8 @@ def parsed(**updates):
         "food": {"mode": "REQUIRED" if include_food else "NONE", "timing": "ANY",
                  "exactTime": None, "preferences": [], "excludedPreferences": []},
         "routeStyle": {"pace": "NORMAL", "placeDensity": "NORMAL",
-                       "variety": "NORMAL", "popularityPreference": "NOT_SPECIFIED"},
+                       "variety": "NORMAL", "popularityPreference": "NOT_SPECIFIED",
+                       "requestedPlaceCount": None},
         "withChildren": bool(updates.pop("withChildren", False)),
         "unusualPlaces": bool(updates.pop("unusualPlaces", False)),
         "clarificationFields": clarification,
@@ -389,3 +390,18 @@ def test_optional_food_and_soft_exclusion_stay_soft():
     assert result.json()["softExclusions"] == ["MUSEUMS"]
     assert result.json()["hardExclusions"] == []
     assert result.json()["routePace"] == "RELAXED"
+
+
+def test_explicit_place_count_and_specific_cuisine_are_preserved():
+    data = parsed(durationMinutes=180).model_dump()
+    data["routeStyle"]["requestedPlaceCount"] = 1
+    data["food"].update({"mode": "REQUIRED", "timing": "END",
+                         "preferences": ["ITALIAN"]})
+    intent = IntentExtraction.model_validate(data)
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(intent)
+    result = request(query="Хочу одно место и в конце итальянскую кухню")
+    assert result.status_code == 200
+    assert result.json()["requestedPlaceCount"] == 1
+    assert result.json()["allowSinglePlace"] is True
+    assert result.json()["foodPreferences"] == ["ITALIAN"]
+    assert result.json()["foodTiming"] == "END"

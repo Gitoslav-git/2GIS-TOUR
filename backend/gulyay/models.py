@@ -101,7 +101,8 @@ class ExclusionIntent(StrictModel):
 
 FoodPreference = Literal[
     "COFFEE", "BREAKFAST", "LUNCH", "DINNER", "DESSERT", "VEGETARIAN",
-    "LOCAL_CUISINE", "FAMILY", "FAST_FOOD",
+    "LOCAL_CUISINE", "FAMILY", "FAST_FOOD", "ITALIAN", "JAPANESE",
+    "GEORGIAN", "ASIAN", "RUSSIAN", "EUROPEAN", "MEXICAN", "INDIAN",
 ]
 
 
@@ -120,6 +121,7 @@ class RouteStyleIntent(StrictModel):
     popularityPreference: Literal[
         "POPULAR", "BALANCED", "NON_TOURISTIC", "NOT_SPECIFIED",
     ]
+    requestedPlaceCount: int | None = Field(ge=1, le=8)
 
 
 class IntentExtraction(StrictModel):
@@ -155,11 +157,13 @@ class QueryPreview(StrictModel):
     interestPriorities: dict[str, Literal["LOW", "MEDIUM", "HIGH"]] = Field(
         default_factory=dict,
     )
+    hardInterests: list[str] = Field(default_factory=list)
     hardExclusions: list[str] = Field(default_factory=list)
     softExclusions: list[str] = Field(default_factory=list)
     includeFood: bool
     foodMode: Literal["NONE", "OPTIONAL", "REQUIRED"] = "NONE"
     foodTiming: Literal["ANY", "START", "MIDDLE", "END", "EXACT_TIME"] = "ANY"
+    foodExactTime: str | None = Field(default=None, max_length=5, pattern=r"^\d{2}:\d{2}$")
     foodPreferences: list[str] = Field(default_factory=list)
     excludedFoodPreferences: list[str] = Field(default_factory=list)
     withChildren: bool
@@ -186,6 +190,8 @@ class QueryPreview(StrictModel):
     popularityPreference: Literal[
         "POPULAR", "BALANCED", "NON_TOURISTIC", "NOT_SPECIFIED",
     ] = "NOT_SPECIFIED"
+    requestedPlaceCount: int | None = Field(default=None, ge=1, le=8)
+    allowSinglePlace: bool = False
     warnings: list[str]
 
 
@@ -205,6 +211,8 @@ class PlaceCandidate(StrictModel):
     rubrics: list[str]
     schedule: dict
     isFood: bool
+    matchedConcepts: list[str] = Field(default_factory=list)
+    matchedFoodPreferences: list[str] = Field(default_factory=list)
 
 
 class PlaceSummary(StrictModel):
@@ -265,6 +273,8 @@ class Route(StrictModel):
     maxWalkingMinutes: int | None = Field(default=None, ge=1, le=120)
     planningStatus: Literal["SUCCESS", "DEGRADED"] = "SUCCESS"
     durationUtilization: float = Field(default=1.0, ge=0)
+    planningScore: float = Field(default=0.0, ge=0, le=100)
+    planningAttempts: int = Field(default=1, ge=1)
     unmetPreferences: list[str] = Field(default_factory=list)
     requestedMinutes: int
     totalMinutes: int

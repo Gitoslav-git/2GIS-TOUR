@@ -124,6 +124,14 @@ FOOD_QUERIES = {
     "LOCAL_CUISINE": "местная кухня рестораны",
     "FAMILY": "семейные кафе",
     "FAST_FOOD": "быстрое питание",
+    "ITALIAN": "итальянская кухня",
+    "JAPANESE": "японская кухня",
+    "GEORGIAN": "грузинская кухня",
+    "ASIAN": "азиатская кухня",
+    "RUSSIAN": "русская кухня",
+    "EUROPEAN": "европейская кухня",
+    "MEXICAN": "мексиканская кухня",
+    "INDIAN": "индийская кухня",
 }
 
 FOOD_WORDS = {
@@ -136,6 +144,14 @@ FOOD_WORDS = {
     "LOCAL_CUISINE": ("местн", "русск", "региональн"),
     "FAMILY": ("семейн", "детск"),
     "FAST_FOOD": ("быстр", "бургер", "фастфуд"),
+    "ITALIAN": ("итальян", "пицц", "паста"),
+    "JAPANESE": ("япон", "суши", "ролл", "рамен"),
+    "GEORGIAN": ("грузин", "хинкал", "хачапур"),
+    "ASIAN": ("азиат", "паназиат", "вок"),
+    "RUSSIAN": ("русск",),
+    "EUROPEAN": ("европей",),
+    "MEXICAN": ("мексикан", "тако", "буррито"),
+    "INDIAN": ("индий",),
 }
 
 
@@ -359,37 +375,36 @@ class DgisGeoProvider:
         if preview.unusualPlaces and "UNUSUAL_PLACES" not in concepts:
             concepts.insert(0, "UNUSUAL_PLACES")
         mapped_concepts = [concept for concept in concepts if concept in CONCEPT_QUERIES]
-        queries = [CONCEPT_QUERIES[concept][0] for concept in mapped_concepts]
+        queries = [(CONCEPT_QUERIES[concept][0], concept) for concept in mapped_concepts]
         if not queries:
-            queries = ["достопримечательности", "парки и скверы"]
+            queries = [("достопримечательности", None), ("парки и скверы", None)]
         elif len(queries) == 1:
             # One related broad query gives adaptive broadening without a second
             # LLM call and without ever leaking the user's raw text to 2GIS.
             related = CONCEPT_QUERIES[mapped_concepts[0]][1]
-            if related != queries[0]:
-                queries.append(related)
+            if related != queries[0][0]:
+                queries.append((related, mapped_concepts[0]))
         # At most two interest searches plus one food search keeps first-build traffic bounded.
-        requests = [(query, False) for query in queries[:2]]
+        requests = [(query, False, concept, None) for query, concept in queries[:2]]
         if preview.includeFood:
-            food_query = next(
-                (FOOD_QUERIES[value] for value in preview.foodPreferences
-                 if value in FOOD_QUERIES),
-                "кафе ресторан",
+            food_preference = next(
+                (value for value in preview.foodPreferences if value in FOOD_QUERIES), None,
             )
-            requests.append((food_query, True))
+            food_query = FOOD_QUERIES.get(food_preference, "кафе ресторан")
+            requests.append((food_query, True, None, food_preference))
 
         result: list[PlaceCandidate] = []
-        seen: set[str] = set()
-        for query, requested_as_food in requests:
+        positions: dict[str, int] = {}
+        for query, requested_as_food, matched_concept, matched_food in requests:
             items = self._places(
                 q=query, type="attraction,branch", locale="ru_RU",
                 point=f"{area.lon:.7f},{area.lat:.7f}", radius=area.radiusMeters,
                 fields="items.point,items.rubrics,items.schedule,items.is_routing_available",
-                page_size=10, search_is_query_text_complete="true",
+                page_size=20, search_is_query_text_complete="true",
             )
             for item in items:
                 candidate = _candidate_from_item(item, requested_as_food, require_tourist=True)
-                if (candidate is None or candidate.placeId in seen
+                if (candidate is None
                         or any(candidate_matches_concept(candidate, excluded)
                                for excluded in preview.hardExclusions)
                         or (candidate.isFood and any(
@@ -397,10 +412,28 @@ class DgisGeoProvider:
                             for excluded in preview.excludedFoodPreferences
                         ))):
                     continue
+                concepts_found = ([matched_concept] if matched_concept else [])
+                food_found = ([matched_food] if matched_food else [])
+                if candidate.placeId in positions:
+                    index = positions[candidate.placeId]
+                    existing = result[index]
+                    result[index] = existing.model_copy(update={
+                        "matchedConcepts": list(dict.fromkeys(
+                            [*existing.matchedConcepts, *concepts_found]
+                        )),
+                        "matchedFoodPreferences": list(dict.fromkeys(
+                            [*existing.matchedFoodPreferences, *food_found]
+                        )),
+                    })
+                    continue
+                candidate = candidate.model_copy(update={
+                    "matchedConcepts": concepts_found,
+                    "matchedFoodPreferences": food_found,
+                })
+                positions[candidate.placeId] = len(result)
                 result.append(candidate)
-                seen.add(candidate.placeId)
-        sights = [candidate for candidate in result if not candidate.isFood][:20]
-        food = [candidate for candidate in result if candidate.isFood][:4]
+        sights = [candidate for candidate in result if not candidate.isFood][:32]
+        food = [candidate for candidate in result if candidate.isFood][:8]
         return sights + food
 
     def search_candidates(self, city_id: str, query: str) -> list[PlaceCandidate]:
@@ -557,6 +590,8 @@ def _candidate_from_item(item: dict, requested_as_food: bool = False,
 
 def candidate_matches_concept(candidate: PlaceCandidate, concept: str) -> bool:
     """Conservative backend-owned matching used for exclusions and scoring."""
+    if concept in candidate.matchedConcepts:
+        return True
     words = CONCEPT_WORDS.get(concept)
     if not words:
         return False
@@ -565,6 +600,8 @@ def candidate_matches_concept(candidate: PlaceCandidate, concept: str) -> bool:
 
 
 def candidate_matches_food(candidate: PlaceCandidate, preference: str) -> bool:
+    if preference in candidate.matchedFoodPreferences:
+        return True
     words = FOOD_WORDS.get(preference)
     if not words:
         return False

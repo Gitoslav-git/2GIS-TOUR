@@ -9,6 +9,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from .models import CreateRoute, IntentExtraction, QueryPreview
+from .planning_debug import planning_log
 from .query_policy import looks_like_walking_constraint
 
 DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
@@ -69,9 +70,12 @@ SYSTEM_PROMPT = """
 8. «Можно кофе» => food OPTIONAL; «обязательно пообедать» => REQUIRED.
    Учитывай START/MIDDLE/END/EXACT_TIME, только если это сказано. Предпочтения
    еды нормализуй в ближайшие допустимые значения COFFEE/BREAKFAST/LUNCH/DINNER/
-   DESSERT/VEGETARIAN/LOCAL_CUISINE/FAMILY/FAST_FOOD.
+   DESSERT/VEGETARIAN/LOCAL_CUISINE/FAMILY/FAST_FOOD/ITALIAN/JAPANESE/
+   GEORGIAN/ASIAN/RUSSIAN/EUROPEAN/MEXICAN/INDIAN. Конкретную названную кухню
+   не заменяй общей категорией.
 9. «Не спеша» => pace RELAXED, density LOW. «Как можно больше» =>
    pace INTENSIVE, density HIGH. Не придумывай отсутствующие ограничения.
+   requestedPlaceCount заполняй только при явном количестве мест. «Одно место» => 1.
 10. clarificationFields заполняй только когда без уточнения нельзя разумно строить
     маршрут. Не требуй необязательных параметров: для них есть product defaults.
 
@@ -118,12 +122,23 @@ class OpenAIIntentProvider:
         return parsed
 
 
-def interpret(payload: CreateRoute, provider: IntentProvider) -> QueryPreview:
-    parsed = provider.extract(payload.query)
+def interpret(payload: CreateRoute, provider: IntentProvider,
+              trace_id: str | None = None) -> QueryPreview:
+    planning_log(trace_id, "user_query", cityId=payload.cityId, query=payload.query,
+                 filters=payload.filters.model_dump(mode="json"),
+                 hasUserGeo=payload.startLocation is not None)
+    try:
+        parsed = provider.extract(payload.query)
+    except (IntentUnavailable, IntentAuthenticationError, IntentInvalidResponse) as exc:
+        planning_log(trace_id, "intent_error", error=type(exc).__name__)
+        raise
     try:
         parsed = IntentExtraction.model_validate(parsed)
     except ValidationError as exc:
+        planning_log(trace_id, "intent_error", error="schema_validation",
+                     validationErrors=exc.errors(include_url=False))
         raise IntentInvalidResponse() from exc
+    planning_log(trace_id, "llm_intent", intent=parsed.model_dump(mode="json"))
 
     city_text = parsed.cityText.strip().casefold() if parsed.cityText else None
     known_names = {"tula": {"тула", "туле", "тулу", "тулы", "тулой"},
@@ -161,12 +176,15 @@ def interpret(payload: CreateRoute, provider: IntentProvider) -> QueryPreview:
 
     concepts: list[str] = []
     priorities: dict[str, str] = {}
+    hard_interests: list[str] = []
     for interest in parsed.interests:
         if interest.concept not in concepts:
             concepts.append(interest.concept)
         current = priorities.get(interest.concept)
         if current is None or _priority_value(interest.priority) > _priority_value(current):
             priorities[interest.concept] = interest.priority
+        if interest.strength == "HARD" and interest.concept not in hard_interests:
+            hard_interests.append(interest.concept)
     if (payload.filters.unusualPlaces is True or parsed.unusualPlaces) and "UNUSUAL_PLACES" not in concepts:
         concepts.insert(0, "UNUSUAL_PLACES")
         priorities["UNUSUAL_PLACES"] = "HIGH"
@@ -204,7 +222,10 @@ def interpret(payload: CreateRoute, provider: IntentProvider) -> QueryPreview:
     if prefer_short_walks and preferred_leg_minutes is None:
         preferred_leg_minutes = DEFAULT_SOFT_LEG_MINUTES
 
-    return QueryPreview(
+    requested_place_count = parsed.routeStyle.requestedPlaceCount
+    if requested_place_count is None:
+        requested_place_count = _explicit_place_count(payload.query)
+    preview = QueryPreview(
         cityId=payload.cityId,
         durationMinutes=duration["duration"],
         durationSource=duration["source"],
@@ -214,11 +235,13 @@ def interpret(payload: CreateRoute, provider: IntentProvider) -> QueryPreview:
         minDurationMinutes=duration["minimum"],
         interests=concepts,
         interestPriorities=priorities,
+        hardInterests=hard_interests,
         hardExclusions=hard_exclusions,
         softExclusions=soft_exclusions,
         includeFood=food_mode != "NONE",
         foodMode=food_mode,
         foodTiming=parsed.food.timing,
+        foodExactTime=parsed.food.exactTime,
         foodPreferences=parsed.food.preferences,
         excludedFoodPreferences=parsed.food.excludedPreferences,
         withChildren=(payload.filters.withChildren if payload.filters.withChildren is not None
@@ -243,8 +266,37 @@ def interpret(payload: CreateRoute, provider: IntentProvider) -> QueryPreview:
         placeDensity=parsed.routeStyle.placeDensity,
         variety=parsed.routeStyle.variety,
         popularityPreference=parsed.routeStyle.popularityPreference,
+        requestedPlaceCount=requested_place_count,
+        allowSinglePlace=requested_place_count == 1,
         warnings=warnings,
     )
+    planning_log(
+        trace_id, "normalized_constraints",
+        hard={
+            "interests": preview.hardInterests,
+            "exclusions": preview.hardExclusions,
+            "area": preview.locationHint if preview.areaStrength == "HARD" else None,
+            "maxDurationMinutes": preview.maxDurationMinutes,
+            "maxLegMinutes": preview.maxWalkingMinutes,
+            "maxLegDistanceMeters": preview.maxWalkingDistanceMeters,
+            "maxTotalWalkingMinutes": preview.maxTotalWalkingMinutes,
+            "maxTotalWalkingDistanceMeters": preview.maxTotalWalkingDistanceMeters,
+            "foodRequired": preview.foodMode == "REQUIRED",
+        },
+        soft={
+            "targetDurationMinutes": preview.targetDurationMinutes,
+            "interests": preview.interests,
+            "area": preview.locationHint if preview.areaStrength == "SOFT" else None,
+            "compactness": preview.compactness,
+            "preferredLegMinutes": preview.preferredWalkingMinutes,
+            "pace": preview.routePace,
+            "density": preview.placeDensity,
+            "variety": preview.variety,
+            "foodMode": preview.foodMode,
+            "foodPreferences": preview.foodPreferences,
+        },
+    )
+    return preview
 
 
 def _duration_settings(payload: CreateRoute, parsed: IntentExtraction) -> dict[str, object]:
@@ -424,6 +476,21 @@ def _location_hint(query: str, parsed_hint: str | None) -> str | None:
 
 def _priority_value(value: str) -> int:
     return {"LOW": 1, "MEDIUM": 2, "HIGH": 3}[value]
+
+
+def _explicit_place_count(query: str) -> int | None:
+    text = query.casefold().replace("ё", "е")
+    words = {"одно": 1, "один": 1, "два": 2, "две": 2, "три": 3,
+             "четыре": 4, "пять": 5, "шесть": 6, "семь": 7, "восемь": 8}
+    match = re.search(
+        r"\b(\d|одно|один|два|две|три|четыре|пять|шесть|семь|восемь)\s+"
+        r"(?:место|места|мест|точк\w*|локаци\w*)\b", text,
+    )
+    if not match:
+        return None
+    raw = match.group(1)
+    value = int(raw) if raw.isdigit() else words[raw]
+    return value if 1 <= value <= 8 else None
 
 
 def _unique(values) -> list[str]:

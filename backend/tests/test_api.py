@@ -22,6 +22,7 @@ class FakeIntent:
 
     def extract(self, query):
         self.calls += 1
+        requested_count = 1 if "одно место" in query.casefold() else None
         return IntentExtraction.model_validate({
             "schemaVersion": "1.0", "cityText": "Тула",
             "duration": {"mode": "TARGET", "targetMinutes": 120,
@@ -43,7 +44,8 @@ class FakeIntent:
             "food": {"mode": "NONE", "timing": "ANY", "exactTime": None,
                      "preferences": [], "excludedPreferences": []},
             "routeStyle": {"pace": "NORMAL", "placeDensity": "NORMAL",
-                           "variety": "NORMAL", "popularityPreference": "NOT_SPECIFIED"},
+                           "variety": "NORMAL", "popularityPreference": "NOT_SPECIFIED",
+                           "requestedPlaceCount": requested_count},
             "withChildren": False, "unusualPlaces": False,
             "clarificationFields": [],
         })
@@ -56,9 +58,14 @@ class FakeGeo:
         return SearchArea(label="Центр города", lat=center[0], lon=center[1],
                           radiusMeters=3500, source="city")
     def search_places(self, city_id, preview, area):
-        return [PlaceCandidate(placeId="real-provider-id", name="Тульский кремль",
-                               lat=54.196, lon=37.619, rubrics=["Достопримечательности"],
-                               schedule={"is_24x7": True}, isFood=False)]
+        return [
+            PlaceCandidate(placeId="real-provider-id", name="Тульский кремль",
+                           lat=54.196, lon=37.619, rubrics=["Достопримечательности"],
+                           schedule={"is_24x7": True}, isFood=False),
+            PlaceCandidate(placeId="second-provider-id", name="Казанская набережная",
+                           lat=54.197, lon=37.62, rubrics=["Набережные"],
+                           schedule={"is_24x7": True}, isFood=False),
+        ]
     def search_candidates(self, city_id, query):
         return [
             PlaceCandidate(placeId="real-provider-id", name="Тульский кремль",
@@ -152,9 +159,28 @@ def test_builds_and_saves_real_provider_route_idempotently():
     second = client.post("/v1/routes", headers=headers, json=body)
     assert first.status_code == second.status_code == 200
     assert first.json()["routeId"] == second.json()["routeId"]
-    assert first.json()["points"][0]["placeId"] == "real-provider-id"
+    assert {point["placeId"] for point in first.json()["points"]} == {
+        "real-provider-id", "second-provider-id",
+    }
     assert first.json()["legs"][0]["geometry"] == [[37.617, 54.193], [37.619, 54.196]]
     assert intent.calls == 1
+
+
+def test_planning_debug_log_contains_full_decision_chain(caplog):
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    with caplog.at_level("INFO", logger="gulyay.planning"):
+        response = client.post("/v1/routes", headers={
+            "X-Device-Session": session, "X-Request-Id": str(uuid4()),
+        }, json={"cityId": "tula", "query": "История в центре два часа",
+                 "deviceSessionId": session})
+    assert response.status_code == 200
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    for step in ("user_query", "llm_intent", "normalized_constraints",
+                 "dgis_candidates", "route_variants", "route_selected"):
+        assert f'"step":"{step}"' in messages
+    assert '"reason":"highest_quality_hard_valid_variant"' in messages
 
 
 def test_delete_route_removes_state_and_invalidates_recent_cache():
@@ -180,7 +206,7 @@ def test_walk_start_arrival_pause_resume_and_stop():
     session = str(uuid4())
     headers = {"X-Device-Session": session}
     created = client.post("/v1/routes", headers=headers, json={
-        "cityId": "tula", "query": "История в центре два часа",
+        "cityId": "tula", "query": "История в центре, одно место, два часа",
         "deviceSessionId": session,
     })
     route_id = created.json()["routeId"]
@@ -219,7 +245,7 @@ def test_walk_actions_require_valid_state_and_active_walk_is_unique():
     session = str(uuid4())
     headers = {"X-Device-Session": session}
     created = client.post("/v1/routes", headers=headers, json={
-        "cityId": "tula", "query": "История в центре два часа",
+        "cityId": "tula", "query": "История в центре, одно место, два часа",
         "deviceSessionId": session,
     })
     route_id = created.json()["routeId"]
@@ -318,6 +344,7 @@ def test_failed_point_edit_keeps_previous_route_version():
     created = client.post("/v1/routes", headers=headers, json={
         "cityId": "tula", "query": "История в центре два часа", "deviceSessionId": session})
     route_id = created.json()["routeId"]
+    original_points = [point["placeId"] for point in created.json()["points"]]
     failed = client.post(f"/v1/routes/{route_id}/revisions", headers=headers, json={
         "baseVersion": 1, "mode": "EDIT_POINTS",
         "pointIds": ["real-provider-id", "second-provider-id", "third-provider-id"],
@@ -326,7 +353,7 @@ def test_failed_point_edit_keeps_previous_route_version():
     assert failed.json()["error"]["code"] == "TIME_BUDGET_EXCEEDED"
     current = client.get(f"/v1/routes/{route_id}", headers=headers)
     assert current.json()["routeVersion"] == 1
-    assert [point["placeId"] for point in current.json()["points"]] == ["real-provider-id"]
+    assert [point["placeId"] for point in current.json()["points"]] == original_points
 
 
 def test_duplicate_manual_points_are_rejected_before_geo_calls():

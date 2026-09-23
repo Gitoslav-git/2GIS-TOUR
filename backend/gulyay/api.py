@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -20,13 +20,14 @@ from .intent import (IntentAuthenticationError, IntentInvalidResponse,
 from .models import (City, CreateRoute, PlaceSummary, QueryPreview, Route,
                      RouteRevision, StartWalk, WalkAction, WalkPosition,
                      WalkProgress, WalkSession)
+from .planning_debug import planning_log
 from .repository import RouteRepository
 from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
                             rebuild_route_with_points)
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, start_walk)
 
-app = FastAPI(title="Гуляй API", version="0.6.9.i")
+app = FastAPI(title="Гуляй API", version="0.6.9.j")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"),
           City(cityId="borovsk", name="Боровск, Калужская область"))
@@ -66,7 +67,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.6.9.i", "llmModel": configured_model()}
+    return {"status": "ok", "version": "0.6.9.j", "llmModel": configured_model()}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])
@@ -118,7 +119,7 @@ def preview_route(payload: CreateRoute,
     if limited:
         return limited
     try:
-        return interpret(payload, provider)
+        return interpret(payload, provider, request_id or str(uuid4()))
     except IntentNeedsClarification as exc:
         return failure("QUERY_NEEDS_CLARIFICATION", _clarification_message(exc.fields), 422,
                        request_id, {"fields": exc.fields})
@@ -410,37 +411,51 @@ def _authorize_create(payload: CreateRoute, session: UUID | None,
 
 def _build(payload: CreateRoute, intent_provider: OpenAIIntentProvider,
            geo: DgisGeoProvider, request_id: str | None) -> Route | JSONResponse:
+    trace_id = request_id or str(uuid4())
     try:
         geo.ensure_configured()
-        preview = interpret(payload, intent_provider)
-        return build_route(payload, preview, geo)
+        preview = interpret(payload, intent_provider, trace_id)
+        return build_route(payload, preview, geo, trace_id=trace_id)
     except IntentNeedsClarification as exc:
+        planning_log(trace_id, "planning_error", error="QUERY_NEEDS_CLARIFICATION",
+                     fields=exc.fields)
         return failure("QUERY_NEEDS_CLARIFICATION", _clarification_message(exc.fields), 422,
                        request_id, {"fields": exc.fields})
     except IntentAuthenticationError:
+        planning_log(trace_id, "planning_error", error="LLM_AUTH_ERROR")
         return failure("LLM_AUTH_ERROR", "Ключ LLM не принят сервером", 503, request_id)
     except IntentUnavailable:
+        planning_log(trace_id, "planning_error", error="LLM_UNAVAILABLE")
         return failure("LLM_UNAVAILABLE", "Разбор запроса пока недоступен", 503, request_id)
     except IntentInvalidResponse:
+        planning_log(trace_id, "planning_error", error="LLM_INVALID_RESPONSE")
         return failure("LLM_INVALID_RESPONSE", "Не удалось понять пожелания. Попробуйте ещё раз", 502, request_id)
     except GeoAuthenticationError:
+        planning_log(trace_id, "planning_error", error="GEO_AUTHENTICATION")
         return failure("GEO_UNAVAILABLE", "Ключ 2ГИС не принят сервером", 503, request_id,
                        {"reason": "authentication"})
     except GeoRateLimited as exc:
+        planning_log(trace_id, "planning_error", error="DGIS_RATE_LIMITED",
+                     retryAfterSeconds=exc.retry_after_seconds)
         seconds = exc.retry_after_seconds
         return failure("DGIS_RATE_LIMITED", f"2ГИС временно ограничил запросы. Повторите через {seconds} сек.", 503,
                        request_id, {"retryAfterSeconds": seconds, "dependency": "2gis"},
                        {"Retry-After": str(seconds)})
     except GeoConstraintNotFound:
+        planning_log(trace_id, "planning_error", error="GEO_CONSTRAINT_NOT_FOUND")
         return failure("GEO_CONSTRAINT_NOT_FOUND", "Не удалось найти указанную часть города в 2ГИС", 422,
                        request_id, {"fields": ["locationHint"]})
     except (GeoInvalidResponse, GeoUnavailable):
+        planning_log(trace_id, "planning_error", error="GEO_UNAVAILABLE")
         return failure("GEO_UNAVAILABLE", "Сервис мест или пеших маршрутов 2ГИС недоступен", 503, request_id)
     except TimeBudgetExceeded as exc:
+        planning_log(trace_id, "planning_error", error="TIME_BUDGET_EXCEEDED",
+                     minimumMinutes=exc.minimum_minutes)
         details = {"minimumMinutes": exc.minimum_minutes} if exc.minimum_minutes else {}
         return failure("TIME_BUDGET_EXCEEDED", "Точки не помещаются в выбранное время", 422,
                        request_id, details)
     except RouteNotFound:
+        planning_log(trace_id, "planning_error", error="ROUTE_NOT_FOUND")
         return failure("ROUTE_NOT_FOUND", "Не найден маршрут по подходящим открытым местам", 422, request_id)
 
 

@@ -11,6 +11,9 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from .models import CreateRoute, IntentExtraction, QueryPreview
+from .query_policy import looks_like_walking_constraint, sanitize_interests
+
+DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
 
 
 class IntentUnavailable(Exception):
@@ -34,17 +37,22 @@ class IntentProvider(Protocol):
     def extract(self, query: str) -> IntentExtraction: ...
 
 
+def configured_model() -> str:
+    configured = os.getenv("OPENAI_MODEL", "").strip()
+    return configured or DEFAULT_OPENAI_MODEL
+
+
 class OpenAIIntentProvider:
     def extract(self, query: str) -> IntentExtraction:
         api_key = os.getenv("OPENAI_API_KEY")
-        model = os.getenv("OPENAI_MODEL")
-        if not api_key or not model:
-            raise IntentUnavailable("OPENAI_API_KEY and OPENAI_MODEL must be configured")
+        model = configured_model()
+        if not api_key:
+            raise IntentUnavailable("OPENAI_API_KEY must be configured")
 
         # Import lazily to allow health/cities to work without a configured LLM.
         from openai import AuthenticationError, OpenAI, PermissionDeniedError, OpenAIError
 
-        client = OpenAI(api_key=api_key, timeout=8.0, max_retries=0)
+        client = OpenAI(api_key=api_key, timeout=20.0, max_retries=0)
         try:
             response = client.responses.parse(
                 model=model,
@@ -73,7 +81,13 @@ class OpenAIIntentProvider:
                         "«между точками 15–20 минут», верни верхнюю границу в "
                         "maxWalkingMinutes (20 в последнем примере). Иначе preferShortWalks=false "
                         "и maxWalkingMinutes=null. Никогда не помещай пожелание о длительности "
-                        "перехода в locationHint, startLocationHint или directionHint. "
+                        "перехода в locationHint, startLocationHint, directionHint или interests. "
+                        "interests содержит только короткие темы и категории мест для поиска "
+                        "(например: «музеи», «архитектура модерна», «парки»). Не включай туда "
+                        "полные фразы пользователя, длительность прогулки, время или расстояние "
+                        "между точками, старт, направление, пожелания «рядом», «по пути», "
+                        "«без очередей» и другие управляющие условия. Неизвестное условие пропусти, "
+                        "а не превращай в поисковый текст. "
                         "Также извлекай город, продолжительность в минутах, интересы, еду, детей "
                         "и необычные места. centerOnly=true только при прогулке именно внутри центра. "
                         "Если поле не указано, верни null, кроме обязательных boolean-полей. "
@@ -147,7 +161,7 @@ def interpret(payload: CreateRoute, provider: IntentProvider) -> QueryPreview:
     )
     return QueryPreview(
         cityId=payload.cityId, durationMinutes=duration, durationSource=source,
-        interests=list(dict.fromkeys(s.strip() for s in parsed.interests)),
+        interests=sanitize_interests(parsed.interests),
         includeFood=payload.filters.includeFood if payload.filters.includeFood is not None else bool(parsed.includeFood),
         withChildren=payload.filters.withChildren if payload.filters.withChildren is not None else bool(parsed.withChildren),
         unusualPlaces=payload.filters.unusualPlaces if payload.filters.unusualPlaces is not None else bool(parsed.unusualPlaces),
@@ -170,7 +184,7 @@ def _clean_hint(value: str | None) -> str | None:
 
 def _start_hint(query: str, parsed_hint: str | None) -> str | None:
     parsed = _clean_hint(parsed_hint)
-    if parsed and not _looks_like_walking_constraint(parsed):
+    if parsed and not looks_like_walking_constraint(parsed):
         return parsed
     match = re.search(
         r"\b(?:нач(?:ать|инаю)\s+)?(?:от|с)\s+(.+?)"
@@ -193,7 +207,7 @@ def _direction_hint(query: str, parsed_hint: str | None) -> str | None:
                       "востока": "восток города", "запада": "запад города"}
         return normalized.get(value, value)
     parsed = _clean_hint(parsed_hint)
-    return None if parsed and _looks_like_walking_constraint(parsed) else parsed
+    return None if parsed and looks_like_walking_constraint(parsed) else parsed
 
 
 def _obviously_ambiguous_start(start_hint: str | None) -> bool:
@@ -208,12 +222,7 @@ def _obviously_ambiguous_start(start_hint: str | None) -> bool:
 
 
 def _short_walks_requested(query: str) -> bool:
-    return bool(re.search(
-        r"\b(?:недалеко\s+(?:идти|ходить)|идти\s+(?:было\s+)?не\s*далеко|"
-        r"до\s+локаци\w*\s+идти\s+(?:было\s+)?не\s*далеко|меньше\s+ходить|мало\s+ходить|"
-        r"коротк\w*\s+переход\w*|места\s+рядом|локаци\w*\s+рядом)\b",
-        query.casefold(),
-    ))
+    return looks_like_walking_constraint(query)
 
 
 def _walking_limit_minutes(query: str, parsed_limit: int | None,
@@ -234,6 +243,24 @@ def _walking_limit_minutes(query: str, parsed_limit: int | None,
             values = [int(value) for value in match.groups() if value]
             limit = max(values)
             return limit if 1 <= limit <= 120 else None
+    distance_patterns = (
+        r"(?:между\s+(?:точками|локациями|местами)|до\s+(?:точек|локаций|мест)|"
+        r"переход\w*|идти|ходить|пешком)[^,.]{0,50}?"
+        r"(?:максимум|не\s+больше|не\s+дальше|до)\s*"
+        r"(\d+(?:[.,]\d+)?)\s*(км|километр\w*|м|метр\w*)",
+        r"(?:максимум|не\s+больше|не\s+дальше|до)\s*"
+        r"(\d+(?:[.,]\d+)?)\s*(км|километр\w*|м|метр\w*)"
+        r"[^,.]{0,30}?(?:между\s+(?:точками|локациями|местами)|пешком|идти|ходить)",
+    )
+    for pattern in distance_patterns:
+        match = re.search(pattern, text)
+        if match:
+            distance = float(match.group(1).replace(",", "."))
+            if match.group(2).startswith(("км", "километр")):
+                distance *= 1000
+            if 50 <= distance <= 10_000:
+                # 80 m/min is a conservative pedestrian planning speed.
+                return max(1, min(120, int((distance + 79) // 80)))
     if _short_walks_requested(query):
         return 20
     if parsed_limit is not None:
@@ -258,17 +285,7 @@ def _location_hint(query: str, parsed_hint: str | None) -> str | None:
     for pattern, normalized in directions:
         if re.search(pattern, text):
             return normalized
-    if parsed_hint and not _looks_like_walking_constraint(parsed_hint):
+    if parsed_hint and not looks_like_walking_constraint(parsed_hint):
         normalized = " ".join(parsed_hint.strip().split())
         return normalized or None
     return None
-
-
-def _looks_like_walking_constraint(value: str) -> bool:
-    normalized = value.casefold().replace("ё", "е")
-    return bool(re.search(
-        r"(?:недалеко|не\s*далеко|мало\s+ходить|меньше\s+ходить|"
-        r"коротк\w*\s+переход|минут\w*\s+(?:пешком|ходьбы)|"
-        r"до\s+(?:точек|локаций).*(?:идти|ходить))",
-        normalized,
-    ))

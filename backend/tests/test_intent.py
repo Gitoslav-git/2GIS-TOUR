@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from gulyay.api import app, get_intent_provider
 from gulyay.intent import (IntentAuthenticationError, IntentInvalidResponse,
-                           IntentUnavailable)
+                           IntentUnavailable, configured_model)
 from gulyay.models import IntentExtraction
 
 client = TestClient(app)
@@ -181,6 +181,44 @@ def test_walking_phrases_become_numeric_limit(query, parsed_limit, expected):
     assert result.json()["maxWalkingMinutes"] == expected
 
 
+def test_walking_instruction_is_removed_from_interests_before_2gis_search():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
+        durationMinutes=120,
+        interests=["архитектура", "чтобы недалеко ходить", "без очередей"],
+        preferShortWalks=False,
+    ))
+    result = request(query="Хочу посмотреть архитектуру, чтобы недалеко ходить")
+    assert result.status_code == 200
+    assert result.json()["interests"] == ["архитектура"]
+    assert result.json()["preferShortWalks"] is True
+    assert result.json()["maxWalkingMinutes"] == 20
+
+
+def test_only_unknown_conditions_fall_back_without_breaking_preview():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
+        durationMinutes=120,
+        interests=["чтобы было без очередей", "по пути", "не знаю"],
+    ))
+    result = request(query="Погулять два часа, желательно без очередей")
+    assert result.status_code == 200
+    assert result.json()["interests"] == []
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("Между точками должно быть не больше 800 метров", 10),
+    ("Хочу ходить максимум 1 км между локациями", 13),
+])
+def test_walking_distance_is_converted_to_minutes(query, expected):
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
+        durationMinutes=120, interests=[query],
+    ))
+    result = request(query=query)
+    assert result.status_code == 200
+    assert result.json()["interests"] == []
+    assert result.json()["preferShortWalks"] is True
+    assert result.json()["maxWalkingMinutes"] == expected
+
+
 def test_ambiguous_personal_start_requires_clarification():
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
         cityText="Москва", durationMinutes=120,
@@ -253,3 +291,10 @@ def test_no_keys_cannot_be_mistaken_for_success(monkeypatch):
     result = request()
     assert result.status_code == 503
     assert result.json()["error"]["code"] == "LLM_UNAVAILABLE"
+
+
+def test_stronger_model_is_default_but_environment_can_override(monkeypatch):
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    assert configured_model() == "gpt-5.4-mini"
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5-mini")
+    assert configured_model() == "gpt-5-mini"

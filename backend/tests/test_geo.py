@@ -137,6 +137,36 @@ def test_generic_walk_searches_outdoor_places_to_fill_evening_route():
     assert queries == ["достопримечательности", "парки и скверы"]
 
 
+def test_unsafe_llm_interests_never_reach_2gis_query():
+    queries = []
+    def capture(request):
+        if request.url.host == "catalog.api.2gis.com":
+            queries.append(request.url.params.get("q"))
+        return response(request)
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(capture))
+    unsafe = preview(center=True).model_copy(update={
+        "interests": ["чтобы недалеко ходить", "без очередей"],
+    })
+    area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
+    provider.search_places("tula", unsafe, area)
+    assert queries == ["достопримечательности", "парки и скверы"]
+
+
+def test_safe_interest_survives_boundary_filter():
+    queries = []
+    def capture(request):
+        if request.url.host == "catalog.api.2gis.com":
+            queries.append(request.url.params.get("q"))
+        return response(request)
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(capture))
+    mixed = preview(center=True).model_copy(update={
+        "interests": ["архитектура модерна", "между точками максимум 15 минут"],
+    })
+    area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
+    provider.search_places("tula", mixed, area)
+    assert queries == ["архитектура модерна"]
+
+
 def test_manual_search_returns_only_provider_candidates_near_selected_city():
     provider = DgisGeoProvider("p", "r", httpx.MockTransport(response))
     places = provider.search_candidates("tula", "кремль")

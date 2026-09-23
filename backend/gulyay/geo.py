@@ -18,6 +18,7 @@ from typing import Callable, Protocol
 import httpx
 
 from .models import PlaceCandidate, QueryPreview, RouteLeg, SearchArea
+from .query_policy import sanitize_interests
 
 
 LOGGER = logging.getLogger("gulyay.2gis")
@@ -288,8 +289,9 @@ class DgisGeoProvider:
 
     def search_places(self, city_id: str, preview: QueryPreview,
                       area: SearchArea) -> list[PlaceCandidate]:
-        if preview.interests:
-            queries = list(preview.interests)[:2]
+        safe_interests = sanitize_interests(preview.interests)
+        if safe_interests:
+            queries = safe_interests[:2]
         else:
             # A generic walk needs schedule diversity: outdoor places remain available
             # when museums have already closed.

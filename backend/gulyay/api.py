@@ -16,7 +16,7 @@ from .geo import (DgisGeoProvider, GeoAuthenticationError, GeoConstraintNotFound
                   GeoUnavailable)
 from .intent import (IntentAuthenticationError, IntentInvalidResponse,
                      IntentNeedsClarification, IntentUnavailable,
-                     OpenAIIntentProvider, interpret)
+                     OpenAIIntentProvider, configured_model, interpret)
 from .models import (City, CreateRoute, PlaceSummary, QueryPreview, Route,
                      RouteRevision, StartWalk, WalkAction, WalkPosition,
                      WalkProgress, WalkSession)
@@ -26,7 +26,7 @@ from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, start_walk)
 
-app = FastAPI(title="Гуляй API", version="0.6.9.e")
+app = FastAPI(title="Гуляй API", version="0.6.9.h")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"),
           City(cityId="borovsk", name="Боровск, Калужская область"))
@@ -66,7 +66,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.6.9.e"}
+    return {"status": "ok", "version": "0.6.9.h", "llmModel": configured_model()}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])

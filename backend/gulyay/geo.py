@@ -97,6 +97,18 @@ CONCEPT_QUERIES: dict[str, tuple[str, ...]] = {
     "ENTERTAINMENT": ("развлечения", "досуговые места"),
 }
 
+# Generic requests must not mean only famous landmarks. These four catalogue
+# lanes cover sightseeing, outdoor walks, culture and leisure while keeping the
+# number of Places calls bounded. Area places are included because parks,
+# beaches, lakes and other recreational zones are not always attractions or
+# organisations in the 2GIS catalogue.
+GENERIC_DISCOVERY_QUERIES: tuple[tuple[str, str], ...] = (
+    ("достопримечательности", "attraction,branch,adm_div.place"),
+    ("места для прогулок", "adm_div.place,attraction,branch"),
+    ("музеи и галереи", "branch,attraction"),
+    ("развлечения и досуг", "branch,attraction,adm_div.place"),
+)
+
 CONCEPT_WORDS: dict[str, tuple[str, ...]] = {
     "ARCHITECTURE": ("архитект", "здание", "усадьб", "особняк"),
     "HISTORIC_PLACES": ("истор", "кремль", "усадьб", "памятн"),
@@ -375,30 +387,39 @@ class DgisGeoProvider:
         if preview.unusualPlaces and "UNUSUAL_PLACES" not in concepts:
             concepts.insert(0, "UNUSUAL_PLACES")
         mapped_concepts = [concept for concept in concepts if concept in CONCEPT_QUERIES]
-        queries = [(CONCEPT_QUERIES[concept][0], concept) for concept in mapped_concepts]
+        queries = [
+            (CONCEPT_QUERIES[concept][0], "attraction,branch,adm_div.place", concept)
+            for concept in mapped_concepts
+        ]
         if not queries:
-            queries = [("достопримечательности", None), ("парки и скверы", None)]
+            queries = [(query, item_types, None)
+                       for query, item_types in GENERIC_DISCOVERY_QUERIES]
         elif len(queries) == 1:
             # One related broad query gives adaptive broadening without a second
             # LLM call and without ever leaking the user's raw text to 2GIS.
             related = CONCEPT_QUERIES[mapped_concepts[0]][1]
             if related != queries[0][0]:
-                queries.append((related, mapped_concepts[0]))
-        # At most two interest searches plus one food search keeps first-build traffic bounded.
-        requests = [(query, False, concept, None) for query, concept in queries[:2]]
+                queries.append((related, "attraction,branch,adm_div.place",
+                                mapped_concepts[0]))
+        # Explicit interests use at most two searches. A generic walk uses the
+        # four bounded discovery lanes above instead of dozens of category calls.
+        query_limit = len(GENERIC_DISCOVERY_QUERIES) if not mapped_concepts else 2
+        requests = [(query, item_types, False, concept, None)
+                    for query, item_types, concept in queries[:query_limit]]
         if preview.includeFood:
             food_preference = next(
                 (value for value in preview.foodPreferences if value in FOOD_QUERIES), None,
             )
             food_query = FOOD_QUERIES.get(food_preference, "кафе ресторан")
-            requests.append((food_query, True, None, food_preference))
+            requests.append((food_query, "branch", True, None, food_preference))
 
         result: list[PlaceCandidate] = []
         positions: dict[str, int] = {}
-        for query, requested_as_food, matched_concept, matched_food in requests:
+        for query, item_types, requested_as_food, matched_concept, matched_food in requests:
             items = self._places(
-                q=query, type="attraction,branch", locale="ru_RU",
+                q=query, type=item_types, locale="ru_RU",
                 point=f"{area.lon:.7f},{area.lat:.7f}", radius=area.radiusMeters,
+                location=f"{area.lon:.7f},{area.lat:.7f}",
                 fields="items.point,items.rubrics,items.schedule,items.is_routing_available",
                 page_size=20, search_is_query_text_complete="true",
             )
@@ -432,7 +453,14 @@ class DgisGeoProvider:
                 })
                 positions[candidate.placeId] = len(result)
                 result.append(candidate)
-        sights = [candidate for candidate in result if not candidate.isFood][:32]
+        # Merge lanes by real proximity so early textual lanes cannot crowd all
+        # later categories out of the route planner shortlist.
+        sights = sorted(
+            (candidate for candidate in result if not candidate.isFood),
+            key=lambda candidate: _haversine_meters(
+                (area.lat, area.lon), (candidate.lat, candidate.lon),
+            ),
+        )[:48]
         food = [candidate for candidate in result if candidate.isFood][:8]
         return sights + food
 
@@ -573,10 +601,17 @@ def _candidate_from_item(item: dict, requested_as_food: bool = False,
         return None
     tourist_words = (
         "достопримеч", "музей", "галере", "выстав", "памятник", "скульптур",
-        "архитект", "истор", "культур", "театр", "филармони", "планетар",
-        "зоопарк", "ботаничес", "парк", "сквер", "набереж", "усадьб",
+        "мемориал", "архитект", "истор", "культур", "театр", "концерт",
+        "филармони", "дворец", "усадьб", "крепост", "замок", "руин",
+        "планетар", "обсерват", "научн", "зоопарк", "океанари", "аквариум",
+        "ботаничес", "оранжер", "парк", "сквер", "бульвар", "набереж",
+        "променад", "смотров", "видов", "сад", "алле", "лесопарк", "природ",
+        "озер", "пруд", "фонтан", "пешеход", "квартал", "мост", "пляж",
         "кремль", "собор", "храм", "церков", "монастыр", "мечеть", "синагог",
-        "библиотек", "арт-объект",
+        "аттракцион", "каток", "рынок", "ярмарк", "фестивал", "стрит-арт",
+        "граффити", "арт-объект", "арт-простран", "руфтоп", "крыша", "бункер",
+        "подзем", "индустриаль", "завод", "фабрик", "ферм", "экопарк",
+        "эко-парк", "библиотек", "развлеч", "досуг",
     )
     if require_tourist and not requested_as_food and not any(
             word in searchable for word in tourist_words):

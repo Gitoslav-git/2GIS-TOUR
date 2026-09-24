@@ -134,7 +134,10 @@ def test_generic_walk_searches_outdoor_places_to_fill_evening_route():
     generic = preview(center=True).model_copy(update={"interests": []})
     area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
     provider.search_places("tula", generic, area)
-    assert queries == ["достопримечательности", "парки и скверы"]
+    assert queries == [
+        "достопримечательности", "места для прогулок",
+        "музеи и галереи", "развлечения и досуг",
+    ]
 
 
 def test_unsafe_llm_interests_never_reach_2gis_query():
@@ -149,7 +152,49 @@ def test_unsafe_llm_interests_never_reach_2gis_query():
     })
     area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
     provider.search_places("tula", unsafe, area)
-    assert queries == ["достопримечательности", "парки и скверы"]
+    assert queries == [
+        "достопримечательности", "места для прогулок",
+        "музеи и галереи", "развлечения и досуг",
+    ]
+
+
+def test_generic_search_is_ranked_from_area_and_includes_area_places():
+    requests = []
+
+    def capture(request):
+        requests.append(request)
+        return response(request)
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(capture))
+    generic = preview(center=True).model_copy(update={"interests": []})
+    area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
+    provider.search_places("tula", generic, area)
+
+    assert all(request.url.params.get("location") == "37.6170000,54.1930000"
+               for request in requests)
+    assert "adm_div.place" in requests[0].url.params.get("type")
+    assert "adm_div.place" in requests[1].url.params.get("type")
+
+
+@pytest.mark.parametrize("rubric", [
+    "Концертные залы", "Смотровые площадки", "Океанариумы",
+    "Пешеходные улицы", "Пляжи", "Индустриальные арт-пространства",
+])
+def test_generic_tourist_filter_keeps_broad_walk_categories(rubric):
+    def broad_place(request):
+        item = {
+            "id": rubric, "name": rubric,
+            "point": {"lat": 54.194, "lon": 37.618},
+            "rubrics": [{"name": rubric}], "is_routing_available": True,
+        }
+        return httpx.Response(200, json={
+            "meta": {"code": 200}, "result": {"items": [item]},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(broad_place))
+    generic = preview(center=True).model_copy(update={"interests": []})
+    area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
+    assert provider.search_places("tula", generic, area)[0].name == rubric
 
 
 def test_normalized_concept_is_mapped_to_backend_owned_queries():

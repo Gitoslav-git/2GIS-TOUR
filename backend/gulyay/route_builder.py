@@ -117,6 +117,17 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         start = (payload.startLocation.lat, payload.startLocation.lon)
         approximate_start = False
         start_source = "USER_GEO"
+        if not location_hint:
+            # A device position is both the route start and the discovery anchor.
+            # Keeping the city centre here makes nearby places lose to popular
+            # downtown results even though the first walking leg starts at GPS.
+            search_area = search_area.model_copy(update={
+                "label": "Рядом с геопозицией",
+                "lat": start[0],
+                "lon": start[1],
+                "radiusMeters": 6500,
+                "source": "geo",
+            })
     else:
         start = city_center
         approximate_start = True

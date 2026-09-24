@@ -200,7 +200,7 @@ class SearchArea(StrictModel):
     lat: float = Field(ge=-90, le=90)
     lon: float = Field(ge=-180, le=180)
     radiusMeters: int = Field(ge=500, le=20000)
-    source: Literal["city", "direction", "2gis"]
+    source: Literal["city", "direction", "2gis", "geo"]
 
 
 class PlaceCandidate(StrictModel):

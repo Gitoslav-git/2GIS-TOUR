@@ -64,6 +64,10 @@ def test_device_location_is_used_as_real_first_leg_start():
                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
     assert route.approximateStart is False
     assert geo.walking_starts[0] == (54.191, 37.615)
+    assert route.searchArea == SearchArea(
+        label="Рядом с геопозицией", lat=54.191, lon=37.615,
+        radiusMeters=6500, source="geo",
+    )
     assert all("фактического местоположения" not in warning for warning in route.warnings)
 
 

@@ -27,7 +27,7 @@ from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, start_walk)
 
-app = FastAPI(title="Гуляй API", version="0.6.9.l")
+app = FastAPI(title="Гуляй API", version="0.6.9.m")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"),
           City(cityId="borovsk", name="Боровск, Калужская область"))

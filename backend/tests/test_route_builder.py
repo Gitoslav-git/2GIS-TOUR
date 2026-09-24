@@ -241,7 +241,9 @@ def test_route_adds_another_real_place_to_fill_requested_time():
 
 
 def test_first_build_checks_at_most_eight_routing_candidates():
-    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True})
+    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True}).model_copy(
+                  update={"lat": 54.195 + index * 0.0001},
+              )
               for index in range(1, 11)]
     geo = FakeGeo(places)
     route = build_route(
@@ -251,6 +253,158 @@ def test_first_build_checks_at_most_eight_routing_candidates():
     )
     assert len(geo.walking_starts) == 8
     assert len(route.points) == 8
+
+
+def test_compares_affordable_alternative_using_shared_legs(monkeypatch):
+    from gulyay import route_builder
+
+    places = [candidate(f"Место {index}", str(index), schedule={"is_24x7": True}).model_copy(
+        update={"lat": 54.195 + index * 0.0001},
+    ) for index in range(13)]
+    primary = places[:6]
+    expensive_alternative = places[7:13]
+    affordable_alternative = [*places[:5], places[6]]
+    # The first route looks good before Routing but misses the real time target.
+    # A disjoint six-leg alternative must not consume the remaining checks before
+    # the six-leg alternative that shares five already verified transitions.
+    plans = [route_builder._RoutePlan(str(index), points, 280, 0, False, 90 - index, {})
+             for index, points in enumerate(
+                 [primary, expensive_alternative, affordable_alternative])]
+    monkeypatch.setattr(route_builder, "_make_route_plans", lambda *args: plans)
+    monkeypatch.setenv("ROUTE_MAX_ROUTING_CHECKS", "7")
+
+    class SharedLegGeo(FakeGeo):
+        def __init__(self):
+            super().__init__(places)
+            self.calls = []
+
+        def walking_leg(self, start, end, from_order, to_order):
+            self.calls.append((start, end))
+            seconds = 900 if end == (places[6].lat, places[6].lon) else 60
+            return RouteLeg(fromOrder=from_order, toOrder=to_order,
+                            durationSeconds=seconds, distanceMeters=100,
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    geo = SharedLegGeo()
+    route = build_route(
+        CreateRoute(cityId="tula", query="Хочу гулять пять часов"),
+        preferences(durationMinutes=300, targetDurationMinutes=300,
+                    maxDurationMinutes=300, interests=[], allowSinglePlace=False),
+        geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert [point.placeId for point in route.points] == [item.placeId for item in affordable_alternative]
+    assert route.planningStatus == "SUCCESS"
+    assert route.totalMinutes == 260
+    assert len(geo.calls) == len(set(geo.calls)) == 7
+    assert [(leg.fromOrder, leg.toOrder) for leg in route.legs] == [(i, i + 1) for i in range(6)]
+    assert all(leg.geometry[-1] == (point.lon, point.lat)
+               for leg, point in zip(route.legs, route.points))
+
+
+def test_compares_successful_routes_instead_of_stopping_at_first(monkeypatch):
+    from gulyay import route_builder
+
+    places = [candidate(f"Место {index}", str(index), schedule={"is_24x7": True}).model_copy(
+        update={"lat": 54.195 + index * 0.0001},
+    ) for index in range(3)]
+    plans = [route_builder._RoutePlan(str(i), points, 100, 0, False, 90 - i, {})
+             for i, points in enumerate([places[:2], [places[0], places[2]]])]
+    monkeypatch.setattr(route_builder, "_make_route_plans", lambda *args: plans)
+    monkeypatch.setenv("ROUTE_MAX_ROUTING_CHECKS", "3")
+
+    class ActualDurationGeo(FakeGeo):
+        def walking_leg(self, start, end, from_order, to_order):
+            self.walking_starts.append(start)
+            seconds = 1200 if end == (places[2].lat, places[2].lon) else 600
+            return RouteLeg(fromOrder=from_order, toOrder=to_order,
+                            durationSeconds=seconds, distanceMeters=500,
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    geo = ActualDurationGeo(places)
+    route = build_route(
+        CreateRoute(cityId="tula", query="Прогулка на 110 минут"),
+        preferences(durationMinutes=110, targetDurationMinutes=110,
+                    maxDurationMinutes=110, interests=[], allowSinglePlace=False),
+        geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert route.points[-1].placeId == places[2].placeId
+    assert route.totalMinutes == 110
+    assert route.planningStatus == "SUCCESS"
+    assert len(geo.walking_starts) == 3
+
+
+def test_routing_cache_handles_exhaustion_unreachable_and_directed_legs():
+    from gulyay.geo import GeoRouteNotFound
+    from gulyay.route_builder import _RoutingChecks
+
+    class DirectedGeo(FakeGeo):
+        def walking_leg(self, start, end, from_order, to_order):
+            self.walking_starts.append(start)
+            if end == (54.0, 37.0):
+                raise GeoRouteNotFound()
+            return super().walking_leg(start, end, from_order, to_order)
+
+    geo = DirectedGeo([])
+    checks = _RoutingChecks(2)
+    first, second = (54.0, 37.0), (54.1, 37.1)
+    leg = checks.walking_leg(geo, first, second, 0)
+    with pytest.raises(GeoRouteNotFound):
+        checks.walking_leg(geo, second, first, 0)
+    count = len(geo.walking_starts)
+    reused = checks.walking_leg(geo, first, second, 4)
+    with pytest.raises(GeoRouteNotFound):
+        checks.walking_leg(geo, second, first, 4)
+    assert checks.remaining == 0
+    assert len(geo.walking_starts) == count
+    assert (leg.fromOrder, leg.toOrder) == (0, 1)
+    assert (reused.fromOrder, reused.toOrder) == (4, 5)
+    assert reused.geometry == leg.geometry
+
+
+@pytest.mark.parametrize("wider_is_better", [True, False])
+def test_returned_area_belongs_to_selected_route(wider_is_better):
+    local_places = [candidate("Место в центре", "local", schedule={"is_24x7": True})]
+    wider_places = [candidate(f"Место {i}", f"wide-{i}", schedule={"is_24x7": True}).model_copy(
+        update={"lat": 54.198 + i * 0.0001},
+    ) for i in range(3)]
+
+    class ExpandingGeo(FakeGeo):
+        def __init__(self):
+            super().__init__(local_places)
+            self.areas = []
+
+        def search_places(self, city_id, preview, area):
+            self.areas.append(area)
+            return wider_places if len(self.areas) > 1 and wider_is_better else local_places
+
+    geo = ExpandingGeo()
+    route = build_route(
+        CreateRoute(cityId="tula", query="Прогулка в центре на 150 минут"),
+        preferences(durationMinutes=150, targetDurationMinutes=150,
+                    maxDurationMinutes=150, interests=[], locationHint="центр", areaStrength="SOFT"),
+        geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert len(geo.areas) == 2
+    expected = geo.areas[1] if wider_is_better else geo.areas[0]
+    assert route.searchArea == expected
+    assert f"Область поиска: {expected.label}" in route.warnings
+    assert any("поиск расширен на город" in warning for warning in route.warnings) == wider_is_better
+    assert all("поиск был расширен" not in warning for warning in route.warnings)
+
+
+def test_hard_area_never_expands():
+    class HardAreaGeo(FakeGeo):
+        def resolve_search_area(self, city_id, location_hint, center):
+            assert location_hint == "центр"
+            return super().resolve_search_area(city_id, location_hint, center)
+
+    geo = HardAreaGeo([candidate("Одно место", "local", schedule={"is_24x7": True})])
+    with pytest.raises(RouteNotFound):
+        build_route(
+            CreateRoute(cityId="tula", query="Только в центре, прогулка на три часа"),
+            preferences(locationHint="центр", areaStrength="HARD", allowSinglePlace=False),
+            geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+        )
 
 
 def test_walking_limit_skips_long_leg_without_reporting_geo_failure():
@@ -281,13 +435,15 @@ def test_walking_limit_skips_long_leg_without_reporting_geo_failure():
 
 
 def test_soft_short_walk_preference_does_not_destroy_five_hour_route():
-    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True})
+    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True}).model_copy(
+                  update={"lat": 54.195 + index * 0.0001},
+              )
               for index in range(1, 7)]
 
     class SoftWalkGeo(FakeGeo):
         def walking_leg(self, start, end, from_order, to_order):
             self.walking_starts.append(start)
-            seconds = 1500 if from_order == 2 else 900
+            seconds = 1500 if end == (places[2].lat, places[2].lon) else 900
             return RouteLeg(fromOrder=from_order, toOrder=to_order,
                             distanceMeters=2000 if seconds == 1500 else 1000,
                             durationSeconds=seconds,

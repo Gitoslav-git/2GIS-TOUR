@@ -27,7 +27,7 @@ from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, start_walk)
 
-app = FastAPI(title="Гуляй API", version="0.6.9.j")
+app = FastAPI(title="Гуляй API", version="0.6.9.k")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"),
           City(cityId="borovsk", name="Боровск, Калужская область"))
@@ -67,7 +67,7 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.6.9.j", "llmModel": configured_model()}
+    return {"status": "ok", "version": app.version, "llmModel": configured_model()}
 
 
 @app.get("/v1/cities", response_model=dict[str, list[City]])

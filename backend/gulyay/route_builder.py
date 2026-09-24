@@ -23,6 +23,37 @@ class TimeBudgetExceeded(Exception):
         self.minimum_minutes = minimum_minutes
 
 
+class _RoutingBudgetExhausted(Exception):
+    pass
+
+
+_LegKey = tuple[tuple[float, float], tuple[float, float]]
+
+
+@dataclass
+class _RoutingChecks:
+    """Share directed legs, including no-route results, within one build."""
+    remaining: int
+    legs: dict[_LegKey, RouteLeg | None] = field(default_factory=dict)
+
+    def walking_leg(self, geo: GeoProvider, start: tuple[float, float],
+                    end: tuple[float, float], from_order: int,
+                    reserve: int = 0) -> RouteLeg:
+        key = (start, end)
+        if key not in self.legs:
+            if self.remaining <= reserve:
+                raise _RoutingBudgetExhausted()
+            self.remaining -= 1
+            try:
+                self.legs[key] = geo.walking_leg(start, end, from_order, from_order + 1)
+            except GeoRouteNotFound:
+                self.legs[key] = None
+        leg = self.legs[key]
+        if leg is None:
+            raise GeoRouteNotFound()
+        return leg.model_copy(update={"fromOrder": from_order, "toOrder": from_order + 1})
+
+
 @dataclass
 class _RoutePlan:
     plan_id: str
@@ -48,6 +79,7 @@ class _BuiltPlan:
     score_breakdown: dict[str, float] = field(default_factory=dict)
     unmet: list[str] = field(default_factory=list)
     hard_violations: list[str] = field(default_factory=list)
+    budget_limited: bool = False
 
 
 def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
@@ -99,16 +131,17 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
 
     local_now = now or datetime.now(city_timezone())
     target_minutes = preview.targetDurationMinutes or preview.durationMinutes
-    routing_budget = [_max_routing_checks()]
+    routing_budget = _RoutingChecks(_max_routing_checks())
     attempts = 0
     best: _BuiltPlan | None = None
+    best_area = search_area
     candidates = geo.search_places(payload.cityId, preview, search_area)
     planning_log(trace_id, "dgis_candidates", attempt=1, area=search_area.label,
                  count=len(candidates), candidates=_candidate_debug(candidates))
     search_rounds = [(search_area, candidates, 0)]
     expanded = False
 
-    while search_rounds and routing_budget[0] > 0:
+    while search_rounds:
         active_area, active_candidates, search_relaxation = search_rounds.pop(0)
         if not active_candidates:
             plans: list[_RoutePlan] = []
@@ -118,16 +151,25 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
             )
         planning_log(trace_id, "route_variants", area=active_area.label,
                      variants=[_plan_debug(plan) for plan in plans])
-        for plan in plans:
-            if routing_budget[0] <= 0:
-                break
+        plans, reserve = _comparison_order(plans, start, routing_budget)
+        if reserve:
+            planning_log(trace_id, "routing_budget_reserved",
+                         planId=plans[1].plan_id, checks=reserve)
+        scheduled = [(plan, reserve if index == 0 else 0)
+                     for index, plan in enumerate(plans)]
+        while scheduled:
+            plan, protected_checks = scheduled.pop(0)
             attempts += 1
             built = _materialize_plan(
-                plan, preview, geo, start, local_now, routing_budget,
+                plan, preview, geo, start, local_now, routing_budget, protected_checks,
             )
+            if built.budget_limited and protected_checks:
+                # Revisit after the reserved challenger; cached legs cost nothing.
+                scheduled.insert(1, (plan, 0))
             if not built.points:
                 planning_log(trace_id, "route_variant_rejected", planId=plan.plan_id,
-                             reason="NO_REACHABLE_OPEN_POINTS")
+                             reason=("ROUTING_BUDGET_EXHAUSTED" if built.budget_limited
+                                     else "NO_REACHABLE_OPEN_POINTS"))
                 continue
             built.hard_violations = _hard_violations(built, preview)
             if built.hard_violations:
@@ -144,24 +186,21 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
                 totalMinutes=math.ceil(built.elapsed_seconds / 60),
                 walkingMinutes=math.ceil(built.walking_seconds / 60),
                 pointIds=[point.placeId for point in built.points],
-                unmet=built.unmet, routingChecksLeft=routing_budget[0],
+                unmet=built.unmet, routingChecksLeft=routing_budget.remaining,
+                budgetLimited=built.budget_limited,
             )
-            if best is None or built.score > best.score:
+            if best is None or (not built.unmet, built.score) > (not best.unmet, best.score):
                 best = built
-            if not built.unmet and built.score >= _good_quality_score():
-                break
+                best_area = active_area
         if best is not None and not best.unmet and best.score >= _good_quality_score():
             break
         # A named SOFT area may be widened only after its best route is poor.
         if (not expanded and location_hint and preview.areaStrength == "SOFT"
-                and routing_budget[0] > 0):
+                and routing_budget.remaining > 0):
             expanded = True
             city_area = geo.resolve_search_area(payload.cityId, None, city_center)
             wider = geo.search_places(payload.cityId, preview, city_area)
             merged = _merge_candidates(active_candidates, wider)
-            preview.warnings.append(
-                "Предпочтительный район дал слабый маршрут — поиск расширен на город"
-            )
             planning_log(trace_id, "dgis_candidates", attempt=2, area=city_area.label,
                          reason="SOFT_AREA_RELAXED", count=len(merged),
                          candidates=_candidate_debug(merged))
@@ -169,7 +208,7 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
 
     if best is None:
         planning_log(trace_id, "planning_failed", reason="NO_HARD_VALID_ROUTE",
-                     routingChecksUsed=_max_routing_checks() - routing_budget[0])
+                     routingChecksUsed=_max_routing_checks() - routing_budget.remaining)
         raise RouteNotFound()
 
     route_points, legs = best.points, best.legs
@@ -181,6 +220,8 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
 
     warnings = [*preview.warnings,
                 "Время посещения оценено по типу места и темпу прогулки"]
+    if best.plan.area_relaxed:
+        warnings.append("Предпочтительный район дал слабый маршрут — поиск расширен на город")
     if explicit_start_area:
         warnings.append(f"Старт по указанному ориентиру: {explicit_start_area.label}")
     if preview.directionHint:
@@ -199,27 +240,29 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     if approximate_start:
         warnings.append("Геопозиция и старт в тексте не указаны — маршрут начат от центра города")
     if location_hint:
-        warnings.append(f"Область поиска: {search_area.label}")
+        warnings.append(f"Область поиска: {best_area.label}")
     if preview.foodMode == "OPTIONAL" and not any(point.isFood for point in route_points):
         warnings.append("Подходящее место для еды не поместилось в маршрут")
     if any(point.scheduleStatus == "UNKNOWN" for point in route_points):
         warnings.append("Для части мест 2ГИС не вернул расписание")
     if planning_status == "DEGRADED":
         warnings.append(
-            f"Маршрут заполнен на {round(utilization * 100)}%: поиск был расширен, "
-            "но подходящих открытых мест недостаточно"
+            f"Маршрут заполнен на {round(utilization * 100)}%: "
+            "в пределах доступных проверок не удалось выполнить все пожелания"
         )
     planning_log(
         trace_id, "route_selected", planId=best.plan.plan_id,
         reason="highest_quality_hard_valid_variant", score=round(best.score, 2),
         scoreBreakdown=best.score_breakdown, attempts=attempts,
+        area=best_area.label,
+        routingChecksUsed=_max_routing_checks() - routing_budget.remaining,
         totalMinutes=total_minutes, targetMinutes=target_minutes,
         points=[{"placeId": point.placeId, "name": point.name}
                 for point in route_points], unmet=unmet,
     )
     return Route(
         routeId=uuid4(), routeVersion=1, status="READY", cityId=payload.cityId,
-        query=payload.query, filters=payload.filters, searchArea=search_area,
+        query=payload.query, filters=payload.filters, searchArea=best_area,
         approximateStart=approximate_start, startLat=start[0], startLon=start[1],
         startSource=start_source, maxWalkingMinutes=preview.maxWalkingMinutes,
         planningStatus=planning_status, durationUtilization=round(utilization, 3),
@@ -228,6 +271,28 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         totalMinutes=total_minutes, unusedMinutes=unused_minutes,
         points=route_points, legs=legs, warnings=warnings,
     )
+
+
+def _comparison_order(plans: list[_RoutePlan], start: tuple[float, float],
+                      checks: _RoutingChecks) -> tuple[list[_RoutePlan], int]:
+    """Reserve unique legs for the best challenger affordable beside the leader.
+
+    If two complete sequences cannot fit, keep the highest-ranked sequence intact.
+    This matters for explicit eight-place requests with an eight-check budget.
+    """
+    def missing_legs(plan: _RoutePlan) -> set[_LegKey]:
+        coordinates = [start, *((item.lat, item.lon) for item in plan.candidates)]
+        return set(zip(coordinates, coordinates[1:])) - checks.legs.keys()
+
+    if len(plans) < 2:
+        return plans, 0
+    primary = missing_legs(plans[0])
+    for index, challenger in enumerate(plans[1:], 1):
+        alternative = missing_legs(challenger)
+        if len(primary | alternative) <= checks.remaining:
+            ordered = [plans[0], challenger, *plans[1:index], *plans[index + 1:]]
+            return ordered, len(alternative - primary)
+    return plans, 0
 
 
 def _make_route_plans(candidates: list[PlaceCandidate], preview: QueryPreview,
@@ -341,12 +406,12 @@ def _approximate_route(candidates: list[PlaceCandidate], preview: QueryPreview,
 
 def _materialize_plan(plan: _RoutePlan, preview: QueryPreview, geo: GeoProvider,
                       start: tuple[float, float], local_now: datetime,
-                      routing_budget: list[int]) -> _BuiltPlan:
+                      routing_budget: _RoutingChecks, reserve: int = 0) -> _BuiltPlan:
     built = _BuiltPlan(plan=plan)
     current = start
     budget_seconds = (preview.maxDurationMinutes or preview.durationMinutes) * 60
     for candidate in plan.candidates:
-        if len(built.points) >= (preview.requestedPlaceCount or 8) or routing_budget[0] <= 0:
+        if len(built.points) >= (preview.requestedPlaceCount or 8):
             break
         distance = _approx_distance_meters(current, (candidate.lat, candidate.lon))
         if (preview.maxWalkingMinutes is not None
@@ -359,9 +424,12 @@ def _materialize_plan(plan: _RoutePlan, preview: QueryPreview, geo: GeoProvider,
         if built.elapsed_seconds + visit_minutes * 60 > budget_seconds:
             continue
         try:
-            routing_budget[0] -= 1
-            leg = geo.walking_leg(current, (candidate.lat, candidate.lon),
-                                  len(built.points), len(built.points) + 1)
+            leg = routing_budget.walking_leg(
+                geo, current, (candidate.lat, candidate.lon), len(built.points), reserve,
+            )
+        except _RoutingBudgetExhausted:
+            built.budget_limited = True
+            break
         except GeoRouteNotFound:
             continue
         if (preview.maxWalkingMinutes is not None

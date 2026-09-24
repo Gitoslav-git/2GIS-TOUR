@@ -377,7 +377,9 @@ public final class MainActivity extends Activity {
                 if (selected != null && startLat != null && startLon != null
                         && !locationMatchesCity(selected, startLat, startLon)) {
                     clearCoordinatesKeepingCity();
-                    locationStatus.setText("Город выбран вручную. Если в пожеланиях нет старта, маршрут начнётся от центра города.");
+                    showManualCity(selected);
+                } else if (selected != null && !locationResolved && startLat == null) {
+                    showManualCity(selected);
                 }
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
@@ -1056,6 +1058,11 @@ public final class MainActivity extends Activity {
         locationStatus.setText(String.format(java.util.Locale.US,
                 "Определён город: %s. Геопозиция получена (точность ±%.0f м).",
                 cityName(cityId), startAccuracyMeters == null ? 100.0 : startAccuracyMeters));
+    }
+
+    private void showManualCity(String cityId) {
+        locationStatus.setText("Выбран город: " + cityName(cityId) +
+                ". Геопозиция не определена — маршрут начнётся от центра выбранного города.");
     }
 
     private void clearCoordinatesKeepingCity() {

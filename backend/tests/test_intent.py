@@ -288,15 +288,37 @@ def test_ambiguous_personal_start_requires_clarification():
 
 def test_city_conflict_asks_for_clarification():
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(cityText="Владимир"))
-    result = request()
+    result = request(query="Хочу погулять по Владимиру")
     assert result.status_code == 422
     assert result.json()["error"]["code"] == "QUERY_NEEDS_CLARIFICATION"
     assert result.json()["error"]["details"]["fields"] == ["cityId"]
 
 
-def test_unknown_city_does_not_silently_route_to_selected_city():
+def test_other_supported_city_does_not_silently_route_to_selected_city():
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(cityText="Москва"))
-    result = request()
+    result = request(query="Хочу погулять по Москве")
+    assert result.status_code == 422
+    assert result.json()["error"]["details"]["fields"] == ["cityId"]
+
+
+@pytest.mark.parametrize("query,city_text", [
+    ("Хочу прогуляться по центру города 5 часов", "город"),
+    ("Я хочу прогуляться", "Владимир"),
+    ("Я хочу прогуляться", None),
+])
+def test_selected_city_is_authoritative_when_query_has_no_explicit_city(query, city_text):
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
+        cityText=city_text, clarificationFields=["cityId"],
+    ))
+    result = request(cityId="moscow", query=query)
+    assert result.status_code == 200
+    assert result.json()["cityId"] == "moscow"
+
+
+def test_explicit_unsupported_city_still_requires_clarification():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
+        parsed(cityText="Казань"))
+    result = request(query="Хочу погулять по Казани")
     assert result.status_code == 422
     assert result.json()["error"]["details"]["fields"] == ["cityId"]
 

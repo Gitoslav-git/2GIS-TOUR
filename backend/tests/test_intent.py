@@ -156,6 +156,20 @@ def test_center_preference_is_preserved():
     assert result.json()["locationHint"] == "центр"
 
 
+def test_city_center_start_is_not_resolved_as_a_fictitious_place():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed(
+        cityText="Москва", durationMinutes=120,
+        startLocationHint="центра Москвы по главным достопримечательностям",
+        locationHint=None,
+    ))
+    result = request(cityId="moscow", query=(
+        "Хочу прогуляться от центра Москвы по главным достопримечательностям"
+    ), filters={"durationMinutes": 120})
+    assert result.status_code == 200
+    assert result.json()["startLocationHint"] is None
+    assert result.json()["locationHint"] == "центр"
+
+
 @pytest.mark.parametrize("query,expected", [
     ("Хочу гулять на севере города два часа", "север города"),
     ("Хочу гулять на юго-западе города два часа", "юго-запад города"),

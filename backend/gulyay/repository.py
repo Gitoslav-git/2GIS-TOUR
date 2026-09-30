@@ -24,10 +24,10 @@ class RouteRepository:
             Path(resolved).parent.mkdir(parents=True, exist_ok=True)
         self.path = resolved
         try:
-            retention = int(os.getenv("GULYAY_ROUTE_RETENTION_HOURS", "24"))
+            retention_minutes = int(os.getenv("GULYAY_ROUTE_RETENTION_MINUTES", "5"))
         except ValueError:
-            retention = 24
-        self.retention_hours = max(1, min(168, retention))
+            retention_minutes = 5
+        self.retention_minutes = max(1, min(10_080, retention_minutes))
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(resolved, check_same_thread=False, timeout=10)
         self._connection.execute("PRAGMA busy_timeout = 10000")
@@ -100,6 +100,23 @@ class RouteRepository:
             return Route.model_validate_json(row[0]), CreateRoute.model_validate_json(row[1])
         except ValueError:
             return None
+
+    def list_guest_history(self, owner: UUID, limit: int = 3) -> list[tuple[Route, str]]:
+        """Return at most three routes that are still inside guest retention."""
+        self.purge_expired()
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT route_json, updated_at FROM routes WHERE owner_session = ?
+                   ORDER BY updated_at DESC, rowid DESC LIMIT ?""",
+                (str(owner), max(1, min(3, limit))),
+            ).fetchall()
+        result: list[tuple[Route, str]] = []
+        for route_json, updated_at in rows:
+            try:
+                result.append((Route.model_validate_json(route_json), str(updated_at)))
+            except ValueError:
+                continue
+        return result
 
     def replace(self, route: Route, owner: UUID, payload: CreateRoute,
                 base_version: int) -> bool:
@@ -211,7 +228,7 @@ class RouteRepository:
             self._connection.execute("DELETE FROM routes")
 
     def purge_expired(self) -> None:
-        modifier = f"-{self.retention_hours} hours"
+        modifier = f"-{self.retention_minutes} minutes"
         with self._lock, self._connection:
             self._connection.execute(
                 "DELETE FROM routes WHERE updated_at < datetime('now', ?)", (modifier,)

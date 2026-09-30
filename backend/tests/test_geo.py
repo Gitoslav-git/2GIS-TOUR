@@ -135,8 +135,8 @@ def test_generic_walk_searches_outdoor_places_to_fill_evening_route():
     area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
     provider.search_places("tula", generic, area)
     assert queries == [
-        "достопримечательности", "места для прогулок",
-        "музеи и галереи", "развлечения и досуг",
+        "Тульский кремль", "Казанская набережная",
+        "достопримечательности и места для прогулок",
     ]
 
 
@@ -153,8 +153,8 @@ def test_unsafe_llm_interests_never_reach_2gis_query():
     area = provider.resolve_search_area("tula", "центр", (54.193, 37.617))
     provider.search_places("tula", unsafe, area)
     assert queries == [
-        "достопримечательности", "места для прогулок",
-        "музеи и галереи", "развлечения и досуг",
+        "Тульский кремль", "Казанская набережная",
+        "достопримечательности и места для прогулок",
     ]
 
 

@@ -122,6 +122,66 @@ final class ApiClient {
         }
     }
 
+    static final class GuestHistoryItem {
+        final String routeId, cityId, title, updatedAt;
+        final int routeVersion, totalMinutes, pointCount;
+        GuestHistoryItem(String routeId, int routeVersion, String cityId, String title,
+                         int totalMinutes, int pointCount, String updatedAt) {
+            this.routeId = routeId; this.routeVersion = routeVersion; this.cityId = cityId;
+            this.title = title; this.totalMinutes = totalMinutes; this.pointCount = pointCount;
+            this.updatedAt = updatedAt;
+        }
+    }
+
+    static String routeSnapshot(Result route) {
+        if (route == null || !route.success) return null;
+        try {
+            JSONObject json = new JSONObject();
+            json.put("routeId", route.routeId).put("routeVersion", route.routeVersion)
+                    .put("message", route.message).put("totalMinutes", route.totalMinutes)
+                    .put("requestedMinutes", route.requestedMinutes)
+                    .put("totalDistanceMeters", route.totalDistanceMeters)
+                    .put("startLat", route.startLat).put("startLon", route.startLon)
+                    .put("startSource", route.startSource);
+            JSONArray points = new JSONArray();
+            for (PlaceOption point : route.points) points.put(new JSONObject()
+                    .put("id", point.placeId).put("name", point.name).put("food", point.food)
+                    .put("lat", point.lat).put("lon", point.lon));
+            JSONArray path = new JSONArray();
+            for (GeoCoordinate point : route.path) path.put(new JSONArray()
+                    .put(point.lat).put(point.lon));
+            return json.put("points", points).put("path", path).toString();
+        } catch (Exception ignored) { return null; }
+    }
+
+    static Result routeFromSnapshot(String raw) {
+        try {
+            JSONObject json = new JSONObject(raw);
+            JSONArray sourcePoints = json.getJSONArray("points");
+            List<PlaceOption> points = new ArrayList<>();
+            for (int i = 0; i < sourcePoints.length(); i++) {
+                JSONObject item = sourcePoints.getJSONObject(i);
+                points.add(new PlaceOption(item.getString("id"), item.getString("name"),
+                        item.optBoolean("food"), item.getDouble("lat"), item.getDouble("lon")));
+            }
+            List<GeoCoordinate> path = new ArrayList<>();
+            JSONArray sourcePath = json.optJSONArray("path");
+            if (sourcePath != null) for (int i = 0; i < sourcePath.length(); i++) {
+                JSONArray item = sourcePath.getJSONArray(i);
+                path.add(new GeoCoordinate(item.getDouble(0), item.getDouble(1)));
+            }
+            Result result = new Result(true, json.optString("message", "Сохранённый маршрут"),
+                    json.getString("routeId"), json.getInt("routeVersion"), 0, null, points, path);
+            result.totalMinutes = json.optInt("totalMinutes", -1);
+            result.requestedMinutes = json.optInt("requestedMinutes", result.totalMinutes);
+            result.totalDistanceMeters = json.optInt("totalDistanceMeters", -1);
+            result.startLat = json.optDouble("startLat", Double.NaN);
+            result.startLon = json.optDouble("startLon", Double.NaN);
+            result.startSource = json.optString("startSource", "LEGACY");
+            return result;
+        } catch (Exception ignored) { return null; }
+    }
+
     static final class WalkResult {
         final boolean success;
         final String message;
@@ -132,10 +192,18 @@ final class ApiClient {
         final boolean pointReached;
         final int distanceMeters;
         final String errorCode;
+        final boolean finalPointVisitInProgress;
 
         WalkResult(boolean success, String message, String walkId, String status,
                    int currentPointOrder, int remainingMinutes, boolean pointReached,
                    int distanceMeters, String errorCode) {
+            this(success, message, walkId, status, currentPointOrder, remainingMinutes,
+                    pointReached, distanceMeters, errorCode, false);
+        }
+
+        WalkResult(boolean success, String message, String walkId, String status,
+                   int currentPointOrder, int remainingMinutes, boolean pointReached,
+                   int distanceMeters, String errorCode, boolean finalPointVisitInProgress) {
             this.success = success;
             this.message = message;
             this.walkId = walkId;
@@ -145,6 +213,7 @@ final class ApiClient {
             this.pointReached = pointReached;
             this.distanceMeters = distanceMeters;
             this.errorCode = errorCode;
+            this.finalPointVisitInProgress = finalPointVisitInProgress;
         }
     }
 
@@ -160,11 +229,18 @@ final class ApiClient {
     static Result createRoute(String cityId, String query, String sessionId,
                               Double startLat, Double startLon,
                               Double accuracyMeters) throws Exception {
+        return createRoute(cityId, query, sessionId, startLat, startLon, accuracyMeters,
+                new JSONObject());
+    }
+
+    static Result createRoute(String cityId, String query, String sessionId,
+                              Double startLat, Double startLon, Double accuracyMeters,
+                              JSONObject filters) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("cityId", cityId);
         payload.put("query", query);
         payload.put("deviceSessionId", sessionId);
-        payload.put("filters", new JSONObject());
+        payload.put("filters", filters == null ? new JSONObject() : filters);
         if (startLat != null && startLon != null) {
             JSONObject location = new JSONObject();
             location.put("lat", startLat);
@@ -192,14 +268,23 @@ final class ApiClient {
                               String query, String sessionId,
                               Double startLat, Double startLon,
                               Double accuracyMeters) throws Exception {
+        return reviseRoute(routeId, baseVersion, cityId, query, sessionId, startLat, startLon,
+                accuracyMeters, new JSONObject());
+    }
+
+    static Result reviseRoute(String routeId, int baseVersion, String cityId,
+                              String query, String sessionId,
+                              Double startLat, Double startLon,
+                              Double accuracyMeters, JSONObject filters) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("baseVersion", baseVersion);
         payload.put("mode", "CHANGE_QUERY");
         payload.put("query", query);
+        payload.put("filters", filters == null ? new JSONObject() : filters);
         Result revised = send("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
         if (!revised.success && "NOT_FOUND".equals(revised.errorCode)) {
             Result recreated = createRoute(cityId, query, sessionId, startLat, startLon,
-                    accuracyMeters);
+                    accuracyMeters, filters);
             if (recreated.success) {
                 return new Result(true, "Старый маршрут отсутствовал на сервере — построен новый.\n\n" +
                         recreated.message, recreated.routeId, recreated.routeVersion,
@@ -223,6 +308,34 @@ final class ApiClient {
 
     static Result getRoute(String routeId, String cityId, String sessionId) throws Exception {
         return getRouteResponse("/v1/routes/" + routeId, sessionId, cityId);
+    }
+
+    static List<GuestHistoryItem> getGuestHistory(String sessionId) throws Exception {
+        if (!BackendConfig.isConfigured()) return Collections.emptyList();
+        String path = "/v1/routes/history";
+        long startedAt = BackendConfig.logRequest("GET", path);
+        HttpURLConnection connection = null;
+        try {
+            connection = open(path, "GET", sessionId);
+            int status = connection.getResponseCode();
+            BackendConfig.logResponse("GET", path, status, startedAt);
+            JSONObject response = readJson(connection, status);
+            if (status >= 400) return Collections.emptyList();
+            JSONArray items = response.optJSONArray("items");
+            if (items == null) return Collections.emptyList();
+            List<GuestHistoryItem> result = new ArrayList<>();
+            for (int index = 0; index < items.length(); index++) {
+                JSONObject item = items.optJSONObject(index);
+                if (item == null) continue;
+                result.add(new GuestHistoryItem(item.optString("routeId"),
+                        item.optInt("routeVersion", 1), item.optString("cityId"),
+                        item.optString("title", "Маршрут"), item.optInt("totalMinutes"),
+                        item.optInt("pointCount"), item.optString("updatedAt")));
+            }
+            return result;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
     }
 
     static Result deleteRoute(String routeId, String sessionId) throws Exception {
@@ -396,7 +509,9 @@ final class ApiClient {
             int remaining = walk.optInt("estimatedRemainingMinutes", 0);
             String message = walkMessage(walkStatus, order, remaining, pointReached, distance);
             return new WalkResult(true, message, walk.getString("walkId"), walkStatus,
-                    order, remaining, pointReached, distance, null);
+                    order, remaining, pointReached, distance, null,
+                    walk.has("finalPointVisitStartedAt")
+                            && !walk.isNull("finalPointVisitStartedAt"));
         } catch (Exception error) {
             BackendConfig.logFailure(method, path, startedAt, error);
             throw error;

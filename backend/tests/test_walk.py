@@ -73,7 +73,7 @@ def test_poor_accuracy_breaks_arrival_confirmation_sequence():
     assert state.session.currentPointOrder == 1
 
 
-def test_last_point_completes_walk_without_duplicate_visit():
+def test_last_point_starts_one_hour_visit_before_completion():
     start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
     itinerary = route(points=1, total_minutes=50)
     state = start_walk(itinerary, StartWalk(routeVersion=1), start)
@@ -83,15 +83,46 @@ def test_last_point_completes_walk_without_duplicate_visit():
         start + timedelta(seconds=5),
     )
     assert reached.pointReached is True
-    assert state.session.status == "COMPLETED"
-    assert state.session.currentPointOrder is None
-    assert state.session.estimatedRemainingMinutes == 0
-    duplicate_state, duplicate = register_position(
-        state, itinerary, position(itinerary.points[0], start + timedelta(seconds=5)),
-        start + timedelta(seconds=10),
+    assert state.session.status == "ACTIVE"
+    assert state.session.currentPointOrder == 1
+    assert state.session.finalPointVisitStartedAt == start + timedelta(seconds=5)
+    assert state.session.estimatedRemainingMinutes == 60
+    waiting_state, waiting = register_position(
+        state, itinerary, position(itinerary.points[0], start + timedelta(minutes=30)),
+        start + timedelta(minutes=30),
     )
-    assert duplicate.pointReached is False
-    assert len(duplicate_state.session.visits) == 1
+    assert waiting.pointReached is False
+    assert waiting_state.session.status == "ACTIVE"
+    assert waiting_state.session.estimatedRemainingMinutes == 31
+    completed_state, completed = register_position(
+        waiting_state, itinerary, position(itinerary.points[0], start + timedelta(hours=1, seconds=5)),
+        start + timedelta(hours=1, seconds=5),
+    )
+    assert completed.pointReached is False
+    assert completed_state.session.status == "COMPLETED"
+    assert completed_state.session.currentPointOrder is None
+    assert len(completed_state.session.visits) == 1
+
+
+def test_pause_does_not_consume_final_point_visit_time():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route(points=1, total_minutes=50)
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, _ = register_position(state, itinerary, position(itinerary.points[0], start), start)
+    state, _ = register_position(
+        state, itinerary, position(itinerary.points[0], start + timedelta(seconds=5)),
+        start + timedelta(seconds=5),
+    )
+    state = apply_action(state, itinerary, WalkAction(action="PAUSE"),
+                         start + timedelta(minutes=20))
+    state = apply_action(state, itinerary, WalkAction(action="RESUME"),
+                         start + timedelta(minutes=50))
+    state, progress = register_position(
+        state, itinerary, position(itinerary.points[0], start + timedelta(hours=1, seconds=5)),
+        start + timedelta(hours=1, seconds=5),
+    )
+    assert progress.walk.status == "ACTIVE"
+    assert progress.walk.estimatedRemainingMinutes == 30
 
 
 def test_pause_time_is_excluded_from_remaining_time():

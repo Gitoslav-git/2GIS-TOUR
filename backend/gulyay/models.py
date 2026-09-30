@@ -211,6 +211,7 @@ class PlaceCandidate(StrictModel):
     rubrics: list[str]
     schedule: dict
     isFood: bool
+    providerType: str = ""
     matchedConcepts: list[str] = Field(default_factory=list)
     matchedFoodPreferences: list[str] = Field(default_factory=list)
 
@@ -277,11 +278,22 @@ class Route(StrictModel):
     planningAttempts: int = Field(default=1, ge=1)
     unmetPreferences: list[str] = Field(default_factory=list)
     requestedMinutes: int
+    routePace: Literal["RELAXED", "NORMAL", "INTENSIVE"] = "NORMAL"
     totalMinutes: int
     unusedMinutes: int
     points: list[RoutePoint]
     legs: list[RouteLeg]
     warnings: list[str]
+
+
+class GuestHistoryItem(StrictModel):
+    routeId: UUID
+    routeVersion: int
+    cityId: str
+    title: str
+    totalMinutes: int
+    pointCount: int
+    updatedAt: str
 
 
 class RouteRevision(StrictModel):
@@ -351,6 +363,7 @@ class WalkSession(StrictModel):
     endedAt: datetime | None = None
     estimatedRemainingMinutes: int = Field(ge=0)
     visits: list[Visit] = Field(default_factory=list)
+    finalPointVisitStartedAt: datetime | None = None
 
 
 class WalkProgress(StrictModel):
@@ -366,3 +379,4 @@ class WalkState(StrictModel):
     proximityPointOrder: int | None = Field(default=None, ge=1, le=8)
     pausedAt: datetime | None = None
     pausedSeconds: int = Field(default=0, ge=0)
+    finalPointPausedSeconds: int = Field(default=0, ge=0)

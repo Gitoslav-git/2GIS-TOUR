@@ -243,6 +243,14 @@ def interpret(payload: CreateRoute, provider: IntentProvider,
     if (payload.filters.unusualPlaces is True or parsed.unusualPlaces) and "UNUSUAL_PLACES" not in concepts:
         concepts.insert(0, "UNUSUAL_PLACES")
         priorities["UNUSUAL_PLACES"] = "HIGH"
+    if payload.filters.unusualPlaces is True and "UNUSUAL_PLACES" not in hard_interests:
+        hard_interests.append("UNUSUAL_PLACES")
+    if payload.filters.withChildren is True:
+        if "CHILD_FRIENDLY" not in concepts:
+            concepts.insert(0, "CHILD_FRIENDLY")
+            priorities["CHILD_FRIENDLY"] = "HIGH"
+        if "CHILD_FRIENDLY" not in hard_interests:
+            hard_interests.append("CHILD_FRIENDLY")
 
     hard_exclusions = _unique(
         item.concept for item in parsed.exclusions if item.strength == "HARD_EXCLUSION"
@@ -405,6 +413,12 @@ def _clean_hint(value: str | None) -> str | None:
 
 
 def _start_hint(query: str, parsed_hint: str | None) -> str | None:
+    # "От центра Москвы" describes the built-in city-centre anchor, not a
+    # searchable organisation.  Letting the LLM (or the fallback regex) pass
+    # the whole phrase through makes the geo provider search for a fictitious
+    # place named "центра Москвы по достопримечательностям" and returns 422.
+    if _city_center_reference(query):
+        return None
     parsed = _clean_hint(parsed_hint)
     if parsed and not looks_like_walking_constraint(parsed):
         return parsed
@@ -510,7 +524,7 @@ def _hard_total_value(query: str, parsed_value: int | None, kind: str) -> int | 
 
 def _location_hint(query: str, parsed_hint: str | None) -> str | None:
     text = query.casefold()
-    if re.search(r"\b(?:по\s+центру|в\s+(?:самом\s+)?центре|центр(?:е|ом)?\s+города|центральной\s+части)\b", text):
+    if _city_center_reference(text):
         return "центр"
     directions = (
         (r"\b(?:на\s+северо[- ]?востоке|в\s+северо[- ]?восточной\s+части|северо[- ]?восток\s+города)\b", "северо-восток города"),
@@ -527,6 +541,16 @@ def _location_hint(query: str, parsed_hint: str | None) -> str | None:
             return normalized
     parsed = _clean_hint(parsed_hint)
     return None if parsed and looks_like_walking_constraint(parsed) else parsed
+
+
+def _city_center_reference(query: str) -> bool:
+    """Recognise centre as a city anchor in both area and start wording."""
+    return bool(re.search(
+        r"\b(?:по\s+центру|в\s+(?:самом\s+)?центре|"
+        r"(?:от|из)\s+(?:самого\s+)?центра(?:\s+города|\s+[а-яё-]+)?|"
+        r"центр(?:е|ом)?\s+города|центральной\s+части)\b",
+        query.casefold(),
+    ))
 
 
 def _priority_value(value: str) -> int:

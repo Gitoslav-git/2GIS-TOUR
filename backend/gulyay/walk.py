@@ -10,6 +10,7 @@ from .models import (Route, StartWalk, Visit, WalkAction, WalkPosition,
 ARRIVAL_RADIUS_METERS = 75
 MAX_ACCURACY_METERS = 50
 CONFIRMATION_INTERVAL_SECONDS = 5
+FINAL_POINT_VISIT_SECONDS = 60 * 60
 
 
 class WalkInvalidState(Exception):
@@ -46,6 +47,18 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
         raise WalkInvalidPosition()
     if measured > current_time + timedelta(minutes=5):
         raise WalkInvalidPosition()
+    if session.finalPointVisitStartedAt is not None:
+        remaining = _final_point_remaining_minutes(state, measured)
+        session = session.model_copy(update={"estimatedRemainingMinutes": remaining})
+        update: dict = {"lastMeasuredAt": measured, "session": session}
+        if remaining == 0:
+            session = session.model_copy(update={
+                "status": "COMPLETED", "currentPointOrder": None,
+                "endedAt": measured, "estimatedRemainingMinutes": 0,
+            })
+            update["session"] = session
+        updated = state.model_copy(update=update)
+        return updated, WalkProgress(walk=updated.session, pointReached=False)
     point = route.points[session.currentPointOrder - 1]
     distance = round(_distance_meters(position.lat, position.lon, point.lat, point.lon))
     reached = False
@@ -74,9 +87,8 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
         )]
         if session.currentPointOrder >= len(route.points):
             session = session.model_copy(update={
-                "status": "COMPLETED", "currentPointOrder": None,
-                "endedAt": measured, "visits": visits,
-                "estimatedRemainingMinutes": 0,
+                "visits": visits, "finalPointVisitStartedAt": measured,
+                "estimatedRemainingMinutes": math.ceil(FINAL_POINT_VISIT_SECONDS / 60),
             })
         else:
             session = session.model_copy(update={
@@ -114,6 +126,11 @@ def apply_action(state: WalkState, route: Route, payload: WalkAction,
         paused_seconds = state.pausedSeconds + max(
             0, round((moment - state.pausedAt).total_seconds()),
         )
+        final_point_paused_seconds = state.finalPointPausedSeconds
+        if session.finalPointVisitStartedAt is not None:
+            final_point_paused_seconds += max(
+                0, round((moment - state.pausedAt).total_seconds()),
+            )
         return state.model_copy(update={
             "session": session.model_copy(update={
                 "status": "ACTIVE",
@@ -122,6 +139,7 @@ def apply_action(state: WalkState, route: Route, payload: WalkAction,
                 ),
             }),
             "pausedAt": None, "pausedSeconds": paused_seconds,
+            "finalPointPausedSeconds": final_point_paused_seconds,
             "proximityStartedAt": None, "proximityPointOrder": None,
         })
     if payload.action == "STOP":
@@ -148,6 +166,15 @@ def _remaining_minutes(route: Route, started_at: datetime, current: datetime,
     elapsed = max(0, (current - started_at.astimezone(timezone.utc)).total_seconds()
                   - paused_seconds)
     return max(0, math.ceil(route.totalMinutes - elapsed / 60))
+
+
+def _final_point_remaining_minutes(state: WalkState, current: datetime) -> int:
+    started = state.session.finalPointVisitStartedAt
+    if started is None:
+        return 0
+    elapsed = max(0, (current - started.astimezone(timezone.utc)).total_seconds()
+                  - state.finalPointPausedSeconds)
+    return max(0, math.ceil((FINAL_POINT_VISIT_SECONDS - elapsed) / 60))
 
 
 def _distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

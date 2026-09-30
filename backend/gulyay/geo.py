@@ -97,17 +97,26 @@ CONCEPT_QUERIES: dict[str, tuple[str, ...]] = {
     "ENTERTAINMENT": ("развлечения", "досуговые места"),
 }
 
-# Generic requests must not mean only famous landmarks. These four catalogue
-# lanes cover sightseeing, outdoor walks, culture and leisure while keeping the
-# number of Places calls bounded. Area places are included because parks,
-# beaches, lakes and other recreational zones are not always attractions or
-# organisations in the 2GIS catalogue.
-GENERIC_DISCOVERY_QUERIES: tuple[tuple[str, str], ...] = (
-    ("достопримечательности", "attraction,branch,adm_div.place"),
-    ("места для прогулок", "adm_div.place,attraction,branch"),
-    ("музеи и галереи", "branch,attraction"),
-    ("развлечения и досуг", "branch,attraction,adm_div.place"),
+# An open-ended walk gets a wide local discovery lane in addition to the city's
+# two signature sights.  We deliberately use one broad query rather than four
+# overlapping ones: its larger result page preserves candidate variety while
+# keeping the request budget small enough for the 2GIS quota.
+GENERIC_DISCOVERY_QUERY: tuple[str, str] = (
+    "достопримечательности и места для прогулок",
+    "attraction,branch,adm_div.place",
 )
+
+# For an open-ended request the first candidates should represent the city, not
+# only the nearest generic organisation. These are query names, not hard-coded
+# provider IDs or coordinates: every object is still resolved and validated by
+# 2GIS at route-build time. Keep this list small because a generic search has a
+# fixed three-request budget.
+CITY_MAIN_LANDMARK_QUERIES: dict[str, tuple[str, ...]] = {
+    "tula": ("Тульский кремль", "Казанская набережная"),
+    "vladimir": ("Золотые ворота", "Успенский собор"),
+    "moscow": ("Красная площадь", "Московский Кремль"),
+    "borovsk": ("Пафнутьево-Боровский монастырь", "Боровские фрески"),
+}
 
 CONCEPT_WORDS: dict[str, tuple[str, ...]] = {
     "ARCHITECTURE": ("архитект", "здание", "усадьб", "особняк"),
@@ -231,7 +240,7 @@ class DgisGeoProvider:
         # Tests use a mock transport. Only real upstream traffic needs pacing.
         self.min_request_interval = (0.0 if transport is not None else
                                      _bounded_float("DGIS_MIN_REQUEST_INTERVAL_SECONDS",
-                                                    0.75, 0.0, 5.0))
+                                                    1.25, 0.0, 5.0))
         self.places_ttl = _bounded_int("DGIS_PLACES_CACHE_SECONDS", 900, 60, 86400)
         self.routing_ttl = _bounded_int("DGIS_ROUTING_CACHE_SECONDS", 1800, 60, 86400)
 
@@ -392,8 +401,13 @@ class DgisGeoProvider:
             for concept in mapped_concepts
         ]
         if not queries:
-            queries = [(query, item_types, None)
-                       for query, item_types in GENERIC_DISCOVERY_QUERIES]
+            landmark_queries = CITY_MAIN_LANDMARK_QUERIES.get(city_id, ())
+            queries = [
+                (query, "attraction,branch,adm_div.place", None)
+                for query in landmark_queries
+            ]
+            # Keep a broad local discovery lane alongside signature sights.
+            queries.append((*GENERIC_DISCOVERY_QUERY, None))
         elif len(queries) == 1:
             # One related broad query gives adaptive broadening without a second
             # LLM call and without ever leaking the user's raw text to 2GIS.
@@ -401,9 +415,15 @@ class DgisGeoProvider:
             if related != queries[0][0]:
                 queries.append((related, "attraction,branch,adm_div.place",
                                 mapped_concepts[0]))
-        # Explicit interests use at most two searches. A generic walk uses the
-        # four bounded discovery lanes above instead of dozens of category calls.
-        query_limit = len(GENERIC_DISCOVERY_QUERIES) if not mapped_concepts else 2
+        # Every selected quick filter is a hard product constraint.  Reserve a
+        # discovery lane for each hard concept (up to three) so, for example,
+        # "with children" + "unusual" does not accidentally evict the user's
+        # requested landmarks before the planner can validate them.  A food
+        # lane is appended separately only when it is required.
+        hard_mapped = [concept for concept in preview.hardInterests
+                       if concept in CONCEPT_QUERIES]
+        query_limit = (3 if not mapped_concepts else
+                       max(2, min(3, len(set(hard_mapped)))))
         requests = [(query, item_types, False, concept, None)
                     for query, item_types, concept in queries[:query_limit]]
         if preview.includeFood:
@@ -420,8 +440,11 @@ class DgisGeoProvider:
                 q=query, type=item_types, locale="ru_RU",
                 point=f"{area.lon:.7f},{area.lat:.7f}", radius=area.radiusMeters,
                 location=f"{area.lon:.7f},{area.lat:.7f}",
-                fields="items.point,items.rubrics,items.schedule,items.is_routing_available",
-                page_size=20, search_is_query_text_complete="true",
+                fields="items.point,items.rubrics,items.type,items.schedule,items.is_routing_available",
+                # Fewer catalogue calls must not shrink the candidate pool. 2GIS
+                # still performs the provider-side ranking; we only inspect more
+                # of that ranked result before applying route constraints.
+                page_size=40, search_is_query_text_complete="true",
             )
             for item in items:
                 candidate = _candidate_from_item(item, requested_as_food, require_tourist=True)
@@ -469,7 +492,7 @@ class DgisGeoProvider:
         items = self._places(
             q=query, type="attraction,branch", locale="ru_RU",
             point=f"{center[1]:.7f},{center[0]:.7f}", radius=12000,
-            fields="items.point,items.rubrics,items.schedule,items.is_routing_available,items.adm_div,items.city_alias",
+            fields="items.point,items.rubrics,items.type,items.schedule,items.is_routing_available,items.adm_div,items.city_alias",
             page_size=10, search_is_query_text_complete="true",
         )
         result: list[PlaceCandidate] = []
@@ -485,7 +508,7 @@ class DgisGeoProvider:
         center = self.resolve_city_center(city_id)
         items = self._places_from(
             PLACES_BY_ID_URL, id=",".join(sorted(place_ids)), locale="ru_RU",
-            fields="items.point,items.rubrics,items.schedule,items.is_routing_available,items.adm_div,items.city_alias",
+            fields="items.point,items.rubrics,items.type,items.schedule,items.is_routing_available,items.adm_div,items.city_alias",
         )
         by_id: dict[str, PlaceCandidate] = {}
         for item in items:
@@ -620,6 +643,7 @@ def _candidate_from_item(item: dict, requested_as_food: bool = False,
     return PlaceCandidate(
         placeId=place_id, name=name, lat=float(point["lat"]), lon=float(point["lon"]),
         rubrics=rubrics, schedule=schedule, isFood=is_food,
+        providerType=str(item.get("type", "")).strip(),
     )
 
 

@@ -48,9 +48,10 @@ def test_builds_route_only_from_provider_places_and_legs():
                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
     assert route.points[0].placeId == "2gis-1"
     assert route.legs[0].durationSeconds == 600
-    assert route.totalMinutes == 60
+    # Unknown provider type uses GENERIC_BRANCH: 40 minutes plus a 10-minute leg.
+    assert route.totalMinutes == 50
     assert route.requestedMinutes == 180
-    assert route.unusedMinutes == 120
+    assert route.unusedMinutes == 130
     assert route.approximateStart is True
 
 

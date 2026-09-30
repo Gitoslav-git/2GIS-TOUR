@@ -17,7 +17,7 @@ from .geo import (DgisGeoProvider, GeoAuthenticationError, GeoConstraintNotFound
 from .intent import (IntentAuthenticationError, IntentInvalidResponse,
                      IntentNeedsClarification, IntentUnavailable,
                      OpenAIIntentProvider, configured_model, interpret)
-from .models import (City, CreateRoute, PlaceSummary, QueryPreview, Route,
+from .models import (City, CreateRoute, GuestHistoryItem, PlaceSummary, QueryPreview, Route,
                      RouteRevision, StartWalk, WalkAction, WalkPosition,
                      WalkProgress, WalkSession)
 from .planning_debug import planning_log
@@ -27,7 +27,7 @@ from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, start_walk)
 
-app = FastAPI(title="Гуляй API", version="0.6.9.m")
+app = FastAPI(title="Гуляй API", version="0.7")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"),
           City(cityId="borovsk", name="Боровск, Калужская область"))
@@ -165,6 +165,23 @@ def create_route(payload: CreateRoute, x_device_session: UUID | None = Header(de
         if cache_key:
             IDEMPOTENT_ROUTES[cache_key] = route
     return route
+
+
+@app.get("/v1/routes/history", response_model=dict[str, list[GuestHistoryItem]])
+def guest_route_history(x_device_session: UUID | None = Header(default=None),
+                        x_request_id: UUID | None = Header(default=None),
+                        repository: RouteRepository = Depends(get_route_repository)) -> dict | JSONResponse:
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None:
+        return failure("UNAUTHORIZED", "Укажите гостевую сессию", 401, request_id)
+    items = []
+    for route, updated_at in repository.list_guest_history(x_device_session, limit=3):
+        items.append(GuestHistoryItem(
+            routeId=route.routeId, routeVersion=route.routeVersion, cityId=route.cityId,
+            title=route.points[0].name if route.points else "Маршрут по городу",
+            totalMinutes=route.totalMinutes, pointCount=len(route.points), updatedAt=updated_at,
+        ))
+    return {"items": items}
 
 
 @app.get("/v1/routes/{route_id}", response_model=Route)

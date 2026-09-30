@@ -28,6 +28,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -48,6 +49,19 @@ public final class MainActivity extends Activity {
     private TextView result;
     private Button submit;
     private Button returnToRouteButton;
+    private LinearLayout routeActions;
+    private LinearLayout routeCard;
+    private TextView routeCardTitle;
+    private TextView routeCardSubtitle;
+    private TextView routeCardActivity;
+    private TextView routeCardIcon;
+    private LinearLayout guestHistoryList;
+    private ScrollView guestHistoryScroll;
+    private LinearLayout selectedFilters;
+    private Button durationFilterButton, childrenFilterButton, foodFilterButton, unusualFilterButton;
+    private boolean filterTwoHours, filterChildren, filterFood, filterUnusual;
+    private boolean routeFinished;
+    private Button routeControlButton;
     private Button editPointsButton;
     private Button findPlaceButton;
     private Button addPlaceButton;
@@ -70,6 +84,7 @@ public final class MainActivity extends Activity {
     private int routeVersion;
     private String routeCityId;
     private String lastSuccessfulResult;
+    private String routeSnapshot;
     private long retryAllowedAtMillis;
     private Double startLat;
     private Double startLon;
@@ -162,6 +177,13 @@ public final class MainActivity extends Activity {
         content.addView(locationStatus);
         locationButton.setVisibility(View.GONE);
 
+        selectedFilters = new LinearLayout(this);
+        selectedFilters.setOrientation(LinearLayout.HORIZONTAL);
+        selectedFilters.setGravity(Gravity.CENTER_VERTICAL);
+        selectedFilters.setPadding(UiKit.dp(this, 4), UiKit.dp(this, 3), UiKit.dp(this, 4), 0);
+        selectedFilters.setVisibility(View.GONE);
+        content.addView(selectedFilters, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 38)));
+
         query = new EditText(this);
         query.setHint("Например: хочу гулять 2 часа по центру и зайти поесть");
         query.setMinLines(compact ? 2 : 3);
@@ -193,12 +215,10 @@ public final class MainActivity extends Activity {
         filters.setOrientation(LinearLayout.HORIZONTAL);
         filters.setPadding(0, 0, UiKit.dp(this, 4), 0);
         filtersScroll.addView(filters);
-        addFilterStub(filters, "2 часа");
-        addFilterStub(filters, "С детьми");
-        addFilterStub(filters, "Поесть");
-        addFilterStub(filters, "Необычное");
-        addFilterStub(filters, "Без музеев");
-        addFilterStub(filters, "Мало ходить");
+        durationFilterButton = addFilterButton(filters, "◷  На 2 часа", UiKit.GREEN);
+        childrenFilterButton = addFilterButton(filters, "♟  С детьми", UiKit.GREEN);
+        foodFilterButton = addFilterButton(filters, "⚑  Хочу поесть", 0xFFFF8A22);
+        unusualFilterButton = addFilterButton(filters, "★  Необычные места", UiKit.GREEN);
         filtersViewport.addView(filtersScroll, new FrameLayout.LayoutParams(-1, -1));
         content.addView(filtersViewport, new LinearLayout.LayoutParams(
                 -1, UiKit.dp(this, compact ? 42 : 46)));
@@ -221,7 +241,7 @@ public final class MainActivity extends Activity {
         returnToRouteButton.setStateListAnimator(null);
         returnToRouteButton.setPadding(UiKit.dp(this, 4), 0, UiKit.dp(this, 4), 0);
         returnToRouteButton.setVisibility(View.GONE);
-        LinearLayout routeActions = new LinearLayout(this);
+        routeActions = new LinearLayout(this);
         routeActions.setOrientation(LinearLayout.HORIZONTAL);
         routeActions.setGravity(Gravity.CENTER_VERTICAL);
         routeActions.setBaselineAligned(false);
@@ -239,6 +259,51 @@ public final class MainActivity extends Activity {
         actionsParams.topMargin = UiKit.dp(this, compact ? 4 : 8);
         actionsParams.bottomMargin = UiKit.dp(this, 4);
         content.addView(routeActions, actionsParams);
+        routeCard = new LinearLayout(this);
+        routeCard.setOrientation(LinearLayout.HORIZONTAL);
+        routeCard.setGravity(Gravity.CENTER_VERTICAL);
+        routeCard.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 9),
+                UiKit.dp(this, 8), UiKit.dp(this, 9));
+        routeCard.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE4E9E5, 16, this));
+        routeCardIcon = UiKit.label(this, "⌁\n●", 18, UiKit.GREEN);
+        routeCardIcon.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        routeCardIcon.setGravity(Gravity.CENTER);
+        routeCardIcon.setLineSpacing(0, 0.8f);
+        routeCardIcon.setBackground(UiKit.rounded(0xFFE9F8EE, 18, this));
+        routeCardIcon.setVisibility(View.GONE);
+        LinearLayout.LayoutParams routeIconParams = new LinearLayout.LayoutParams(
+                UiKit.dp(this, 48), UiKit.dp(this, 48));
+        routeIconParams.rightMargin = UiKit.dp(this, 10);
+        routeCard.addView(routeCardIcon, routeIconParams);
+        LinearLayout routeCardText = new LinearLayout(this);
+        routeCardText.setOrientation(LinearLayout.VERTICAL);
+        routeCardTitle = UiKit.label(this, "Маршрут готов", compact ? 15 : 16, UiKit.TEXT);
+        routeCardTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        routeCardSubtitle = UiKit.label(this, "Откройте маршрут или начните прогулку",
+                compact ? 12 : 13, UiKit.MUTED);
+        routeCardSubtitle.setMaxLines(1);
+        routeCardSubtitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        routeCardActivity = UiKit.label(this, "", compact ? 12 : 13, UiKit.RED);
+        routeCardActivity.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        routeCardActivity.setVisibility(View.GONE);
+        routeCardText.addView(routeCardTitle);
+        routeCardText.addView(routeCardSubtitle);
+        routeCardText.addView(routeCardActivity);
+        routeCard.addView(routeCardText, new LinearLayout.LayoutParams(0, -2, 1f));
+        routeControlButton = UiKit.button(this, "▶ / ×", UiKit.GREEN, 0xFFFFFFFF);
+        routeControlButton.setTextSize(compact ? 17 : 18);
+        routeControlButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        routeControlButton.setMinWidth(0);
+        routeControlButton.setMinHeight(0);
+        routeControlButton.setContentDescription("Начать прогулку или отменить маршрут");
+        routeControlButton.setPadding(UiKit.dp(this, 8), 0, UiKit.dp(this, 8), 0);
+        routeCard.addView(routeControlButton, new LinearLayout.LayoutParams(
+                UiKit.dp(this, compact ? 88 : 96), UiKit.dp(this, compact ? 42 : 46)));
+        routeCard.setVisibility(View.GONE);
+        LinearLayout.LayoutParams routeCardParams = new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, compact ? 60 : 66));
+        routeCardParams.topMargin = UiKit.dp(this, compact ? 4 : 8);
+        routeCardParams.bottomMargin = UiKit.dp(this, 4);
         result = new TextView(this);
         result.setTextSize(14);
         result.setTextColor(UiKit.MUTED);
@@ -253,14 +318,34 @@ public final class MainActivity extends Activity {
                 compact ? 17 : 20, UiKit.TEXT);
         historyTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         content.addView(historyTitle);
+        guestHistoryScroll = new ScrollView(this);
+        guestHistoryScroll.setFillViewport(false);
+        guestHistoryScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        guestHistoryScroll.setVerticalScrollBarEnabled(true);
+        guestHistoryScroll.setScrollbarFadingEnabled(false);
+        LinearLayout historyStack = new LinearLayout(this);
+        historyStack.setOrientation(LinearLayout.VERTICAL);
+        historyStack.addView(routeCard, routeCardParams);
+        guestHistoryList = new LinearLayout(this);
+        guestHistoryList.setOrientation(LinearLayout.VERTICAL);
+        historyStack.addView(guestHistoryList, new LinearLayout.LayoutParams(-1, -2));
         TextView history = UiKit.label(this,
-                "🔒  История появится после входа в профиль", 15, UiKit.MUTED);
+                "🔒  Полная история будет доступна после входа в профиль", 15, UiKit.MUTED);
         history.setGravity(Gravity.CENTER);
         history.setBackground(UiKit.rounded(UiKit.SOFT, 16, this));
-        LinearLayout.LayoutParams historyParams = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 86));
-        historyParams.height = UiKit.dp(this, compact ? 52 : 68);
+        LinearLayout.LayoutParams historyParams = new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, compact ? 52 : 68));
         historyParams.topMargin = UiKit.dp(this, compact ? 4 : 7);
-        content.addView(history, historyParams);
+        historyStack.addView(history, historyParams);
+        guestHistoryScroll.addView(historyStack, new ScrollView.LayoutParams(-1, -2));
+        // History owns only the space left above bottom navigation. Giving the
+        // nested ScrollView that remaining space prevents its last row from
+        // being clipped while keeping the rest of the page fixed.
+        LinearLayout.LayoutParams guestHistoryParams = new LinearLayout.LayoutParams(
+                -1, 0, 1f);
+        guestHistoryParams.topMargin = UiKit.dp(this, 3);
+        guestHistoryParams.bottomMargin = UiKit.dp(this, 6);
+        content.addView(guestHistoryScroll, guestHistoryParams);
 
         editPointsButton = new Button(this);
         editPointsButton.setText("Редактировать точки");
@@ -337,10 +422,6 @@ public final class MainActivity extends Activity {
             city.setSelection(savedInstanceState.getInt("city"));
             query.setText(savedInstanceState.getString("query", ""));
             result.setText(savedInstanceState.getString("result", ""));
-            routeId = savedInstanceState.getString("routeId");
-            routeVersion = savedInstanceState.getInt("routeVersion", 0);
-            routeCityId = savedInstanceState.getString("routeCityId");
-            lastSuccessfulResult = savedInstanceState.getString("lastSuccessfulResult");
             retryAllowedAtMillis = savedInstanceState.getLong("retryAllowedAtMillis", 0);
             if (savedInstanceState.containsKey("startLat")) {
                 startLat = savedInstanceState.getDouble("startLat");
@@ -354,20 +435,22 @@ public final class MainActivity extends Activity {
                     clearLocationToUnknown();
                 }
             }
-            routeLocationDirty = savedInstanceState.getBoolean("routeLocationDirty", false);
-            queryEditMode = savedInstanceState.getBoolean("queryEditMode", false);
-            if (routeId != null) submit.setText("Изменить маршрут");
-        } else {
-            restoreRouteState();
-            if (routeId == null) {
-                result.setText("Версия 0.6 поддерживает ограничение пеших переходов и прохождение маршрута.");
-            }
+        }
+        // A Bundle is only a visual Activity snapshot. It can survive a
+        // process death or even be restored after the user has finished a
+        // walk, so it must never revive a route as READY. The preferences are
+        // the sole durable source of route lifecycle state.
+        restoreRouteState();
+        if (routeId == null && savedInstanceState == null) {
+            result.setText("Версия 0.6 поддерживает ограничение пеших переходов и прохождение маршрута.");
         }
         editPointsButton.setEnabled(routeId != null);
         startWalkButton.setEnabled(routeId != null);
         mapButton.setEnabled(routeId != null);
         submit.setOnClickListener(view -> generate());
         returnToRouteButton.setOnClickListener(view -> returnToCurrentRoute());
+        routeCard.setOnClickListener(view -> returnToCurrentRoute());
+        routeControlButton.setOnClickListener(view -> showRouteControlMenu());
         locationButton.setOnClickListener(view -> toggleLocation());
         city.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
@@ -397,6 +480,8 @@ public final class MainActivity extends Activity {
         applyPointsButton.setOnClickListener(view -> applyPointChanges());
         applyCooldown();
         updateQueryEditActions();
+        refreshHomeRouteCard();
+        refreshGuestHistory();
         showLocationRebuildIfNeeded();
         beginAutomaticLocationDetection();
     }
@@ -424,10 +509,10 @@ public final class MainActivity extends Activity {
         return super.dispatchTouchEvent(event);
     }
 
-    private void addFilterStub(LinearLayout parent, String text) {
+    private Button addFilterButton(LinearLayout parent, String text, int accent) {
         Button chip = UiKit.button(this, text, UiKit.SOFT, UiKit.TEXT);
         chip.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
-        chip.setTextSize(14);
+        chip.setTextSize(13);
         chip.setMinHeight(0);
         chip.setMinWidth(0);
         chip.setElevation(0f);
@@ -436,6 +521,59 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -1);
         params.rightMargin = UiKit.dp(this, 8);
         parent.addView(chip, params);
+        chip.setOnClickListener(view -> {
+            if (chip == durationFilterButton) filterTwoHours = !filterTwoHours;
+            else if (chip == childrenFilterButton) filterChildren = !filterChildren;
+            else if (chip == foodFilterButton) filterFood = !filterFood;
+            else if (chip == unusualFilterButton) filterUnusual = !filterUnusual;
+            refreshFilterUi();
+        });
+        chip.setTag(accent);
+        return chip;
+    }
+
+    private void refreshFilterUi() {
+        setFilterAppearance(durationFilterButton, filterTwoHours);
+        setFilterAppearance(childrenFilterButton, filterChildren);
+        setFilterAppearance(foodFilterButton, filterFood);
+        setFilterAppearance(unusualFilterButton, filterUnusual);
+        selectedFilters.removeAllViews();
+        addSelectedFilterChip("◷ На 2 часа", filterTwoHours, () -> filterTwoHours = false, UiKit.GREEN);
+        addSelectedFilterChip("♟ С детьми", filterChildren, () -> filterChildren = false, UiKit.GREEN);
+        addSelectedFilterChip("⚑ Хочу поесть", filterFood, () -> filterFood = false, 0xFFFF8A22);
+        addSelectedFilterChip("★ Необычные места", filterUnusual, () -> filterUnusual = false, UiKit.GREEN);
+        selectedFilters.setVisibility(selectedFilters.getChildCount() == 0 ? View.GONE : View.VISIBLE);
+    }
+
+    private void setFilterAppearance(Button button, boolean selected) {
+        if (button == null) return;
+        int accent = (Integer) button.getTag();
+        button.setTextColor(selected ? accent : UiKit.TEXT);
+        button.setText(button.getText().toString().replace("  ✓", "") + (selected ? "  ✓" : ""));
+        button.setBackground(selected ? UiKit.bordered(0xFFFFFFFF, accent, 14, this)
+                : UiKit.rounded(UiKit.SOFT, 14, this));
+    }
+
+    private void addSelectedFilterChip(String text, boolean selected, Runnable remove, int accent) {
+        if (!selected) return;
+        Button chip = UiKit.button(this, text + "  ×", 0xFFFFFFFF, accent);
+        chip.setTextSize(13); chip.setAllCaps(false); chip.setMinWidth(0); chip.setMinHeight(0);
+        chip.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
+        chip.setBackground(UiKit.bordered(0xFFFFFFFF, accent, 14, this));
+        chip.setOnClickListener(view -> { remove.run(); refreshFilterUi(); });
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, UiKit.dp(this, 32));
+        params.rightMargin = UiKit.dp(this, 6); selectedFilters.addView(chip, params);
+    }
+
+    private JSONObject selectedFiltersJson() {
+        JSONObject filters = new JSONObject();
+        try {
+            if (filterTwoHours) filters.put("durationMinutes", 120);
+            if (filterChildren) filters.put("withChildren", true);
+            if (filterFood) filters.put("includeFood", true);
+            if (filterUnusual) filters.put("unusualPlaces", true);
+        } catch (Exception ignored) { }
+        return filters;
     }
 
     private Button navigationTab(String text, int color) {
@@ -459,10 +597,25 @@ public final class MainActivity extends Activity {
             return;
         }
         if (requestInFlight) return;
+        String savedQuery = getPreferences(MODE_PRIVATE).getString("routeQuery", "").trim();
+        if (routeId != null && !routeFinished && !text.equals(savedQuery)) {
+            new AlertDialog.Builder(this).setTitle("Сбросить текущий маршрут?")
+                    .setMessage("Построение нового маршрута закроет текущий.")
+                    .setNegativeButton("Нет", (dialog, which) -> query.setText(savedQuery))
+                    .setPositiveButton("Да", (dialog, which) -> generateConfirmed(text)).show();
+            return;
+        }
+        generateConfirmed(text);
+    }
+
+    private void generateConfirmed(String text) {
         if (System.currentTimeMillis() < retryAllowedAtMillis) {
             applyCooldown();
             return;
         }
+        // A finished walk is historical data, never the source for a revision,
+        // cache restore or active-walk lookup of the next route.
+        if (routeFinished) detachFinishedRouteForNewBuild();
         setNetworkBusy(true);
         String cityId = selectedCityId();
         if (cityId == null) {
@@ -474,7 +627,8 @@ public final class MainActivity extends Activity {
             clearCoordinatesKeepingCity();
             locationStatus.setText("Город выбран вручную. Если в пожеланиях нет старта, маршрут начнётся от центра города.");
         }
-        boolean revise = routeId != null && cityId.equals(routeCityId) && !routeLocationDirty;
+        boolean revise = routeId != null && !routeFinished && cityId.equals(routeCityId)
+                && !routeLocationDirty;
         String previous = lastSuccessfulResult;
         final String activeWalkBeforeChange = activeWalkIdForCurrentRoute();
         result.setText(revise ? "Пересчитываем маршрут…" : "Разбираем пожелания и строим маршрут…");
@@ -484,9 +638,9 @@ public final class MainActivity extends Activity {
             try {
                 response = revise
                         ? ApiClient.reviseRoute(routeId, routeVersion, cityId, text, owner,
-                                startLat, startLon, startAccuracyMeters)
+                                startLat, startLon, startAccuracyMeters, selectedFiltersJson())
                         : ApiClient.createRoute(cityId, text, owner, startLat, startLon,
-                                startAccuracyMeters);
+                                startAccuracyMeters, selectedFiltersJson());
             } catch (Exception exception) {
                 String debugAddress = BuildConfig.DEBUG
                         ? "\nАдрес в APK: " + BackendConfig.baseUrl()
@@ -508,6 +662,7 @@ public final class MainActivity extends Activity {
                     routeId = finalResponse.routeId;
                     routeVersion = finalResponse.routeVersion;
                     routeCityId = cityId;
+                    routeFinished = false;
                     routeLocationDirty = false;
                     lastSuccessfulResult = finalResponse.message;
                     result.setText(finalResponse.message);
@@ -521,6 +676,7 @@ public final class MainActivity extends Activity {
                     mapButton.setEnabled(true);
                     currentPoints.clear();
                     currentPoints.addAll(finalResponse.points);
+                    routeSnapshot = ApiClient.routeSnapshot(finalResponse);
                     pointEditor.setVisibility(View.GONE);
                     persistRouteState(text);
                     openMap();
@@ -747,6 +903,7 @@ public final class MainActivity extends Activity {
         requestInFlight = busy;
         submit.setEnabled(!busy);
         returnToRouteButton.setEnabled(!busy);
+        if (routeControlButton != null) routeControlButton.setEnabled(!busy);
         editPointsButton.setEnabled(!busy && routeId != null);
         startWalkButton.setEnabled(!busy && routeId != null);
         mapButton.setEnabled(!busy && routeId != null);
@@ -800,7 +957,8 @@ public final class MainActivity extends Activity {
                 .putInt("routeVersion", routeVersion)
                 .putString("routeCityId", routeCityId)
                 .putString("lastSuccessfulResult", lastSuccessfulResult)
-                .putString("routeQuery", queryText);
+                .putString("routeQuery", queryText).putString("routeSnapshot", routeSnapshot)
+                .putBoolean("routeFinished", routeFinished);
         editor.remove("startLatBits").remove("startLonBits").remove("startAccuracyBits");
         editor.putBoolean("routeLocationDirty", routeLocationDirty)
                 .remove("routeStartLatBits").remove("routeStartLonBits");
@@ -813,12 +971,20 @@ public final class MainActivity extends Activity {
         routeVersion = preferences.getInt("routeVersion", 0);
         routeCityId = preferences.getString("routeCityId", null);
         lastSuccessfulResult = preferences.getString("lastSuccessfulResult", null);
+        routeSnapshot = preferences.getString("routeSnapshot", null);
+        routeFinished = preferences.getBoolean("routeFinished", false);
         preferences.edit().remove("startLatBits").remove("startLonBits")
                 .remove("startAccuracyBits").apply();
         routeLocationDirty = preferences.getBoolean("routeLocationDirty", false);
         queryEditMode = preferences.getBoolean("queryEditMode", false);
         if (routeId == null || routeVersion < 1 || routeCityId == null || lastSuccessfulResult == null) {
             routeId = null;
+            routeVersion = 0;
+            routeCityId = null;
+            lastSuccessfulResult = null;
+            routeSnapshot = null;
+            routeFinished = false;
+            routeLocationDirty = false;
             return;
         }
         city.setSelection(0);
@@ -835,6 +1001,8 @@ public final class MainActivity extends Activity {
         out.putInt("routeVersion", routeVersion);
         out.putString("routeCityId", routeCityId);
         out.putString("lastSuccessfulResult", lastSuccessfulResult);
+        out.putString("routeSnapshot", routeSnapshot);
+        out.putBoolean("routeFinished", routeFinished);
         out.putLong("retryAllowedAtMillis", retryAllowedAtMillis);
         if (startLat != null && startLon != null) {
             out.putDouble("startLat", startLat);
@@ -1148,10 +1316,41 @@ public final class MainActivity extends Activity {
         intent.putExtra(MapActivity.EXTRA_ROUTE_ID, routeId);
         intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
         intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
+        intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT, routeSnapshot);
+        intent.putExtra(MapActivity.EXTRA_HISTORY_READ_ONLY, false);
         if (startLat != null && startLon != null) {
             intent.putExtra(MapActivity.EXTRA_USER_LAT, startLat);
             intent.putExtra(MapActivity.EXTRA_USER_LON, startLon);
         }
+        startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
+    }
+
+    private void detachFinishedRouteForNewBuild() {
+        routeId = null;
+        routeVersion = 0;
+        routeCityId = null;
+        lastSuccessfulResult = null;
+        routeSnapshot = null;
+        routeFinished = false;
+        routeLocationDirty = false;
+        currentPoints.clear();
+        clearActiveWalkState();
+        getPreferences(MODE_PRIVATE).edit()
+                .remove("routeId").remove("routeVersion").remove("routeCityId")
+                .remove("lastSuccessfulResult").remove("routeQuery").remove("routeSnapshot")
+                .remove("routeLocationDirty").remove("routeFinished").apply();
+        updateQueryEditActions();
+        refreshGuestHistory();
+    }
+
+    private void openHistoryMap() {
+        if (routeId == null || routeCityId == null) return;
+        Intent intent = new Intent(this, MapActivity.class);
+        intent.putExtra(MapActivity.EXTRA_ROUTE_ID, routeId);
+        intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
+        intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
+        intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT, routeSnapshot);
+        intent.putExtra(MapActivity.EXTRA_HISTORY_READ_ONLY, true);
         startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
     }
 
@@ -1221,13 +1420,290 @@ public final class MainActivity extends Activity {
     }
 
     private void updateQueryEditActions() {
-        if (returnToRouteButton == null) return;
-        // The route screen runs in a dedicated process. If that process is killed by
-        // the native map, MainActivity becomes visible again without a result Intent.
-        // Keep the return action available whenever a saved route still exists.
-        boolean visible = routeId != null;
-        returnToRouteButton.setVisibility(visible ? View.VISIBLE : View.GONE);
-        submit.setText(routeId == null ? "Построить маршрут" : "Изменить маршрут");
+        if (returnToRouteButton == null || routeActions == null || routeCard == null) return;
+        boolean hasRoute = routeId != null;
+        // A saved route is represented by one compact card. This avoids two large
+        // competing buttons when the user returns from an unfinished walk.
+        routeActions.setVisibility(View.VISIBLE);
+        returnToRouteButton.setVisibility(View.GONE);
+        routeCard.setVisibility(hasRoute ? View.VISIBLE : View.GONE);
+        submit.setText("Построить маршрут");
+        if (hasRoute) renderRouteCard(null);
+    }
+
+    private void refreshHomeRouteCard() {
+        if (routeCard == null || routeId == null) return;
+        String walkId = activeWalkIdForCurrentRoute();
+        if (walkId == null) {
+            renderRouteCard(null);
+            return;
+        }
+        final String requestedWalkId = walkId;
+        final String requestedRouteId = routeId;
+        network.execute(() -> {
+            ApiClient.WalkResult response;
+            try {
+                response = ApiClient.getWalk(requestedWalkId, sessionId());
+            } catch (Exception exception) {
+                response = new ApiClient.WalkResult(false, "", requestedWalkId, null,
+                        0, 0, false, -1, null);
+            }
+            ApiClient.WalkResult finalResponse = response;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || !requestedRouteId.equals(routeId)) return;
+                boolean active = finalResponse.success && ("ACTIVE".equals(finalResponse.status)
+                        || "PAUSED".equals(finalResponse.status));
+                if (!active) clearActiveWalkState();
+                renderRouteCard(active ? finalResponse : null);
+            });
+        });
+    }
+
+    private void refreshGuestHistory() {
+        if (guestHistoryList == null || guestHistoryScroll == null) return;
+        final String currentRouteId = routeId;
+        final boolean hasCurrentRoute = currentRouteId != null;
+        network.execute(() -> {
+            List<ApiClient.GuestHistoryItem> items;
+            try { items = ApiClient.getGuestHistory(sessionId()); }
+            catch (Exception ignored) { items = Collections.emptyList(); }
+            List<ApiClient.GuestHistoryItem> finalItems = items;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                guestHistoryList.removeAllViews();
+                int remainingRouteSlots = hasCurrentRoute ? 2 : 3;
+                for (ApiClient.GuestHistoryItem item : finalItems) {
+                    if (item.routeId.equals(currentRouteId)) continue;
+                    if (remainingRouteSlots-- <= 0) break;
+                    addGuestHistoryCard(item);
+                }
+            });
+        });
+    }
+
+    private void addGuestHistoryCard(ApiClient.GuestHistoryItem item) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 7), UiKit.dp(this, 14), UiKit.dp(this, 7));
+        card.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE4E9E5, 14, this));
+        TextView title = UiKit.label(this, cityName(item.cityId) + ": " + item.title, 14, UiKit.TEXT);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD); title.setMaxLines(1);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END); card.addView(title);
+        TextView subtitle = UiKit.label(this, "Гостевой маршрут • " + item.pointCount + " мест • "
+                + item.totalMinutes + " мин", 12, UiKit.MUTED);
+        subtitle.setMaxLines(1); card.addView(subtitle);
+        card.setOnClickListener(view -> openGuestHistoryRoute(item));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 58));
+        params.bottomMargin = UiKit.dp(this, 6); guestHistoryList.addView(card, params);
+    }
+
+    private void openGuestHistoryRoute(ApiClient.GuestHistoryItem item) {
+        if (requestInFlight) return;
+        setNetworkBusy(true);
+        network.execute(() -> {
+            ApiClient.Result response;
+            try { response = ApiClient.getRoute(item.routeId, item.cityId, sessionId()); }
+            catch (Exception exception) { response = new ApiClient.Result(false, "Не удалось открыть маршрут.", null, 0); }
+            ApiClient.Result finalResponse = response;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (finalResponse.success) {
+                    Intent intent = new Intent(this, MapActivity.class);
+                    intent.putExtra(MapActivity.EXTRA_ROUTE_ID, item.routeId);
+                    intent.putExtra(MapActivity.EXTRA_CITY_ID, item.cityId);
+                    intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
+                    intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT,
+                            ApiClient.routeSnapshot(finalResponse));
+                    intent.putExtra(MapActivity.EXTRA_HISTORY_READ_ONLY, true);
+                    startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
+                } else result.setText(finalResponse.message);
+                finishNetwork(finalResponse.retryAfterSeconds);
+            });
+        });
+    }
+
+    private void renderRouteCard(ApiClient.WalkResult walk) {
+        if (routeCard == null || routeId == null) return;
+        if (routeFinished) {
+            routeCardTitle.setText(routeCityName() + ": " + (currentPoints.isEmpty()
+                    ? "Маршрут завершён" : currentPoints.get(0).name));
+            routeCardSubtitle.setText("Прогулка завершена • нажмите, чтобы посмотреть");
+            routeCardActivity.setVisibility(View.GONE);
+            routeCardIcon.setVisibility(View.VISIBLE);
+            routeCardIcon.setText("✓"); routeCardIcon.setTextColor(UiKit.MUTED);
+            routeCardIcon.setBackground(UiKit.rounded(UiKit.SOFT, 18, this));
+            routeCard.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE4E9E5, 16, this));
+            routeControlButton.setVisibility(View.GONE);
+            routeCard.setOnClickListener(view -> openHistoryMap());
+            return;
+        }
+        routeControlButton.setVisibility(View.VISIBLE);
+        // renderRouteCard() previously left the history click listener behind
+        // after a completed route. Always restore normal current-route
+        // navigation for READY/ACTIVE/PAUSED states.
+        routeCard.setOnClickListener(view -> returnToCurrentRoute());
+        boolean active = walk != null && walk.success && ("ACTIVE".equals(walk.status)
+                || "PAUSED".equals(walk.status));
+        String cityName = routeCityName();
+        String title = "Маршрут по " + routeCityPrepositionalName();
+        if (!currentPoints.isEmpty()) {
+            title = cityName + ": " + currentPoints.get(0).name;
+            if (currentPoints.size() > 1) title += " и ещё";
+        }
+        routeCardTitle.setText(title);
+        if (active) {
+            int pointNumber = Math.max(1, walk.currentPointOrder + 1);
+            boolean paused = "PAUSED".equals(walk.status);
+            String status = paused ? "На паузе" : "Сейчас";
+            String pointText = "Точка " + pointNumber;
+            if (!currentPoints.isEmpty()) {
+                pointText += " из " + Math.max(pointNumber, currentPoints.size());
+            }
+            routeCardSubtitle.setText(status + " • " + pointText);
+            routeCardActivity.setVisibility(View.VISIBLE);
+            routeCardIcon.setVisibility(View.VISIBLE);
+            routeCardActivity.setText(paused ? "Ⅱ  Прогулка на паузе" : "◉  Маршрут идёт");
+            routeCardActivity.setTextColor(paused ? 0xFF7C8580 : UiKit.RED);
+            routeCard.setBackground(UiKit.bordered(0xFFFFFFFF,
+                    paused ? 0xFFDDE3DF : 0xFFFF9B9B, 16, this));
+            routeControlButton.setText("Ⅱ / ■");
+            routeControlButton.setTextSize(22);
+            routeControlButton.setBackground(UiKit.rounded(paused
+                    ? 0xFF98A19D : UiKit.RED, 14, this));
+            routeControlButton.setContentDescription("Поставить прогулку на паузу или завершить");
+            LinearLayout.LayoutParams buttonParams = (LinearLayout.LayoutParams)
+                    routeControlButton.getLayoutParams();
+            buttonParams.width = UiKit.dp(this, 112);
+            buttonParams.height = UiKit.dp(this, 56);
+            routeControlButton.setLayoutParams(buttonParams);
+            LinearLayout.LayoutParams cardParams = (LinearLayout.LayoutParams) routeCard.getLayoutParams();
+            cardParams.height = UiKit.dp(this, 82);
+            routeCard.setLayoutParams(cardParams);
+        } else {
+            routeCardSubtitle.setText("Маршрут готов • начните, когда будете на месте");
+            routeCardActivity.setVisibility(View.GONE);
+            routeCardIcon.setVisibility(View.GONE);
+            routeCard.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE4E9E5, 16, this));
+            routeControlButton.setText("▶ / ×");
+            routeControlButton.setTextSize(18);
+            routeControlButton.setBackground(UiKit.rounded(UiKit.GREEN, 14, this));
+            routeControlButton.setContentDescription("Начать прогулку или отменить маршрут");
+            LinearLayout.LayoutParams buttonParams = (LinearLayout.LayoutParams)
+                    routeControlButton.getLayoutParams();
+            buttonParams.width = UiKit.dp(this, 96);
+            buttonParams.height = UiKit.dp(this, 46);
+            routeControlButton.setLayoutParams(buttonParams);
+            LinearLayout.LayoutParams cardParams = (LinearLayout.LayoutParams) routeCard.getLayoutParams();
+            cardParams.height = UiKit.dp(this, 66);
+            routeCard.setLayoutParams(cardParams);
+        }
+        routeControlButton.setEnabled(!requestInFlight);
+    }
+
+    private String routeCityName() {
+        if ("tula".equals(routeCityId)) return "Тула";
+        if ("vladimir".equals(routeCityId)) return "Владимир";
+        if ("moscow".equals(routeCityId)) return "Москва";
+        if ("borovsk".equals(routeCityId)) return "Боровск";
+        return "город";
+    }
+
+    private String routeCityPrepositionalName() {
+        if ("tula".equals(routeCityId)) return "Туле";
+        if ("vladimir".equals(routeCityId)) return "Владимиру";
+        if ("moscow".equals(routeCityId)) return "Москве";
+        if ("borovsk".equals(routeCityId)) return "Боровске";
+        return "городе";
+    }
+
+    private void showRouteControlMenu() {
+        if (requestInFlight || routeId == null) return;
+        String walkId = activeWalkIdForCurrentRoute();
+        if (walkId == null) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Маршрут готов")
+                    .setItems(new String[]{"Начать прогулку", "Отменить маршрут"},
+                            (dialog, which) -> {
+                                if (which == 0) startWalkOrContinue();
+                                else confirmRouteReset();
+                            })
+                    .show();
+            return;
+        }
+        showHomeWalkMenu(walkId);
+    }
+
+    private void showHomeWalkMenu(String walkId) {
+        final String requestedWalkId = walkId;
+        network.execute(() -> {
+            ApiClient.WalkResult response;
+            try {
+                response = ApiClient.getWalk(requestedWalkId, sessionId());
+            } catch (Exception exception) {
+                response = new ApiClient.WalkResult(false, "Не удалось загрузить прогулку.",
+                        requestedWalkId, null, 0, 0, false, -1, null);
+            }
+            ApiClient.WalkResult finalResponse = response;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (!finalResponse.success || !("ACTIVE".equals(finalResponse.status)
+                        || "PAUSED".equals(finalResponse.status))) {
+                    clearActiveWalkState();
+                    renderRouteCard(null);
+                    return;
+                }
+                boolean paused = "PAUSED".equals(finalResponse.status);
+                String[] actions = paused
+                        ? new String[]{"Продолжить прогулку", "Завершить прогулку"}
+                        : new String[]{"Поставить на паузу", "Завершить прогулку"};
+                new AlertDialog.Builder(this)
+                        .setTitle("Управление прогулкой")
+                        .setItems(actions, (dialog, which) -> {
+                            if (which == 0) sendHomeWalkAction(requestedWalkId,
+                                    paused ? "RESUME" : "PAUSE");
+                            else confirmHomeWalkStop(requestedWalkId);
+                        })
+                        .show();
+            });
+        });
+    }
+
+    private void confirmHomeWalkStop(String walkId) {
+        new AlertDialog.Builder(this)
+                .setTitle("Завершить прогулку?")
+                .setMessage("Прогулка закончится, но маршрут останется на главном экране.")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Завершить", (dialog, which) -> sendHomeWalkAction(walkId, "STOP"))
+                .show();
+    }
+
+    private void sendHomeWalkAction(String walkId, String action) {
+        if (requestInFlight) return;
+        setNetworkBusy(true);
+        network.execute(() -> {
+            ApiClient.WalkResult response;
+            try {
+                response = ApiClient.walkAction(walkId, sessionId(), action);
+            } catch (Exception exception) {
+                response = new ApiClient.WalkResult(false, "Не удалось изменить состояние прогулки.",
+                        walkId, null, 0, 0, false, -1, null);
+            }
+            ApiClient.WalkResult finalResponse = response;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (finalResponse.success && ("ACTIVE".equals(finalResponse.status)
+                        || "PAUSED".equals(finalResponse.status))) {
+                    renderRouteCard(finalResponse);
+                } else if (finalResponse.success) {
+                    clearActiveWalkState();
+                    renderRouteCard(null);
+                } else {
+                    result.setText(finalResponse.message);
+                }
+                finishNetwork(0);
+            });
+        });
     }
 
     private void startWalkOrContinue() {
@@ -1280,7 +1756,9 @@ public final class MainActivity extends Activity {
         intent.putExtra(MapActivity.EXTRA_ROUTE_ID, routeId);
         intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
         intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
+        intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT, routeSnapshot);
         intent.putExtra(MapActivity.EXTRA_WALK_ID, walkId);
+        intent.putExtra(MapActivity.EXTRA_HISTORY_READ_ONLY, false);
         startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
     }
 
@@ -1323,6 +1801,8 @@ public final class MainActivity extends Activity {
         routeVersion = 0;
         routeCityId = null;
         lastSuccessfulResult = null;
+        routeSnapshot = null;
+        routeFinished = false;
         routeLocationDirty = false;
         queryEditMode = false;
         retryAllowedAtMillis = 0;
@@ -1341,7 +1821,8 @@ public final class MainActivity extends Activity {
         getPreferences(MODE_PRIVATE).edit()
                 .remove("routeId").remove("routeVersion").remove("routeCityId")
                 .remove("lastSuccessfulResult").remove("routeQuery")
-                .remove("routeLocationDirty").remove("queryEditMode").apply();
+                .remove("routeSnapshot")
+                .remove("routeLocationDirty").remove("queryEditMode").remove("routeFinished").apply();
         clearActiveWalkState();
         updateQueryEditActions();
     }
@@ -1357,6 +1838,7 @@ public final class MainActivity extends Activity {
                 result.setText("Экран карты закрылся, но маршрут сохранён. "
                         + "Нажмите «Вернуться к маршруту».");
             }
+            refreshHomeRouteCard();
             return;
         }
         String returnedWalkId = data.getStringExtra(MapActivity.EXTRA_WALK_ID);
@@ -1369,6 +1851,11 @@ public final class MainActivity extends Activity {
         String action = data.getStringExtra(MapActivity.EXTRA_RESULT_ACTION);
         if (MapActivity.ACTION_CANCEL_ROUTE.equals(action)) {
             clearLocalRouteState("Маршрут отменён. Можно составить новый.");
+        } else if (MapActivity.ACTION_WALK_STOPPED.equals(action)) {
+            routeFinished = true;
+            persistRouteState(query.getText().toString().trim());
+            clearActiveWalkState();
+            updateQueryEditActions();
         } else if (MapActivity.ACTION_EDIT_QUERY.equals(action)) {
             queryEditMode = true;
             persistQueryEditMode();
@@ -1379,6 +1866,8 @@ public final class MainActivity extends Activity {
         } else if (MapActivity.ACTION_EDIT_POINTS.equals(action)) {
             loadPointEditor();
         }
+        refreshHomeRouteCard();
+        refreshGuestHistory();
     }
 
     @Override protected void onResume() {
@@ -1401,6 +1890,7 @@ public final class MainActivity extends Activity {
             editPointsButton.setEnabled(routeId != null);
             resetRouteButton.setEnabled(routeId != null);
         }
+        refreshHomeRouteCard();
     }
 
     @Override protected void onDestroy() {

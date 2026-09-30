@@ -120,6 +120,26 @@ def test_pilot_cities_are_explicit():
     ]}
 
 
+def test_guest_history_keeps_only_three_newest_routes_for_its_owner():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created_ids = []
+    for index in range(4):
+        response = client.post("/v1/routes", headers=headers, json={
+            "cityId": "tula", "query": f"История {index} в центре два часа",
+            "deviceSessionId": session,
+        })
+        assert response.status_code == 200
+        created_ids.append(response.json()["routeId"])
+    history = client.get("/v1/routes/history", headers=headers)
+    assert history.status_code == 200
+    items = history.json()["items"]
+    assert len(items) == 3
+    assert {item["routeId"] for item in items} == set(created_ids[-3:])
+
+
 def test_client_is_limited_to_five_expensive_requests_per_minute():
     app.dependency_overrides[get_geo_provider] = FakeGeo
     session = str(uuid4())
@@ -229,7 +249,8 @@ def test_walk_start_arrival_pause_resume_and_stop():
     assert first.status_code == second.status_code == 200
     assert first.json()["pointReached"] is False
     assert second.json()["pointReached"] is True
-    assert second.json()["walk"]["status"] == "COMPLETED"
+    assert second.json()["walk"]["status"] == "ACTIVE"
+    assert second.json()["walk"]["finalPointVisitStartedAt"] is not None
     assert len(second.json()["walk"]["visits"]) == 1
     limited = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
         "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,

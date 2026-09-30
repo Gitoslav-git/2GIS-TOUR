@@ -12,6 +12,8 @@ from .geo import (GeoConstraintNotFound, GeoProvider, GeoRouteNotFound,
 from .models import (CreateRoute, PlaceCandidate, QueryPreview, Route, RouteLeg,
                      RoutePoint)
 from .planning_debug import planning_log
+from .visit_categories import (minimum_visit_minutes,
+                               visit_minutes as visit_duration_minutes)
 
 
 class RouteNotFound(Exception):
@@ -278,7 +280,7 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         startSource=start_source, maxWalkingMinutes=preview.maxWalkingMinutes,
         planningStatus=planning_status, durationUtilization=round(utilization, 3),
         planningScore=round(best.score, 2), planningAttempts=max(1, attempts),
-        unmetPreferences=unmet, requestedMinutes=target_minutes,
+        unmetPreferences=unmet, requestedMinutes=target_minutes, routePace=preview.routePace,
         totalMinutes=total_minutes, unusedMinutes=unused_minutes,
         points=route_points, legs=legs, warnings=warnings,
     )
@@ -402,9 +404,11 @@ def _approximate_route(candidates: list[PlaceCandidate], preview: QueryPreview,
         if (preview.maxTotalWalkingDistanceMeters is not None
                 and walking_distance + distance > preview.maxTotalWalkingDistanceMeters):
             continue
-        visit_seconds = _visit_minutes(candidate, preview.routePace) * 60
+        visit_seconds = visit_duration_minutes(candidate, preview.routePace) * 60
         if elapsed + leg_seconds + visit_seconds > budget_seconds:
-            continue
+            visit_seconds = minimum_visit_minutes(candidate) * 60
+            if elapsed + leg_seconds + visit_seconds > budget_seconds:
+                continue
         selected.append(candidate)
         current = candidate.lat, candidate.lon
         elapsed += leg_seconds + visit_seconds
@@ -431,9 +435,11 @@ def _materialize_plan(plan: _RoutePlan, preview: QueryPreview, geo: GeoProvider,
         if (preview.maxWalkingDistanceMeters is not None
                 and distance > preview.maxWalkingDistanceMeters):
             continue
-        visit_minutes = _visit_minutes(candidate, preview.routePace)
-        if built.elapsed_seconds + visit_minutes * 60 > budget_seconds:
-            continue
+        dwell_minutes = visit_duration_minutes(candidate, preview.routePace)
+        if built.elapsed_seconds + dwell_minutes * 60 > budget_seconds:
+            dwell_minutes = minimum_visit_minutes(candidate)
+            if built.elapsed_seconds + dwell_minutes * 60 > budget_seconds:
+                continue
         try:
             leg = routing_budget.walking_leg(
                 geo, current, (candidate.lat, candidate.lon), len(built.points), reserve,
@@ -457,16 +463,16 @@ def _materialize_plan(plan: _RoutePlan, preview: QueryPreview, geo: GeoProvider,
                 and built.walking_distance + leg.distanceMeters
                 > preview.maxTotalWalkingDistanceMeters):
             continue
-        projected = built.elapsed_seconds + leg.durationSeconds + visit_minutes * 60
+        projected = built.elapsed_seconds + leg.durationSeconds + dwell_minutes * 60
         if projected > budget_seconds:
             continue
         arrival = local_now + timedelta(seconds=built.elapsed_seconds + leg.durationSeconds)
-        schedule_status = schedule_status_at(candidate.schedule, arrival, visit_minutes)
+        schedule_status = schedule_status_at(candidate.schedule, arrival, dwell_minutes)
         if schedule_status == "CLOSED":
             continue
         built.points.append(RoutePoint(
             order=len(built.points) + 1, placeId=candidate.placeId, name=candidate.name,
-            lat=candidate.lat, lon=candidate.lon, visitMinutes=visit_minutes,
+            lat=candidate.lat, lon=candidate.lon, visitMinutes=dwell_minutes,
             scheduleStatus=schedule_status, isFood=candidate.isFood,
         ))
         built.legs.append(leg)
@@ -722,7 +728,7 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
 
     for candidate in candidates:
         old = previous.get(candidate.placeId)
-        visit_minutes = old.visitMinutes if old else (60 if candidate.isFood else 40)
+        visit_minutes = old.visitMinutes if old else visit_duration_minutes(candidate, source.routePace)
         try:
             leg = geo.walking_leg(current, (candidate.lat, candidate.lon),
                                   len(route_points), len(route_points) + 1)
@@ -888,20 +894,6 @@ def _candidate_interest_value(candidate: PlaceCandidate, preview: QueryPreview) 
     )
 
 
-def _visit_minutes(candidate: PlaceCandidate, pace: str) -> int:
-    searchable = " ".join([candidate.name, *candidate.rubrics]).casefold().replace("ё", "е")
-    if candidate.isFood:
-        baseline = 60
-    elif any(word in searchable for word in ("музей", "галере", "выстав", "зоопарк")):
-        baseline = 75
-    elif any(word in searchable for word in ("парк", "сад", "набереж", "кремль")):
-        baseline = 50
-    elif any(word in searchable for word in ("памятник", "скульптур", "арт-объект")):
-        baseline = 25
-    else:
-        baseline = 40
-    multiplier = {"RELAXED": 1.25, "NORMAL": 1.0, "INTENSIVE": 0.75}[pace]
-    return max(15, min(120, round(baseline * multiplier / 5) * 5))
 
 
 def _good_duration_utilization() -> float:

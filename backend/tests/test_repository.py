@@ -50,7 +50,7 @@ def test_atomic_replace_rejects_stale_version():
 
 
 def test_expired_guest_route_is_not_returned(monkeypatch):
-    monkeypatch.setenv("GULYAY_ROUTE_RETENTION_HOURS", "1")
+    monkeypatch.setenv("GULYAY_ROUTE_RETENTION_MINUTES", "5")
     repository = RouteRepository(":memory:")
     owner, route_id = uuid4(), uuid4()
     payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)

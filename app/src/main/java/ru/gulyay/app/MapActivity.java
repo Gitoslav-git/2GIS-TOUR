@@ -85,9 +85,12 @@ public final class MapActivity extends ComponentActivity {
     static final String EXTRA_USER_LAT = "userLat";
     static final String EXTRA_USER_LON = "userLon";
     static final String EXTRA_RESULT_ACTION = "resultAction";
+    static final String EXTRA_ROUTE_SNAPSHOT = "routeSnapshot";
+    static final String EXTRA_HISTORY_READ_ONLY = "historyReadOnly";
     static final String ACTION_CANCEL_ROUTE = "cancelRoute";
     static final String ACTION_EDIT_QUERY = "editQuery";
     static final String ACTION_EDIT_POINTS = "editPoints";
+    static final String ACTION_WALK_STOPPED = "walkStopped";
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private TextView status;
@@ -344,7 +347,7 @@ public final class MapActivity extends ComponentActivity {
 
         close.setOnClickListener(view -> {
             if (pointEditing) cancelPointEditing();
-            else confirmCancelRoute();
+            else returnToMain();
         });
         editQuery.setOnClickListener(view -> returnForEdit(ACTION_EDIT_QUERY));
         editPoints.setOnClickListener(view -> {
@@ -353,7 +356,7 @@ public final class MapActivity extends ComponentActivity {
         });
         primaryAction.setOnClickListener(view -> {
             if (walk != null && walk.success && ("ACTIVE".equals(walk.status)
-                    || "PAUSED".equals(walk.status))) confirmCancelRoute();
+                    || "PAUSED".equals(walk.status))) showWalkMenu();
             else startWalk();
         });
         pauseResume.setOnClickListener(view -> {
@@ -362,15 +365,41 @@ public final class MapActivity extends ComponentActivity {
             }
         });
 
+        openRouteFromIntent();
+    }
+
+    @Override public void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        // MapActivity can be reused by Android. A cached result is valid only
+        // for the exact route that created it; otherwise a history preview can
+        // be shown instead of the newly generated route.
+        route = null;
+        walk = null;
+        routeViewModel.route = null;
+        routeViewModel.walk = null;
+        openRouteFromIntent();
+    }
+
+    private void openRouteFromIntent() {
+        String requestedRouteId = getIntent().getStringExtra(EXTRA_ROUTE_ID);
         boolean walkMode = getIntent().getStringExtra(EXTRA_WALK_ID) != null;
         route = routeViewModel.route;
         walk = routeViewModel.walk;
-        if (route == null) {
+        boolean cachedRouteMatches = route != null && requestedRouteId != null
+                && requestedRouteId.equals(route.routeId);
+        if (!cachedRouteMatches) {
+            // ViewModel survives a recreation. Never let that survival cross
+            // a route boundary.
+            route = null;
+            walk = null;
+            routeViewModel.route = null;
+            routeViewModel.walk = null;
             loadRoute();
-        } else {
-            showRouteStatus();
-            initializeMapIfReady();
+            return;
         }
+        showRouteStatus();
+        initializeMapIfReady();
         if (walkMode) {
             if (walk == null) loadWalk(); else showWalkStatus();
         }
@@ -516,13 +545,28 @@ public final class MapActivity extends ComponentActivity {
                 if (isFinishing() || isDestroyed()) return;
                 route = finalResponse;
                 if (!route.success) {
-                    status.setText(route.message);
-                    return;
+                    ApiClient.Result saved = ApiClient.routeFromSnapshot(
+                            getIntent().getStringExtra(EXTRA_ROUTE_SNAPSHOT));
+                    if (saved == null) {
+                        status.setText(route.message);
+                        return;
+                    }
+                    route = saved;
+                    status.setText("Backend временно недоступен: открыт сохранённый маршрут.");
                 }
                 routeViewModel.route = route;
                 showRouteStatus();
                 initializeMapIfReady();
-                syncLocationTracking();
+                // The home-screen play button creates the walk first and then
+                // opens this activity with EXTRA_WALK_ID. Route loading is
+                // asynchronous, so continue by loading that walk once the
+                // route is ready; otherwise the map incorrectly stays in the
+                // READY state while the backend already reports ACTIVE.
+                if (getIntent().getStringExtra(EXTRA_WALK_ID) != null) {
+                    loadWalk();
+                } else {
+                    syncLocationTracking();
+                }
             });
         });
     }
@@ -533,6 +577,21 @@ public final class MapActivity extends ComponentActivity {
             return;
         }
         if (route == null || !route.success) return;
+        if (getIntent().getBooleanExtra(EXTRA_HISTORY_READ_ONLY, false)) {
+            screenTitle.setText("Маршрут из истории");
+            routeSummary.setText(route.points.isEmpty() ? "Маршрут" : route.points.get(0).name);
+            status.setText("Просмотр завершённого маршрута • " + route.points.size() + " мест");
+            guidancePanel.setVisibility(View.GONE);
+            mapRouteSummary.setVisibility(View.VISIBLE);
+            mapRouteSummary.setText("Маршрут завершён");
+            primaryAction.setVisibility(View.GONE);
+            editQuery.setVisibility(View.GONE);
+            editPoints.setVisibility(View.GONE);
+            pauseResume.setVisibility(View.GONE);
+            stopWalk.setVisibility(View.GONE);
+            renderPointList(0);
+            return;
+        }
         screenTitle.setText("Прогулка по " + cityName() + "\nМаршрут построен");
         routeSummary.setText(route.points.isEmpty() ? "Маршрут" : route.points.get(0).name);
         String time = route.totalMinutes > 0 ? route.totalMinutes + " мин" : "время рассчитано";
@@ -592,15 +651,25 @@ public final class MapActivity extends ComponentActivity {
             row.addView(number, new LinearLayout.LayoutParams(
                     UiKit.dp(this, 32), UiKit.dp(this, 32)));
             String suffix = point.food ? " • заведение" : "";
-            TextView name = UiKit.label(this, point.name + suffix, 13, UiKit.TEXT);
+            TextView name = UiKit.label(this, point.name + suffix + "\n" + travelToPoint(i), 13, UiKit.TEXT);
             name.setMaxLines(2);
             name.setEllipsize(android.text.TextUtils.TruncateAt.END);
             name.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 8), 0);
             row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
             pointList.addView(row, new LinearLayout.LayoutParams(
-                    -1, UiKit.dp(this, 48)));
+                    -1, UiKit.dp(this, 54)));
         }
         pointListScroll.post(() -> pointListScroll.scrollTo(0, 0));
+    }
+
+    private String travelToPoint(int pointIndex) {
+        ApiClient.PlaceOption target = route.points.get(pointIndex);
+        double lat = pointIndex == 0 ? routeStartLat() : route.points.get(pointIndex - 1).lat;
+        double lon = pointIndex == 0 ? routeStartLon() : route.points.get(pointIndex - 1).lon;
+        int meters = (int) Math.round(meters(lat, lon, target.lat, target.lon));
+        int minutes = Math.max(1, (int) Math.ceil(meters / 75.0));
+        return (meters >= 1000 ? String.format(java.util.Locale.US, "%.1f км", meters / 1000.0)
+                : meters + " м") + " • " + minutes + " мин пешком";
     }
 
     private void enterPointEditing() {
@@ -1077,25 +1146,44 @@ public final class MapActivity extends ComponentActivity {
         }
         screenTitle.setText("Прогулка по " + cityName() + "\nМаршрут запущен");
         routeSummary.setText(pointName);
-        status.setText("◷  Осталось ≈" + walk.remainingMinutes + " мин"
-                + "              ●  точка " + walk.currentPointOrder);
+        if (walk.finalPointVisitInProgress) {
+            status.setText("PAUSED".equals(walk.status)
+                    ? "Последняя точка на паузе. До завершения останется ≈"
+                            + walk.remainingMinutes + " мин после продолжения."
+                    : "Вы на последней точке. Прогулка завершится через ≈"
+                            + walk.remainingMinutes + " мин.");
+        } else {
+            status.setText("◷  Осталось ≈" + walk.remainingMinutes + " мин"
+                    + "              ●  Точка " + walk.currentPointOrder + " из "
+                    + (route == null ? walk.currentPointOrder : route.points.size()));
+        }
         if ("COMPLETED".equals(walk.status) || "STOPPED".equals(walk.status)) {
             guidancePanel.setVisibility(View.GONE);
             mapRouteSummary.setVisibility(View.VISIBLE);
             mapRouteSummary.setText("COMPLETED".equals(walk.status)
                     ? "Маршрут завершён" : "Прогулка остановлена");
+        } else if ("PAUSED".equals(walk.status)) {
+            guidanceTitle.setText("Прогулка на паузе");
+            guidanceSubtitle.setText("Продолжите, когда будете готовы");
+            guidanceTurnIcon.setText("Ⅱ");
+            mapRouteSummary.setVisibility(View.GONE);
+            guidancePanel.setVisibility(View.VISIBLE);
         } else {
             updateGuidance(latestUserLat, latestUserLon);
         }
         renderPointList(walk.currentPointOrder);
         boolean active = "ACTIVE".equals(walk.status);
         boolean paused = "PAUSED".equals(walk.status);
-        pauseResume.setEnabled(active || paused);
-        pauseResume.setText(paused ? "Продолжить" : "Пауза");
+        pauseResume.setVisibility(View.GONE);
         stopWalk.setEnabled(active || paused);
-        primaryAction.setText("×");
+        primaryAction.setText("Ⅱ / ■");
+        primaryAction.setContentDescription("Пауза или остановка прогулки");
         primaryAction.setTextColor(0xFFFFFFFF);
-        primaryAction.setBackground(UiKit.rounded(UiKit.RED, 14, this));
+        primaryAction.setBackground(UiKit.rounded(paused ? 0xFF98A19D : UiKit.RED, 14, this));
+        if (paused) {
+            mapRouteSummary.setVisibility(View.VISIBLE);
+            mapRouteSummary.setText("Прогулка на паузе");
+        }
         editQuery.setEnabled(active || paused);
         editPoints.setEnabled(false);
         if ("COMPLETED".equals(walk.status) || "STOPPED".equals(walk.status)) {
@@ -1210,7 +1298,6 @@ public final class MapActivity extends ComponentActivity {
 
     private void sendWalkAction(String action) {
         if (walk == null || !walk.success) return;
-        pauseResume.setEnabled(false);
         stopWalk.setEnabled(false);
         String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
         network.execute(() -> {
@@ -1230,7 +1317,6 @@ public final class MapActivity extends ComponentActivity {
                     status.setText(finalResponse.message);
                     boolean controllable = "ACTIVE".equals(walk.status)
                             || "PAUSED".equals(walk.status);
-                    pauseResume.setEnabled(controllable);
                     stopWalk.setEnabled(controllable);
                     return;
                 }
@@ -1238,6 +1324,12 @@ public final class MapActivity extends ComponentActivity {
                 routeViewModel.walk = walk;
                 showWalkStatus();
                 syncLocationTracking();
+                if ("STOP".equals(action)) {
+                    Intent data = new Intent();
+                    data.putExtra(EXTRA_RESULT_ACTION, ACTION_WALK_STOPPED);
+                    setResult(RESULT_OK, data);
+                    finish();
+                }
             });
         });
     }
@@ -1254,9 +1346,41 @@ public final class MapActivity extends ComponentActivity {
                 .show();
     }
 
+    private void showWalkMenu() {
+        if (walk == null || !walk.success
+                || !("ACTIVE".equals(walk.status) || "PAUSED".equals(walk.status))) {
+            return;
+        }
+        boolean paused = "PAUSED".equals(walk.status);
+        String[] actions = paused
+                ? new String[]{"Продолжить прогулку", "Завершить прогулку"}
+                : new String[]{"Поставить на паузу", "Завершить прогулку"};
+        new AlertDialog.Builder(this)
+                .setTitle("Управление прогулкой")
+                .setItems(actions, (dialog, which) -> {
+                    if (which == 0) {
+                        sendWalkAction(paused ? "RESUME" : "PAUSE");
+                    } else {
+                        confirmStopWalk();
+                    }
+                })
+                .show();
+    }
+
     private void returnForEdit(String action) {
         Intent data = new Intent();
         data.putExtra(EXTRA_RESULT_ACTION, action);
+        if (walk != null && walk.success && ("ACTIVE".equals(walk.status)
+                || "PAUSED".equals(walk.status))) {
+            data.putExtra(EXTRA_WALK_ID, walk.walkId);
+            data.putExtra(EXTRA_ROUTE_ID, getIntent().getStringExtra(EXTRA_ROUTE_ID));
+        }
+        setResult(RESULT_OK, data);
+        finish();
+    }
+
+    private void returnToMain() {
+        Intent data = new Intent();
         if (walk != null && walk.success && ("ACTIVE".equals(walk.status)
                 || "PAUSED".equals(walk.status))) {
             data.putExtra(EXTRA_WALK_ID, walk.walkId);
@@ -1305,7 +1429,7 @@ public final class MapActivity extends ComponentActivity {
 
     @Override public void onBackPressed() {
         if (pointEditing) cancelPointEditing();
-        else confirmCancelRoute();
+        else returnToMain();
     }
 
     private void stopLocationTracking() {

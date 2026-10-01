@@ -123,13 +123,17 @@ final class ApiClient {
     }
 
     static final class GuestHistoryItem {
-        final String routeId, cityId, title, updatedAt;
+        final String routeId, cityId, title, updatedAt, walkStatus;
         final int routeVersion, totalMinutes, pointCount;
         GuestHistoryItem(String routeId, int routeVersion, String cityId, String title,
-                         int totalMinutes, int pointCount, String updatedAt) {
+                         int totalMinutes, int pointCount, String updatedAt, String walkStatus) {
             this.routeId = routeId; this.routeVersion = routeVersion; this.cityId = cityId;
             this.title = title; this.totalMinutes = totalMinutes; this.pointCount = pointCount;
-            this.updatedAt = updatedAt;
+            this.updatedAt = updatedAt; this.walkStatus = walkStatus;
+        }
+
+        boolean finished() {
+            return "COMPLETED".equals(walkStatus) || "STOPPED".equals(walkStatus);
         }
     }
 
@@ -330,7 +334,8 @@ final class ApiClient {
                 result.add(new GuestHistoryItem(item.optString("routeId"),
                         item.optInt("routeVersion", 1), item.optString("cityId"),
                         item.optString("title", "Маршрут"), item.optInt("totalMinutes"),
-                        item.optInt("pointCount"), item.optString("updatedAt")));
+                        item.optInt("pointCount"), item.optString("updatedAt"),
+                        item.optString("walkStatus", null)));
             }
             return result;
         } finally {

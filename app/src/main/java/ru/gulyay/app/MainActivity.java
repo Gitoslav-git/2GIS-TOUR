@@ -13,6 +13,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.graphics.Typeface;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -40,6 +43,8 @@ public final class MainActivity extends Activity {
     private static final int LOCATION_PERMISSION_REQUEST = 75;
     private static final int ROUTE_SCREEN_REQUEST = 76;
     private static final long GEO_ATTEMPT_WINDOW_MILLIS = 60_000L;
+    private static final String ROUTE_LIFECYCLE_PREFERENCES = "route_lifecycle";
+    private static final String FINISHED_ROUTE_ID = "finishedRouteId";
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private Spinner city;
@@ -184,18 +189,34 @@ public final class MainActivity extends Activity {
         selectedFilters.setVisibility(View.GONE);
         content.addView(selectedFilters, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 38)));
 
+        FrameLayout queryBox = new FrameLayout(this);
+        queryBox.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE0E5E1, 20, this));
         query = new EditText(this);
         query.setHint("Например: хочу гулять 2 часа по центру и зайти поесть");
         query.setMinLines(compact ? 2 : 3);
         query.setMaxLines(compact ? 2 : 3);
         query.setTextSize(compact ? 14 : 16);
-        query.setGravity(Gravity.TOP);
-        query.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14), UiKit.dp(this, 16), UiKit.dp(this, 14));
-        query.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE0E5E1, 16, this));
+        query.setGravity(Gravity.CENTER_VERTICAL);
+        query.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 8),
+                UiKit.dp(this, compact ? 66 : 76), UiKit.dp(this, 8));
+        query.setBackgroundColor(0x00000000);
+        queryBox.addView(query, new FrameLayout.LayoutParams(-1, -1));
+        submit = UiKit.button(this, "▶", UiKit.GREEN_DARK, 0xFFFFFFFF);
+        submit.setTextSize(compact ? 21 : 24);
+        submit.setMinWidth(0);
+        submit.setMinHeight(0);
+        submit.setElevation(0f);
+        submit.setStateListAnimator(null);
+        submit.setPadding(0, 0, 0, 0);
+        FrameLayout.LayoutParams inlineSubmitParams = new FrameLayout.LayoutParams(
+                UiKit.dp(this, compact ? 46 : 54), UiKit.dp(this, compact ? 46 : 54),
+                Gravity.END | Gravity.CENTER_VERTICAL);
+        inlineSubmitParams.rightMargin = UiKit.dp(this, 8);
+        queryBox.addView(submit, inlineSubmitParams);
         LinearLayout.LayoutParams queryParams = new LinearLayout.LayoutParams(
                 -1, UiKit.dp(this, veryCompact ? 58 : (compact ? 64 : 82)));
         queryParams.topMargin = UiKit.dp(this, compact ? 5 : 8);
-        content.addView(query, queryParams);
+        content.addView(queryBox, queryParams);
 
         TextView filtersTitle = UiKit.label(this, "Быстрые фильтры", 14, UiKit.MUTED);
         filtersTitle.setPadding(0, UiKit.dp(this, compact ? 6 : 9), 0,
@@ -219,18 +240,11 @@ public final class MainActivity extends Activity {
         childrenFilterButton = addFilterButton(filters, "♟  С детьми", UiKit.GREEN);
         foodFilterButton = addFilterButton(filters, "⚑  Хочу поесть", 0xFFFF8A22);
         unusualFilterButton = addFilterButton(filters, "★  Необычные места", UiKit.GREEN);
+        refreshFilterUi();
         filtersViewport.addView(filtersScroll, new FrameLayout.LayoutParams(-1, -1));
         content.addView(filtersViewport, new LinearLayout.LayoutParams(
                 -1, UiKit.dp(this, compact ? 42 : 46)));
 
-        submit = UiKit.button(this, "Построить маршрут", UiKit.GREEN, 0xFFFFFFFF);
-        submit.setTextSize(compact ? 13 : 14);
-        submit.setSingleLine(true);
-        submit.setMinWidth(0);
-        submit.setMinHeight(0);
-        submit.setElevation(0f);
-        submit.setStateListAnimator(null);
-        submit.setPadding(UiKit.dp(this, 5), 0, UiKit.dp(this, 5), 0);
         returnToRouteButton = UiKit.button(this, "Вернуться к маршруту", UiKit.SOFT,
                 UiKit.GREEN_DARK);
         returnToRouteButton.setTextSize(compact ? 12 : 13);
@@ -247,18 +261,10 @@ public final class MainActivity extends Activity {
         routeActions.setBaselineAligned(false);
         routeActions.setClipChildren(true);
         routeActions.setClipToPadding(true);
-        LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(
-                0, UiKit.dp(this, compact ? 48 : 54), 1f);
-        routeActions.addView(submit, submitParams);
         LinearLayout.LayoutParams returnParams = new LinearLayout.LayoutParams(
                 0, UiKit.dp(this, compact ? 48 : 54), 1.18f);
-        returnParams.leftMargin = UiKit.dp(this, 6);
         routeActions.addView(returnToRouteButton, returnParams);
-        LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
-                -1, UiKit.dp(this, compact ? 48 : 54));
-        actionsParams.topMargin = UiKit.dp(this, compact ? 4 : 8);
-        actionsParams.bottomMargin = UiKit.dp(this, 4);
-        content.addView(routeActions, actionsParams);
+        routeActions.setVisibility(View.GONE);
         routeCard = new LinearLayout(this);
         routeCard.setOrientation(LinearLayout.HORIZONTAL);
         routeCard.setGravity(Gravity.CENTER_VERTICAL);
@@ -548,10 +554,30 @@ public final class MainActivity extends Activity {
     private void setFilterAppearance(Button button, boolean selected) {
         if (button == null) return;
         int accent = (Integer) button.getTag();
-        button.setTextColor(selected ? accent : UiKit.TEXT);
-        button.setText(button.getText().toString().replace("  ✓", "") + (selected ? "  ✓" : ""));
-        button.setBackground(selected ? UiKit.bordered(0xFFFFFFFF, accent, 14, this)
-                : UiKit.rounded(UiKit.SOFT, 14, this));
+        String icon;
+        String label;
+        if (button == durationFilterButton) {
+            icon = "◷"; label = "На 2 часа";
+        } else if (button == childrenFilterButton) {
+            icon = "♟"; label = "С детьми";
+        } else if (button == foodFilterButton) {
+            icon = "⚑"; label = "Хочу поесть";
+        } else {
+            icon = "★"; label = "Необычные места";
+        }
+        String suffix = selected ? "  ✓" : "";
+        SpannableString styled = new SpannableString(icon + "  " + label + suffix);
+        styled.setSpan(new ForegroundColorSpan(accent), 0, icon.length(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (selected) {
+            styled.setSpan(new ForegroundColorSpan(accent),
+                    styled.length() - 1, styled.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        button.setTextColor(UiKit.TEXT);
+        button.setText(styled);
+        button.setBackground(selected
+                ? UiKit.bordered(0xFFF7FFF9, accent, 16, this)
+                : UiKit.bordered(0xFFF4F7F4, 0xFFFFFFFF, 16, this));
     }
 
     private void addSelectedFilterChip(String text, boolean selected, Runnable remove, int accent) {
@@ -670,7 +696,7 @@ public final class MainActivity extends Activity {
                     persistQueryEditMode();
                     updateQueryEditActions();
                     if (activeWalkBeforeChange != null) clearActiveWalkState();
-                    submit.setText("Изменить маршрут");
+                    submit.setText("▶");
                     editPointsButton.setEnabled(true);
                     startWalkButton.setEnabled(true);
                     mapButton.setEnabled(true);
@@ -962,7 +988,10 @@ public final class MainActivity extends Activity {
         editor.remove("startLatBits").remove("startLonBits").remove("startAccuracyBits");
         editor.putBoolean("routeLocationDirty", routeLocationDirty)
                 .remove("routeStartLatBits").remove("routeStartLonBits");
-        editor.apply();
+        // Route lifecycle must survive an abrupt process death. In particular,
+        // losing routeFinished while keeping routeId revives a history item as
+        // a READY route on the next launch.
+        editor.commit();
     }
 
     private void restoreRouteState() {
@@ -973,6 +1002,7 @@ public final class MainActivity extends Activity {
         lastSuccessfulResult = preferences.getString("lastSuccessfulResult", null);
         routeSnapshot = preferences.getString("routeSnapshot", null);
         routeFinished = preferences.getBoolean("routeFinished", false);
+        reconcileFinishedRouteMarker();
         preferences.edit().remove("startLatBits").remove("startLonBits")
                 .remove("startAccuracyBits").apply();
         routeLocationDirty = preferences.getBoolean("routeLocationDirty", false);
@@ -990,7 +1020,29 @@ public final class MainActivity extends Activity {
         city.setSelection(0);
         query.setText(preferences.getString("routeQuery", ""));
         result.setText(lastSuccessfulResult);
-        submit.setText("Изменить маршрут");
+        submit.setText("▶");
+    }
+
+    private boolean reconcileFinishedRouteMarker() {
+        if (routeId == null || routeFinished) return false;
+        String terminalRouteId = getSharedPreferences(
+                ROUTE_LIFECYCLE_PREFERENCES, MODE_PRIVATE)
+                .getString(FINISHED_ROUTE_ID, null);
+        if (!routeId.equals(terminalRouteId)) return false;
+        routeFinished = true;
+        getPreferences(MODE_PRIVATE).edit()
+                .putBoolean("routeFinished", true).commit();
+        clearActiveWalkState();
+        return true;
+    }
+
+    private void markCurrentRouteFinished() {
+        if (routeId == null) return;
+        routeFinished = true;
+        getSharedPreferences(ROUTE_LIFECYCLE_PREFERENCES, MODE_PRIVATE).edit()
+                .putString(FINISHED_ROUTE_ID, routeId).commit();
+        persistRouteState(query.getText().toString().trim());
+        clearActiveWalkState();
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
@@ -1306,7 +1358,7 @@ public final class MainActivity extends Activity {
 
     private void showLocationRebuildIfNeeded() {
         if (routeId == null || !routeLocationDirty) return;
-        submit.setText("Перестроить от новой позиции");
+        submit.setText("▶");
         locationStatus.append(" Перестройте маршрут, чтобы учесть новый старт.");
     }
 
@@ -1427,7 +1479,7 @@ public final class MainActivity extends Activity {
         routeActions.setVisibility(View.VISIBLE);
         returnToRouteButton.setVisibility(View.GONE);
         routeCard.setVisibility(hasRoute ? View.VISIBLE : View.GONE);
-        submit.setText("Построить маршрут");
+        submit.setText("▶");
         if (hasRoute) renderRouteCard(null);
     }
 
@@ -1453,7 +1505,12 @@ public final class MainActivity extends Activity {
                 if (isFinishing() || isDestroyed() || !requestedRouteId.equals(routeId)) return;
                 boolean active = finalResponse.success && ("ACTIVE".equals(finalResponse.status)
                         || "PAUSED".equals(finalResponse.status));
-                if (!active) clearActiveWalkState();
+                if (finalResponse.success && ("STOPPED".equals(finalResponse.status)
+                        || "COMPLETED".equals(finalResponse.status))) {
+                    markCurrentRouteFinished();
+                } else if (!active) {
+                    clearActiveWalkState();
+                }
                 renderRouteCard(active ? finalResponse : null);
             });
         });
@@ -1471,6 +1528,15 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 guestHistoryList.removeAllViews();
+                boolean recoveredTerminalRoute = false;
+                for (ApiClient.GuestHistoryItem item : finalItems) {
+                    if (item.routeId.equals(currentRouteId) && item.finished()) {
+                        markCurrentRouteFinished();
+                        recoveredTerminalRoute = true;
+                        break;
+                    }
+                }
+                if (recoveredTerminalRoute) updateQueryEditActions();
                 int remainingRouteSlots = hasCurrentRoute ? 2 : 3;
                 for (ApiClient.GuestHistoryItem item : finalItems) {
                     if (item.routeId.equals(currentRouteId)) continue;
@@ -1696,7 +1762,7 @@ public final class MainActivity extends Activity {
                         || "PAUSED".equals(finalResponse.status))) {
                     renderRouteCard(finalResponse);
                 } else if (finalResponse.success) {
-                    clearActiveWalkState();
+                    markCurrentRouteFinished();
                     renderRouteCard(null);
                 } else {
                     result.setText(finalResponse.message);
@@ -1811,7 +1877,7 @@ public final class MainActivity extends Activity {
         query.setText("");
         placeSearch.setText("");
         pointEditor.setVisibility(View.GONE);
-        submit.setText("Построить маршрут");
+        submit.setText("▶");
         editPointsButton.setEnabled(false);
         startWalkButton.setEnabled(false);
         startWalkButton.setVisibility(View.GONE);
@@ -1852,9 +1918,7 @@ public final class MainActivity extends Activity {
         if (MapActivity.ACTION_CANCEL_ROUTE.equals(action)) {
             clearLocalRouteState("Маршрут отменён. Можно составить новый.");
         } else if (MapActivity.ACTION_WALK_STOPPED.equals(action)) {
-            routeFinished = true;
-            persistRouteState(query.getText().toString().trim());
-            clearActiveWalkState();
+            markCurrentRouteFinished();
             updateQueryEditActions();
         } else if (MapActivity.ACTION_EDIT_QUERY.equals(action)) {
             queryEditMode = true;
@@ -1873,6 +1937,11 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         if (startWalkButton == null) return;
+        boolean finishedRecovered = reconcileFinishedRouteMarker();
+        if (finishedRecovered) {
+            updateQueryEditActions();
+            refreshGuestHistory();
+        }
         SharedPreferences walk = getSharedPreferences("active_walk", MODE_PRIVATE);
         String activeWalkId = walk.getString("walkId", null);
         String activeRouteId = walk.getString("routeId", null);

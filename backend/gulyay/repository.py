@@ -221,6 +221,22 @@ class RouteRepository:
                 return state
         return None
 
+    def latest_walk_for_route(self, owner: UUID, route_id: UUID) -> WalkState | None:
+        """Return the latest persisted lifecycle state for one route."""
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT walk_json FROM walks
+                   WHERE owner_session = ? AND route_id = ?
+                   ORDER BY updated_at DESC, rowid DESC""",
+                (str(owner), str(route_id)),
+            ).fetchall()
+        for row in rows:
+            try:
+                return WalkState.model_validate_json(row[0])
+            except ValueError:
+                continue
+        return None
+
     def clear(self) -> None:
         with self._lock, self._connection:
             self._connection.execute("DELETE FROM walks")

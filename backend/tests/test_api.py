@@ -288,6 +288,10 @@ def test_walk_actions_require_valid_state_and_active_walk_is_unique():
     stopped = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
                           json={"action": "STOP"})
     assert stopped.status_code == 200 and stopped.json()["status"] == "STOPPED"
+    history = client.get("/v1/routes/history", headers=headers)
+    matching = next(item for item in history.json()["items"]
+                    if item["routeId"] == route_id)
+    assert matching["walkStatus"] == "STOPPED"
     assert client.get(
         f"/v1/routes/{route_id}/walks/active", headers=headers,
     ).status_code == 404
@@ -355,6 +359,35 @@ def test_search_and_edit_points_use_real_ids_and_preserve_requested_order():
     current = client.get(f"/v1/routes/{route_id}", headers=headers)
     assert current.status_code == 200
     assert current.json()["routeVersion"] == 2
+
+
+def test_paused_walk_is_rebased_and_can_resume_after_point_edit():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "История в центре два часа", "deviceSessionId": session})
+    route_id = created.json()["routeId"]
+    started = client.post(f"/v1/routes/{route_id}/walks", headers=headers,
+                          json={"routeVersion": 1})
+    walk_id = started.json()["walkId"]
+    paused = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
+                         json={"action": "PAUSE"})
+    assert paused.json()["status"] == "PAUSED"
+
+    revised = client.post(f"/v1/routes/{route_id}/revisions", headers=headers, json={
+        "baseVersion": 1, "mode": "EDIT_POINTS",
+        "pointIds": ["second-provider-id", "real-provider-id"],
+    })
+    assert revised.status_code == 200 and revised.json()["routeVersion"] == 2
+    rebased = client.get(f"/v1/walks/{walk_id}", headers=headers)
+    assert rebased.json()["status"] == "PAUSED"
+    assert rebased.json()["routeVersion"] == 2
+    resumed = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
+                          json={"action": "RESUME"})
+    assert resumed.status_code == 200 and resumed.json()["status"] == "ACTIVE"
+    assert resumed.json()["routeVersion"] == 2
 
 
 def test_failed_point_edit_keeps_previous_route_version():

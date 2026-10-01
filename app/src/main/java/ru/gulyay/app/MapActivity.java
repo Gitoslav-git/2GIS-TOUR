@@ -91,6 +91,8 @@ public final class MapActivity extends ComponentActivity {
     static final String ACTION_EDIT_QUERY = "editQuery";
     static final String ACTION_EDIT_POINTS = "editPoints";
     static final String ACTION_WALK_STOPPED = "walkStopped";
+    private static final String ROUTE_LIFECYCLE_PREFERENCES = "route_lifecycle";
+    private static final String FINISHED_ROUTE_ID = "finishedRouteId";
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private TextView status;
@@ -128,6 +130,7 @@ public final class MapActivity extends ComponentActivity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private boolean pointEditing;
     private boolean applyingPointChanges;
+    private boolean resumeAfterPointEditing;
     private float dragLastY;
     private Runnable pendingPlaceSearch;
     private int searchGeneration;
@@ -674,11 +677,47 @@ public final class MapActivity extends ComponentActivity {
 
     private void enterPointEditing() {
         if (route == null || !route.success || applyingPointChanges) return;
-        if (walk != null && walk.success && ("ACTIVE".equals(walk.status)
-                || "PAUSED".equals(walk.status))) {
-            Toast.makeText(this, "Сначала завершите активную прогулку.", Toast.LENGTH_SHORT).show();
+        if (walk != null && walk.success && "ACTIVE".equals(walk.status)) {
+            pauseWalkForPointEditing();
             return;
         }
+        resumeAfterPointEditing = false;
+        beginPointEditingUi();
+    }
+
+    private void pauseWalkForPointEditing() {
+        applyingPointChanges = true;
+        editPoints.setEnabled(false);
+        status.setText("Ставим прогулку на паузу для редактирования…");
+        String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+        network.execute(() -> {
+            ApiClient.WalkResult response;
+            try {
+                response = ApiClient.walkAction(walk.walkId, sessionId, "PAUSE");
+            } catch (Exception error) {
+                response = new ApiClient.WalkResult(false,
+                        "Не удалось поставить прогулку на паузу.", walk.walkId,
+                        walk.status, walk.currentPointOrder, walk.remainingMinutes,
+                        false, -1, null);
+            }
+            ApiClient.WalkResult finalResponse = response;
+            runOnUiThread(() -> {
+                applyingPointChanges = false;
+                if (isFinishing() || isDestroyed()) return;
+                editPoints.setEnabled(true);
+                if (!finalResponse.success || !"PAUSED".equals(finalResponse.status)) {
+                    status.setText(finalResponse.message);
+                    return;
+                }
+                walk = finalResponse;
+                routeViewModel.walk = walk;
+                resumeAfterPointEditing = true;
+                beginPointEditingUi();
+            });
+        });
+    }
+
+    private void beginPointEditingUi() {
         editingPoints.clear();
         editingPoints.addAll(route.points);
         pointEditing = true;
@@ -700,7 +739,45 @@ public final class MapActivity extends ComponentActivity {
         editingPoints.clear();
         pointEditing = false;
         restoreRouteLayout();
-        showRouteStatus();
+        finishPointEditing();
+    }
+
+    private void finishPointEditing() {
+        if (!resumeAfterPointEditing) {
+            showRouteStatus();
+            return;
+        }
+        resumeAfterPointEditing = false;
+        applyingPointChanges = true;
+        editPoints.setEnabled(false);
+        status.setText("Возобновляем прогулку…");
+        String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+        network.execute(() -> {
+            ApiClient.WalkResult response;
+            try {
+                response = ApiClient.walkAction(walk.walkId, sessionId, "RESUME");
+            } catch (Exception error) {
+                response = new ApiClient.WalkResult(false,
+                        "Маршрут сохранён, но прогулка осталась на паузе.", walk.walkId,
+                        walk.status, walk.currentPointOrder, walk.remainingMinutes,
+                        false, -1, null);
+            }
+            ApiClient.WalkResult finalResponse = response;
+            runOnUiThread(() -> {
+                applyingPointChanges = false;
+                if (isFinishing() || isDestroyed()) return;
+                editPoints.setEnabled(true);
+                if (finalResponse.success) {
+                    walk = finalResponse;
+                    routeViewModel.walk = walk;
+                    showWalkStatus();
+                    syncLocationTracking();
+                } else {
+                    showWalkStatus();
+                    status.setText(finalResponse.message);
+                }
+            });
+        });
     }
 
     private void restoreRouteLayout() {
@@ -878,8 +955,8 @@ public final class MapActivity extends ComponentActivity {
                 editingPoints.clear();
                 pointEditing = false;
                 restoreRouteLayout();
-                showRouteStatus();
                 renderRoute();
+                finishPointEditing();
             });
         });
     }
@@ -1185,10 +1262,21 @@ public final class MapActivity extends ComponentActivity {
             mapRouteSummary.setText("Прогулка на паузе");
         }
         editQuery.setEnabled(active || paused);
-        editPoints.setEnabled(false);
+        editPoints.setEnabled(active || paused);
         if ("COMPLETED".equals(walk.status) || "STOPPED".equals(walk.status)) {
+            persistFinishedRoute();
             clearActiveWalk();
         }
+    }
+
+    private void persistFinishedRoute() {
+        String routeId = getIntent().getStringExtra(EXTRA_ROUTE_ID);
+        if (routeId == null) return;
+        // This marker is written by the map process itself before returning to
+        // MainActivity. It also covers automatic completion and process death
+        // between the STOP response and onActivityResult().
+        getSharedPreferences(ROUTE_LIFECYCLE_PREFERENCES, MODE_PRIVATE).edit()
+                .putString(FINISHED_ROUTE_ID, routeId).commit();
     }
 
     private void syncLocationTracking() {

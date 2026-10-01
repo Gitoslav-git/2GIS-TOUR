@@ -27,7 +27,7 @@ from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, start_walk)
 
-app = FastAPI(title="Гуляй API", version="0.7")
+app = FastAPI(title="Гуляй API", version="0.7.1")
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"),
           City(cityId="borovsk", name="Боровск, Калужская область"))
@@ -176,10 +176,12 @@ def guest_route_history(x_device_session: UUID | None = Header(default=None),
         return failure("UNAUTHORIZED", "Укажите гостевую сессию", 401, request_id)
     items = []
     for route, updated_at in repository.list_guest_history(x_device_session, limit=3):
+        latest_walk = repository.latest_walk_for_route(x_device_session, route.routeId)
         items.append(GuestHistoryItem(
             routeId=route.routeId, routeVersion=route.routeVersion, cityId=route.cityId,
             title=route.points[0].name if route.points else "Маршрут по городу",
             totalMinutes=route.totalMinutes, pointCount=len(route.points), updatedAt=updated_at,
+            walkStatus=(latest_walk.session.status if latest_walk else None),
         ))
     return {"items": items}
 
@@ -411,6 +413,29 @@ def revise_route(route_id: UUID, revision: RouteRevision,
         current_version = latest[0].routeVersion if latest else revision.baseVersion
         return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
                        {"currentVersion": current_version})
+    # A paused walk must continue against the accepted route revision rather
+    # than the immutable geometry of its previous version. Preserve whether
+    # the user paused it manually; the client decides if an automatic editing
+    # pause should be resumed after confirmation.
+    active_walk = repository.find_active_walk(x_device_session)
+    if active_walk is not None and active_walk.session.routeId == route_id:
+        current_order = min(
+            active_walk.session.currentPointOrder or 1,
+            max(1, len(replacement.points)),
+        )
+        rebased_session = active_walk.session.model_copy(update={
+            "routeVersion": replacement.routeVersion,
+            "currentPointOrder": current_order,
+            "estimatedRemainingMinutes": replacement.totalMinutes,
+            "finalPointVisitStartedAt": None,
+        })
+        rebased_walk = active_walk.model_copy(update={
+            "session": rebased_session,
+            "proximityStartedAt": None,
+            "proximityPointOrder": None,
+            "finalPointPausedSeconds": 0,
+        })
+        repository.replace_walk(rebased_walk, x_device_session)
     with STATE_LOCK:
         if idempotency_key:
             IDEMPOTENT_REVISIONS[idempotency_key] = replacement

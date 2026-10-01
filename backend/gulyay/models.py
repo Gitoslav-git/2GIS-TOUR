@@ -294,6 +294,7 @@ class GuestHistoryItem(StrictModel):
     totalMinutes: int
     pointCount: int
     updatedAt: str
+    walkStatus: Literal["ACTIVE", "PAUSED", "COMPLETED", "STOPPED"] | None = None
 
 
 class RouteRevision(StrictModel):

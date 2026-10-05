@@ -121,6 +121,10 @@ def classify_visit_category(candidate: PlaceCandidate) -> VisitCategory:
 
 
 def visit_minutes(candidate: PlaceCandidate, pace: str) -> int:
+    if candidate.catalogVisitMin is not None and candidate.catalogVisitMax is not None:
+        if pace == "INTENSIVE": return candidate.catalogVisitMin
+        if pace == "RELAXED": return candidate.catalogVisitMax
+        return round((candidate.catalogVisitMin + candidate.catalogVisitMax) / 2)
     profile = VISIT_PROFILES[classify_visit_category(candidate)]
     if pace == "INTENSIVE": return profile.minimum
     if pace == "RELAXED": return profile.maximum
@@ -128,4 +132,6 @@ def visit_minutes(candidate: PlaceCandidate, pace: str) -> int:
 
 
 def minimum_visit_minutes(candidate: PlaceCandidate) -> int:
+    if candidate.catalogVisitMin is not None:
+        return candidate.catalogVisitMin
     return VISIT_PROFILES[classify_visit_category(candidate)].minimum

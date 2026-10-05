@@ -72,6 +72,34 @@ def test_device_location_is_used_as_real_first_leg_start():
     assert all("фактического местоположения" not in warning for warning in route.warnings)
 
 
+def test_borovsk_without_device_location_starts_at_lenin_square_override():
+    geo = FakeGeo([PlaceCandidate(placeId="2gis-1", name="place", lat=55.208, lon=36.485,
+                                  rubrics=[], schedule={}, isFood=False)])
+    route = build_route(
+        CreateRoute(cityId="borovsk", query="walk"), preferences(cityId="borovsk"), geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert geo.walking_starts[0] == (55.207583, 36.484355)
+    assert (route.startLat, route.startLon) == (55.207583, 36.484355)
+    assert route.startSource == "CITY_NO_GEO_OVERRIDE"
+    assert route.approximateStart is True
+
+
+def test_borovsk_device_location_does_not_use_city_override():
+    geo = FakeGeo([PlaceCandidate(placeId="2gis-1", name="place", lat=55.202, lon=36.471,
+                                  rubrics=[], schedule={}, isFood=False)])
+    real_location = StartLocation(lat=55.201, lon=36.47, accuracyMeters=12)
+    route = build_route(
+        CreateRoute(cityId="borovsk", query="walk", startLocation=real_location),
+        preferences(cityId="borovsk"), geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert geo.walking_starts[0] == (55.201, 36.47)
+    assert (route.startLat, route.startLon) == (55.201, 36.47)
+    assert route.startSource == "USER_GEO"
+    assert route.approximateStart is False
+
+
 @pytest.mark.parametrize("has_geo,has_text_start,expected_start,expected_source", [
     (True, False, (54.191, 37.615), "USER_GEO"),
     (False, True, (54.210, 37.640), "TEXT_ANCHOR"),
@@ -364,6 +392,36 @@ def test_routing_cache_handles_exhaustion_unreachable_and_directed_legs():
     assert (leg.fromOrder, leg.toOrder) == (0, 1)
     assert (reused.fromOrder, reused.toOrder) == (4, 5)
     assert reused.geometry == leg.geometry
+
+
+def test_transient_2gis_leg_failure_skips_only_that_leg():
+    from gulyay.geo import GeoUnavailable
+
+    places = [
+        candidate("first", "first").model_copy(update={"lat": 54.1950, "lon": 37.6200}),
+        candidate("second", "second").model_copy(update={"lat": 54.1960, "lon": 37.6210}),
+        candidate("third", "third").model_copy(update={"lat": 54.1970, "lon": 37.6220}),
+    ]
+
+    class FlakyRoutingGeo(FakeGeo):
+        def __init__(self):
+            super().__init__(places)
+            self.calls = 0
+
+        def walking_leg(self, start, end, from_order, to_order):
+            self.calls += 1
+            if self.calls == 1:
+                raise GeoUnavailable("temporary 503")
+            return super().walking_leg(start, end, from_order, to_order)
+
+    geo = FlakyRoutingGeo()
+    route = build_route(
+        CreateRoute(cityId="tula", query="walk"),
+        preferences(interests=[], allowSinglePlace=False), geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert route.points
+    assert geo.calls > 1
 
 
 @pytest.mark.parametrize("wider_is_better", [True, False])

@@ -219,6 +219,198 @@ def test_manual_search_returns_only_provider_candidates_near_selected_city():
     assert places[0].name == "Тульский кремль"
 
 
+def test_catalog_resolver_uses_wide_exact_search_for_area_and_validates_city():
+    requests = []
+
+    def catalog_area(request):
+        requests.append(request)
+        if request.url.params.get("q") == "Москва":
+            items = [{"id": "city", "name": "Москва",
+                      "point": {"lat": 55.7558, "lon": 37.6173}}]
+        else:
+            items = [{
+                "id": "area-zaryadye", "name": "Зарядье", "type": "adm_div.place",
+                "city_alias": "moscow", "point": {"lat": 55.751, "lon": 37.628},
+            }]
+        return httpx.Response(200, json={
+            "meta": {"code": 200}, "result": {"items": items},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(catalog_area))
+    resolved = provider.resolve_catalog_place("moscow", "Зарядье")
+    search = requests[-1]
+    assert search.url.params.get("q") == "Зарядье, Москва"
+    assert "type" not in search.url.params
+    assert resolved is not None
+    assert resolved.dgis_place_id == "area-zaryadye"
+    assert resolved.provider_name == "Зарядье"
+
+
+@pytest.mark.parametrize("not_found_response", [
+    httpx.Response(200, json={"meta": {"code": 200}, "result": {"items": []}}),
+    httpx.Response(200, json={"meta": {"code": 404,
+                                       "error": {"type": "itemNotFound"}}}),
+    httpx.Response(404, json={"error": "itemNotFound"}),
+])
+def test_catalog_resolver_treats_empty_and_item_not_found_as_unresolved(not_found_response):
+    def missing(request):
+        if request.url.params.get("q") == "Москва":
+            return httpx.Response(200, json={
+                "meta": {"code": 200}, "result": {"items": [{
+                    "id": "city", "name": "Москва",
+                    "point": {"lat": 55.7558, "lon": 37.6173},
+                }]},
+            })
+        return not_found_response
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(missing))
+    assert provider.resolve_catalog_place("moscow", "Неизвестное место") is None
+
+
+def test_catalog_resolver_rejects_ambiguous_or_foreign_matches():
+    def ambiguous(request):
+        if request.url.params.get("q") == "Москва":
+            items = [{"id": "city", "name": "Москва",
+                      "point": {"lat": 55.7558, "lon": 37.6173}}]
+        else:
+            items = [
+                {"id": "one", "name": "Смотровая башня", "city_alias": "moscow",
+                 "point": {"lat": 55.75, "lon": 37.61}},
+                {"id": "two", "name": "Смотровая башня", "city_alias": "moscow",
+                 "point": {"lat": 55.76, "lon": 37.62}},
+                {"id": "foreign", "name": "Смотровая башня", "city_alias": "tula",
+                 "point": {"lat": 54.19, "lon": 37.61}},
+            ]
+        return httpx.Response(200, json={
+            "meta": {"code": 200}, "result": {"items": items},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(ambiguous))
+    assert provider.resolve_catalog_place("moscow", "Смотровая башня") is None
+
+
+def test_catalog_resolver_matches_distinctive_tokens_with_extra_provider_words():
+    def tsaritsyno(request):
+        if request.url.params.get("q") == "Москва":
+            items = [{"id": "city", "name": "Москва",
+                      "point": {"lat": 55.7558, "lon": 37.6173}}]
+        else:
+            items = [{
+                "id": "4504128908926178", "city_alias": "moscow",
+                "name": "Государственный музей-заповедник Царицыно, парк",
+                "point": {"lat": 55.615, "lon": 37.683},
+            }]
+        return httpx.Response(200, json={
+            "meta": {"code": 200}, "result": {"items": items},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(tsaritsyno))
+    resolved = provider.resolve_catalog_place("moscow", "Парк Царицыно")
+    assert resolved is not None
+    assert resolved.dgis_place_id == "4504128908926178"
+    assert resolved.provider_name == "Государственный музей-заповедник Царицыно, парк"
+
+
+def test_catalog_resolver_does_not_match_only_generic_park_or_museum_token():
+    def generic_only(request):
+        if request.url.params.get("q") == "Москва":
+            items = [{"id": "city", "name": "Москва",
+                      "point": {"lat": 55.7558, "lon": 37.6173}}]
+        else:
+            items = [{
+                "id": "wrong", "city_alias": "moscow", "name": "Парк Горького",
+                "point": {"lat": 55.73, "lon": 37.60},
+            }]
+        return httpx.Response(200, json={
+            "meta": {"code": 200}, "result": {"items": items},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(generic_only))
+    assert provider.resolve_catalog_place("moscow", "Парк Победы") is None
+
+
+def test_catalog_resolver_uses_alias_only_after_main_name_fails():
+    queries = []
+
+    def alias_result(request):
+        query = request.url.params.get("q")
+        queries.append(query)
+        if query == "Москва":
+            items = [{"id": "city", "name": "Москва",
+                      "point": {"lat": 55.7558, "lon": 37.6173}}]
+        elif query == "ГМИИ им. Пушкина, Москва":
+            items = []
+        else:
+            items = [{
+                "id": "pushkin", "city_alias": "moscow",
+                "name": "Государственный музей изобразительных искусств имени Пушкина",
+                "point": {"lat": 55.747, "lon": 37.605},
+            }]
+        return httpx.Response(200, json={
+            "meta": {"code": 200}, "result": {"items": items},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(alias_result))
+    resolved = provider.resolve_catalog_place(
+        "moscow", "ГМИИ им. Пушкина",
+        ("Государственный музей изобразительных искусств имени Пушкина",),
+    )
+    assert resolved is not None and resolved.dgis_place_id == "pushkin"
+    assert queries == [
+        "Москва", "ГМИИ им. Пушкина, Москва",
+        "Государственный музей изобразительных искусств имени Пушкина, Москва",
+    ]
+
+
+def test_catalog_resolver_never_queries_composite_display_name_literally():
+    queries = []
+
+    def composite(request):
+        query = request.url.params.get("q")
+        queries.append(query)
+        if query == "Москва":
+            items = [{"id": "city", "name": "Москва",
+                      "point": {"lat": 55.7558, "lon": 37.6173}}]
+        else:
+            items = [{"id": "kitay", "name": "Китай-город", "city_alias": "moscow",
+                      "point": {"lat": 55.755, "lon": 37.635}}]
+        return httpx.Response(200, json={
+            "meta": {"code": 200}, "result": {"items": items},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(composite))
+    assert provider.resolve_catalog_place(
+        "moscow", "Китай-город / Варварка", ("Китай-город", "Улица Варварка"),
+    ) is not None
+    assert "Китай-город / Варварка, Москва" not in queries
+    assert queries[-1] == "Китай-город, Москва"
+
+
+def test_catalog_resolver_restores_provider_name_by_confirmed_id():
+    def by_id(request):
+        if request.url.params.get("q") == "Москва":
+            items = [{
+                "id": "city", "name": "Москва",
+                "point": {"lat": 55.7558, "lon": 37.6173},
+            }]
+        else:
+            assert request.url.path.endswith("/items/byid")
+            assert request.url.params.get("id") == "confirmed-id"
+            items = [{
+                "id": "confirmed-id", "name": "Фактическое имя 2ГИС",
+                "city_alias": "moscow", "point": {"lat": 55.75, "lon": 37.62},
+            }]
+        return httpx.Response(200, json={
+            "meta": {"code": 200}, "result": {"items": items},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(by_id))
+    resolved = provider.resolve_catalog_place_by_id("moscow", "confirmed-id")
+    assert resolved is not None
+    assert resolved.dgis_place_id == "confirmed-id"
+    assert resolved.provider_name == "Фактическое имя 2ГИС"
+
+
 def test_automatic_search_rejects_ritual_and_unrelated_branches():
     def mixed(request):
         items = [
@@ -375,11 +567,24 @@ def test_rate_limit_does_not_retry_and_opens_circuit(monkeypatch):
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("status,error", [(401, GeoAuthenticationError), (500, GeoUnavailable)])
+@pytest.mark.parametrize("status,error", [
+    (401, GeoAuthenticationError), (403, GeoAuthenticationError),
+    (500, GeoUnavailable), (503, GeoUnavailable),
+])
 def test_provider_errors_never_become_fake_places(status, error):
     transport = httpx.MockTransport(lambda request: httpx.Response(status, json={}))
     provider = DgisGeoProvider("p", "r", transport)
     with pytest.raises(error):
+        provider.resolve_city_center("tula")
+
+
+def test_provider_timeout_is_unavailable():
+    def timeout(request):
+        raise httpx.ReadTimeout("temporary timeout", request=request)
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(timeout), sleeper=lambda _: None)
+    provider.max_retries = 0
+    with pytest.raises(GeoUnavailable):
         provider.resolve_city_center("tula")
 
 

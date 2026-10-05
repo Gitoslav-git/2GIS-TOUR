@@ -5,6 +5,7 @@ There is deliberately no straight-line or synthetic-place fallback.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -55,6 +56,14 @@ class GeoPlaceNotFound(Exception):
     """One or more supplied provider place IDs are missing or outside the city."""
 
 
+@dataclass(frozen=True)
+class CatalogPlaceResolution:
+    dgis_place_id: str | None
+    provider_name: str
+    lat: float
+    lon: float
+
+
 class GeoProvider(Protocol):
     def ensure_configured(self) -> None: ...
     def resolve_city_center(self, city_id: str) -> tuple[float, float]: ...
@@ -62,7 +71,13 @@ class GeoProvider(Protocol):
                             city_center: tuple[float, float]) -> SearchArea: ...
     def search_places(self, city_id: str, preview: QueryPreview,
                       area: SearchArea) -> list[PlaceCandidate]: ...
+    def search_food_places(self, city_id: str, preview: QueryPreview,
+                           area: SearchArea) -> list[PlaceCandidate]: ...
     def search_candidates(self, city_id: str, query: str) -> list[PlaceCandidate]: ...
+    def resolve_catalog_place(self, city_id: str, name: str,
+                              aliases: tuple[str, ...] = ()) -> CatalogPlaceResolution | None: ...
+    def resolve_catalog_place_by_id(self, city_id: str,
+                                    place_id: str) -> CatalogPlaceResolution | None: ...
     def resolve_places(self, city_id: str, place_ids: list[str]) -> list[PlaceCandidate]: ...
     def walking_leg(self, start: tuple[float, float], end: tuple[float, float],
                     from_order: int, to_order: int) -> RouteLeg: ...
@@ -252,9 +267,11 @@ class DgisGeoProvider:
         return httpx.Client(timeout=12.0, transport=self.transport,
                             headers={"User-Agent": "Gulyay-Backend/0.5"})
 
-    def _request(self, method: str, url: str, **kwargs) -> dict:
+    def _request(self, method: str, url: str, *, request_type: str | None = None,
+                 **kwargs) -> dict:
         global _RATE_LIMITED_UNTIL
         self.ensure_configured()
+        kind = request_type or ("routing" if url == ROUTING_URL else "places")
         for attempt in range(self.max_retries + 1):
             now = self.clock()
             with _RATE_LIMIT_LOCK:
@@ -262,17 +279,25 @@ class DgisGeoProvider:
             if remaining > 0:
                 raise GeoRateLimited(remaining)
             try:
+                started = time.perf_counter()
                 with _UPSTREAM_SLOTS:
                     self._pace_upstream()
                     with self._client() as client:
                         response = client.request(method, url, **kwargs)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                _log_dgis_request(kind, None, "DGIS_UNAVAILABLE",
+                                  round((time.perf_counter() - started) * 1000))
                 if attempt >= self.max_retries:
                     raise GeoUnavailable() from exc
                 self.sleeper(min(0.5 * (2 ** attempt), 2.0))
                 continue
 
+            response_time_ms = round((time.perf_counter() - started) * 1000)
+            if response.status_code in (401, 403):
+                _log_dgis_request(kind, response.status_code, "DGIS_AUTH_ERROR", response_time_ms)
+                raise GeoAuthenticationError()
             if response.status_code == 429:
+                _log_dgis_request(kind, response.status_code, "DGIS_RATE_LIMIT", response_time_ms)
                 # Never retry a quota response immediately: it only extends the block.
                 retry_after = _retry_after(response, default=30)
                 with _RATE_LIMIT_LOCK:
@@ -281,9 +306,24 @@ class DgisGeoProvider:
                                httpx.URL(url).host, retry_after)
                 raise GeoRateLimited(retry_after)
             if response.status_code in (502, 503, 504) and attempt < self.max_retries:
+                _log_dgis_request(kind, response.status_code, "DGIS_UNAVAILABLE", response_time_ms)
                 self.sleeper(min(0.5 * (2 ** attempt), 2.0))
                 continue
-            return self._read_json(response)
+            if response.status_code >= 500:
+                _log_dgis_request(kind, response.status_code, "DGIS_UNAVAILABLE", response_time_ms)
+                raise GeoUnavailable()
+            if response.status_code >= 400:
+                _log_dgis_request(kind, response.status_code, "DGIS_INVALID_RESPONSE", response_time_ms)
+                if response.status_code == 404:
+                    raise GeoPlaceNotFound()
+                raise GeoInvalidResponse()
+            try:
+                data = self._read_json(response)
+            except GeoInvalidResponse:
+                _log_dgis_request(kind, response.status_code, "DGIS_UNAVAILABLE", response_time_ms)
+                raise
+            _log_dgis_request(kind, response.status_code, None, response_time_ms)
+            return data
         raise GeoUnavailable()
 
     def _pace_upstream(self) -> None:
@@ -303,6 +343,8 @@ class DgisGeoProvider:
             raise GeoAuthenticationError()
         if response.status_code >= 500:
             raise GeoUnavailable()
+        if response.status_code == 404:
+            raise GeoPlaceNotFound()
         if response.status_code >= 400:
             raise GeoInvalidResponse()
         try:
@@ -313,13 +355,20 @@ class DgisGeoProvider:
             raise GeoInvalidResponse()
         return data
 
-    def _places_from(self, url: str, **params: str | int | bool) -> list[dict]:
+    def _places_from(self, url: str, *, request_type: str = "places",
+                     **params: str | int | bool) -> list[dict]:
         cache_key = (url, tuple(sorted((key, str(value)) for key, value in params.items())))
         cached = _PLACES_CACHE.get(cache_key, self.clock())
         if isinstance(cached, list):
             return cached
-        data = self._request("GET", url, params={"key": self.places_key, **params})
+        try:
+            data = self._request("GET", url, request_type=request_type,
+                                 params={"key": self.places_key, **params})
+        except GeoPlaceNotFound:
+            return []
         meta, result = data.get("meta"), data.get("result")
+        if _is_item_not_found(meta):
+            return []
         if not isinstance(meta, dict) or meta.get("code") != 200 or not isinstance(result, dict):
             raise GeoInvalidResponse()
         items = result.get("items")
@@ -329,12 +378,13 @@ class DgisGeoProvider:
         _PLACES_CACHE.put(cache_key, clean, self.clock() + self.places_ttl)
         return clean
 
-    def _places(self, **params: str | int | bool) -> list[dict]:
-        return self._places_from(PLACES_URL, **params)
+    def _places(self, *, request_type: str = "places",
+                **params: str | int | bool) -> list[dict]:
+        return self._places_from(PLACES_URL, request_type=request_type, **params)
 
     def resolve_city_center(self, city_id: str) -> tuple[float, float]:
         city_name = CITY_NAMES[city_id]
-        items = self._places(q=city_name, type="adm_div.city", locale="ru_RU",
+        items = self._places(request_type="geocode", q=city_name, type="adm_div.city", locale="ru_RU",
                              fields="items.point", page_size=5,
                              search_is_query_text_complete="true")
         for item in items:
@@ -426,13 +476,6 @@ class DgisGeoProvider:
                        max(2, min(3, len(set(hard_mapped)))))
         requests = [(query, item_types, False, concept, None)
                     for query, item_types, concept in queries[:query_limit]]
-        if preview.includeFood:
-            food_preference = next(
-                (value for value in preview.foodPreferences if value in FOOD_QUERIES), None,
-            )
-            food_query = FOOD_QUERIES.get(food_preference, "кафе ресторан")
-            requests.append((food_query, "branch", True, None, food_preference))
-
         result: list[PlaceCandidate] = []
         positions: dict[str, int] = {}
         for query, item_types, requested_as_food, matched_concept, matched_food in requests:
@@ -476,6 +519,10 @@ class DgisGeoProvider:
                 })
                 positions[candidate.placeId] = len(result)
                 result.append(candidate)
+        for candidate in self.search_food_places(city_id, preview, area):
+            if candidate.placeId not in positions:
+                positions[candidate.placeId] = len(result)
+                result.append(candidate)
         # Merge lanes by real proximity so early textual lanes cannot crowd all
         # later categories out of the route planner shortlist.
         sights = sorted(
@@ -486,6 +533,35 @@ class DgisGeoProvider:
         )[:48]
         food = [candidate for candidate in result if candidate.isFood][:8]
         return sights + food
+
+    def search_food_places(self, city_id: str, preview: QueryPreview,
+                           area: SearchArea) -> list[PlaceCandidate]:
+        """Dedicated food lane used by catalog-first attraction retrieval."""
+        if not preview.includeFood:
+            return []
+        food_preference = next(
+            (value for value in preview.foodPreferences if value in FOOD_QUERIES), None,
+        )
+        query = FOOD_QUERIES.get(food_preference, "кафе ресторан")
+        items = self._places(
+            request_type="geocode",
+            q=query, type="branch", locale="ru_RU",
+            point=f"{area.lon:.7f},{area.lat:.7f}", radius=area.radiusMeters,
+            location=f"{area.lon:.7f},{area.lat:.7f}",
+            fields="items.point,items.rubrics,items.type,items.schedule,items.is_routing_available",
+            page_size=16, search_is_query_text_complete="true",
+        )
+        result: list[PlaceCandidate] = []
+        for item in items:
+            candidate = _candidate_from_item(item, requested_as_food=True)
+            if candidate is None or any(
+                    candidate_matches_food(candidate, excluded)
+                    for excluded in preview.excludedFoodPreferences):
+                continue
+            result.append(candidate.model_copy(update={
+                "matchedFoodPreferences": [food_preference] if food_preference else [],
+            }))
+        return result[:8]
 
     def search_candidates(self, city_id: str, query: str) -> list[PlaceCandidate]:
         center = self.resolve_city_center(city_id)
@@ -501,6 +577,61 @@ class DgisGeoProvider:
             if candidate and _belongs_to_city(item, city_id, center):
                 result.append(candidate)
         return result[:10]
+
+    def resolve_catalog_place(self, city_id: str, name: str,
+                              aliases: tuple[str, ...] = ()) -> CatalogPlaceResolution | None:
+        """Resolve one seed row without narrowing AREA/COMPLEX/POI provider types."""
+        center = self.resolve_city_center(city_id)
+        city_name = CITY_NAMES[city_id]
+        # Composite display labels are not provider objects. They must be split
+        # in the seed or resolved through explicit aliases, never queried literally.
+        search_names = aliases if re.search(r"\s[+/]\s", name) and aliases else (name, *aliases)
+        for search_name in search_names:
+            try:
+                items = self._places(
+                    q=f"{search_name}, {city_name}", locale="ru_RU",
+                    point=f"{center[1]:.7f},{center[0]:.7f}", radius=25000,
+                    fields=("items.point,items.name,items.full_name,items.address_name,"
+                            "items.rubrics,items.type,items.schedule,items.adm_div,items.city_alias"),
+                    page_size=20, search_is_query_text_complete="true",
+                )
+            except GeoPlaceNotFound:
+                items = []
+            suitable = [item for item in items if _valid_point(item.get("point"))
+                        and _belongs_to_city(item, city_id, center)]
+            selected = _confident_catalog_match(search_name, suitable)
+            if selected is not None:
+                point = selected["point"]
+                provider_id = str(selected.get("id", "")).strip() or None
+                provider_name = str(selected.get("name", "")).strip()
+                return CatalogPlaceResolution(
+                    dgis_place_id=provider_id, provider_name=provider_name,
+                    lat=float(point["lat"]), lon=float(point["lon"]),
+                )
+        return None
+
+    def resolve_catalog_place_by_id(self, city_id: str,
+                                    place_id: str) -> CatalogPlaceResolution | None:
+        """Restore provider_name for a previously confirmed provider ID."""
+        center = self.resolve_city_center(city_id)
+        items = self._places_from(
+            PLACES_BY_ID_URL, id=place_id, locale="ru_RU",
+            fields=("items.point,items.name,items.adm_div,items.city_alias,"
+                    "items.type,items.rubrics,items.schedule"),
+        )
+        for item in items:
+            if (str(item.get("id", "")).strip() != place_id
+                    or not _valid_point(item.get("point"))
+                    or not _belongs_to_city(item, city_id, center)):
+                continue
+            point = item["point"]
+            provider_name = str(item.get("name", "")).strip()
+            if provider_name:
+                return CatalogPlaceResolution(
+                    dgis_place_id=place_id, provider_name=provider_name,
+                    lat=float(point["lat"]), lon=float(point["lon"]),
+                )
+        return None
 
     def resolve_places(self, city_id: str, place_ids: list[str]) -> list[PlaceCandidate]:
         if not place_ids or len(set(place_ids)) != len(place_ids):
@@ -533,8 +664,12 @@ class DgisGeoProvider:
             "transport": "walking", "route_mode": "fastest", "output": "detailed", "locale": "ru",
             "params": {"pedestrian": {"use_instructions": False}},
         }
-        data = self._request("POST", ROUTING_URL, params={"key": self.routing_key}, json=body)
+        request_started = time.perf_counter()
+        data = self._request("POST", ROUTING_URL, request_type="routing",
+                             params={"key": self.routing_key}, json=body)
         if data.get("status") in {"ROUTE_NOT_FOUND", "ROUTE_DOES_NOT_EXISTS", "ATTRACT_FAIL", "POINT_EXCLUDED"}:
+            _log_dgis_request("routing", 200, "DGIS_NO_ROUTE",
+                              round((time.perf_counter() - request_started) * 1000))
             raise GeoRouteNotFound()
         results = data.get("result")
         if data.get("status") != "OK" or not isinstance(results, list) or not results:
@@ -552,6 +687,17 @@ class DgisGeoProvider:
                        distanceMeters=round(distance), durationSeconds=round(duration), geometry=geometry)
         _ROUTING_CACHE.put(cache_key, leg, self.clock() + self.routing_ttl)
         return leg
+
+
+def _log_dgis_request(request_type: str, http_status: int | None,
+                      error_class: str | None, response_time_ms: int) -> None:
+    """Provider-only telemetry. Never include request parameters or API keys."""
+    LOGGER.info("dgis_provider %s", json.dumps({
+        "dgis_request_type": request_type,
+        "dgis_http_status": http_status,
+        "dgis_error_class": error_class,
+        "dgis_response_time_ms": response_time_ms,
+    }, separators=(",", ":")))
 
 
 def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -588,6 +734,104 @@ def _valid_point(point: object) -> bool:
     return (isinstance(point, dict)
             and isinstance(point.get("lat"), (int, float))
             and isinstance(point.get("lon"), (int, float)))
+
+
+def _is_item_not_found(meta: object) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    if str(meta.get("code", "")) == "404":
+        return True
+    error = meta.get("error")
+    values = [meta.get("type"), meta.get("status"), meta.get("message")]
+    if isinstance(error, dict):
+        values.extend((error.get("type"), error.get("status"), error.get("message")))
+    normalized = " ".join(str(value) for value in values if value).casefold()
+    return "itemnotfound" in normalized.replace("_", "").replace("-", "")
+
+
+def _normalized_catalog_name(value: str) -> str:
+    return " ".join(re.findall(
+        r"[а-яёa-z0-9]+", value.casefold().replace("ё", "е"),
+    ))
+
+
+_CATALOG_IGNORED_WORDS = frozenset({
+    "в", "во", "и", "им", "имени", "на", "по", "при", "у",
+    "государственный", "государственная", "государственное",
+    "московский", "московская", "московское", "москва",
+})
+
+_CATALOG_GENERIC_WORDS = frozenset({
+    "галерея", "здание", "комплекс", "музей", "объект", "парк", "парка",
+    "площадка", "смотровая", "собор", "театр", "территория", "центр",
+})
+
+_CATALOG_CONFLICT_PREFIXES = (
+    "автосервис", "аптек", "гостиниц", "кафе", "клиник", "магазин", "ресторан",
+)
+
+
+def _catalog_query_tokens(value: str) -> set[str]:
+    return set(_normalized_catalog_name(value).split()) - _CATALOG_IGNORED_WORDS
+
+
+def _catalog_context_conflicts(query_tokens: set[str], item: dict) -> bool:
+    rubrics = item.get("rubrics") if isinstance(item.get("rubrics"), list) else []
+    context = " ".join([
+        str(item.get("name", "")),
+        *(str(rubric.get("name", "")) for rubric in rubrics if isinstance(rubric, dict)),
+    ])
+    context_tokens = _catalog_query_tokens(context)
+    query_has_conflict_kind = any(
+        token.startswith(prefix)
+        for token in query_tokens for prefix in _CATALOG_CONFLICT_PREFIXES
+    )
+    return not query_has_conflict_kind and any(
+        token.startswith(prefix)
+        for token in context_tokens for prefix in _CATALOG_CONFLICT_PREFIXES
+    )
+
+
+def _catalog_token_score(expected_name: str, provider_name: str) -> float | None:
+    """Score provider names by one-way coverage of the catalogue query."""
+    query_tokens = _catalog_query_tokens(expected_name)
+    candidate_tokens = _catalog_query_tokens(provider_name)
+    matched = query_tokens & candidate_tokens
+    distinctive = query_tokens - _CATALOG_GENERIC_WORDS
+    if not query_tokens or not distinctive or not (matched & distinctive):
+        return None
+
+    coverage = len(matched) / len(query_tokens)
+    # Full query coverage is the strongest signal. Provider-only words are
+    # intentionally not part of the denominator: official 2GIS names are often
+    # much longer than catalogue labels.
+    if coverage < 1.0:
+        return None
+    return coverage
+
+
+def _confident_catalog_match(name: str, items: list[dict]) -> dict | None:
+    scored: list[tuple[float, int, dict]] = []
+    for position, item in enumerate(items):
+        if _catalog_context_conflicts(_catalog_query_tokens(name), item):
+            continue
+        score = _catalog_token_score(name, str(item.get("name", "")))
+        if score is None:
+            continue
+        # Result order is only a weak tie-breaker; asymmetric coverage remains
+        # the primary signal.
+        position_bonus = 0.01 / (position + 1)
+        scored.append((score + position_bonus, position, item))
+    if not scored:
+        return None
+    scored.sort(key=lambda value: (-value[0], value[1]))
+    if (len(scored) > 1
+            and _normalized_catalog_name(str(scored[0][2].get("name", "")))
+            == _normalized_catalog_name(str(scored[1][2].get("name", "")))):
+        # Provider order cannot disambiguate two different objects carrying
+        # exactly the same displayed name.
+        return None
+    return scored[0][2]
 
 
 def _anchor_match_score(query: str, item: dict) -> tuple[int, int]:

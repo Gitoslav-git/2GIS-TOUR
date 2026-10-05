@@ -7,11 +7,13 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .geo import (GeoConstraintNotFound, GeoProvider, GeoRouteNotFound,
+from .catalog import CatalogPlaceProvider
+from .geo import (GeoConstraintNotFound, GeoProvider, GeoRouteNotFound, GeoUnavailable,
                   candidate_matches_concept, candidate_matches_food)
 from .models import (CreateRoute, PlaceCandidate, QueryPreview, Route, RouteLeg,
-                     RoutePoint)
-from .planning_debug import planning_log
+                     RoutePoint, SearchArea)
+from .planning_debug import catalog_debug_log, planning_log
+from .route_config import CITY_NO_GEO_START_OVERRIDES
 from .visit_categories import (minimum_visit_minutes,
                                visit_minutes as visit_duration_minutes)
 
@@ -29,6 +31,11 @@ class _RoutingBudgetExhausted(Exception):
     pass
 
 
+class _TransientRouteUnavailable(Exception):
+    """One upstream routing leg failed, while other legs may still work."""
+    pass
+
+
 _LegKey = tuple[tuple[float, float], tuple[float, float]]
 
 
@@ -37,11 +44,15 @@ class _RoutingChecks:
     """Share directed legs, including no-route results, within one build."""
     remaining: int
     legs: dict[_LegKey, RouteLeg | None] = field(default_factory=dict)
+    transient_legs: set[_LegKey] = field(default_factory=set)
+    transient_failures: int = 0
 
     def walking_leg(self, geo: GeoProvider, start: tuple[float, float],
                     end: tuple[float, float], from_order: int,
                     reserve: int = 0) -> RouteLeg:
         key = (start, end)
+        if key in self.transient_legs:
+            raise _TransientRouteUnavailable()
         if key not in self.legs:
             if self.remaining <= reserve:
                 raise _RoutingBudgetExhausted()
@@ -50,6 +61,12 @@ class _RoutingChecks:
                 self.legs[key] = geo.walking_leg(start, end, from_order, from_order + 1)
             except GeoRouteNotFound:
                 self.legs[key] = None
+            except GeoUnavailable:
+                # Do not fabricate a straight-line leg. Skip just this transition and
+                # allow the planner to try another catalog point/route variant.
+                self.transient_legs.add(key)
+                self.transient_failures += 1
+                raise _TransientRouteUnavailable()
         leg = self.legs[key]
         if leg is None:
             raise GeoRouteNotFound()
@@ -85,7 +102,8 @@ class _BuiltPlan:
 
 
 def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
-                now: datetime | None = None, trace_id: str | None = None) -> Route:
+                now: datetime | None = None, trace_id: str | None = None,
+                catalog: CatalogPlaceProvider | None = None) -> Route:
     city_center = geo.resolve_city_center(payload.cityId)
     location_hint = preview.locationHint or ("центр" if preview.centerOnly else None)
     try:
@@ -131,9 +149,10 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
                 "source": "geo",
             })
     else:
-        start = city_center
+        start = CITY_NO_GEO_START_OVERRIDES.get(payload.cityId, city_center)
         approximate_start = True
-        start_source = "CITY_CENTER"
+        start_source = ("CITY_NO_GEO_OVERRIDE" if payload.cityId in CITY_NO_GEO_START_OVERRIDES
+                        else "CITY_CENTER")
 
     direction_target = None
     if preview.directionHint:
@@ -148,8 +167,32 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     attempts = 0
     best: _BuiltPlan | None = None
     best_area = search_area
-    candidates = geo.search_places(payload.cityId, preview, search_area)
-    planning_log(trace_id, "dgis_candidates", attempt=1, area=search_area.label,
+    # City membership is the source-selection rule. A catalog city must never silently
+    # fall back to broad 2GIS attraction text-search because some rows are unresolved.
+    catalog_first = bool(catalog and catalog.has_city(payload.cityId))
+    if catalog_first and catalog is not None:
+        ranked_rows, ranking = catalog.rank_candidates(payload.cityId, preview, search_area)
+        catalog_debug_log(
+            trace_id, "intent", city=payload.cityId,
+            requested_tags={concept: preview.interestPriorities.get(concept, "MEDIUM")
+                            for concept in preview.interests},
+            # Interests are preferences. Only exclusions and technical filters are hard.
+            required_tags=[],
+            exclusions={"concepts": preview.hardExclusions,
+                        "types": preview.excludedPlaceTypes},
+            duration=target_minutes, pace=preview.routePace,
+            start_source=start_source,
+        )
+        catalog_debug_log(trace_id, "after_hard_filters", candidates=len(ranked_rows))
+        catalog_debug_log(trace_id, "ranking", candidates=ranking)
+        catalog_debug_log(trace_id, "shortlist",
+                          candidates=[{"id": row.id, "name": row.name}
+                                      for row in ranked_rows[:40]])
+    candidates = _retrieve_candidates(
+        payload.cityId, preview, search_area, geo, catalog, catalog_first,
+    )
+    planning_log(trace_id, "catalog_candidates" if catalog_first else "dgis_candidates",
+                 attempt=1, area=search_area.label,
                  count=len(candidates), candidates=_candidate_debug(candidates))
     search_rounds = [(search_area, candidates, 0)]
     expanded = False
@@ -212,14 +255,23 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
                 and routing_budget.remaining > 0):
             expanded = True
             city_area = geo.resolve_search_area(payload.cityId, None, city_center)
-            wider = geo.search_places(payload.cityId, preview, city_area)
+            wider = _retrieve_candidates(
+                payload.cityId, preview, city_area, geo, catalog, catalog_first,
+            )
             merged = _merge_candidates(active_candidates, wider)
-            planning_log(trace_id, "dgis_candidates", attempt=2, area=city_area.label,
+            planning_log(trace_id, "catalog_candidates" if catalog_first else "dgis_candidates",
+                         attempt=2, area=city_area.label,
                          reason="SOFT_AREA_RELAXED", count=len(merged),
                          candidates=_candidate_debug(merged))
             search_rounds.append((city_area, merged, 1))
 
     if best is None:
+        if routing_budget.transient_failures:
+            planning_log(trace_id, "planner_result", planner_status="PROVIDER_UNAVAILABLE",
+                         relaxation_level=3, candidate_count=len(candidates))
+            raise GeoUnavailable("2GIS routing temporarily unavailable for all route variants")
+        planning_log(trace_id, "planner_result", planner_status="NO_CANDIDATES",
+                     relaxation_level=3, candidate_count=len(candidates))
         planning_log(trace_id, "planning_failed", reason="NO_HARD_VALID_ROUTE",
                      routingChecksUsed=_max_routing_checks() - routing_budget.remaining)
         raise RouteNotFound()
@@ -230,9 +282,16 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     utilization = total_minutes / target_minutes
     unmet = best.unmet
     planning_status = "DEGRADED" if unmet else "SUCCESS"
+    relaxation_level = max(
+        best.plan.relaxation,
+        max((item.catalogRelaxationLevel or 0) for item in best.candidates),
+    )
+    planner_result = "RELAXED_SUCCESS" if relaxation_level or unmet else "SUCCESS"
 
     warnings = [*preview.warnings,
                 "Время посещения оценено по типу места и темпу прогулки"]
+    if catalog_first:
+        warnings.append("Достопримечательности подобраны из локального каталога")
     if best.plan.area_relaxed:
         warnings.append("Предпочтительный район дал слабый маршрут — поиск расширен на город")
     if explicit_start_area:
@@ -251,7 +310,9 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
             f"Каждый пеший переход — не более {preview.maxWalkingMinutes} мин."
         )
     if approximate_start:
-        warnings.append("Геопозиция и старт в тексте не указаны — маршрут начат от центра города")
+        fallback_label = ("заданной точки города" if start_source == "CITY_NO_GEO_OVERRIDE"
+                          else "центра города")
+        warnings.append(f"Геопозиция и старт в тексте не указаны — маршрут начат от {fallback_label}")
     if location_hint:
         warnings.append(f"Область поиска: {best_area.label}")
     if preview.foodMode == "OPTIONAL" and not any(point.isFood for point in route_points):
@@ -272,7 +333,42 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         totalMinutes=total_minutes, targetMinutes=target_minutes,
         points=[{"placeId": point.placeId, "name": point.name}
                 for point in route_points], unmet=unmet,
+        planner_status=planner_result, relaxation_level=relaxation_level,
+        candidate_count=len(candidates),
     )
+    if catalog_first:
+        covered_concepts = _covered_concepts(best.candidates, preview)
+        catalog_debug_log(
+            trace_id, "planner",
+            selected=[point.name for point in route_points],
+            rejected=best.hard_violations,
+            relaxation_level=max((item.catalogRelaxationLevel or 0)
+                                 for item in best.candidates),
+            requested_concepts=list(preview.interests),
+            covered_concepts=covered_concepts,
+            uncovered_concepts=[concept for concept in preview.interests
+                                if concept not in covered_concepts],
+            duration_target=target_minutes,
+            duration_actual=total_minutes,
+            hard_constraints={
+                "excluded_concepts": list(preview.hardExclusions),
+                "excluded_types": list(preview.excludedPlaceTypes),
+                "food_required": preview.foodMode == "REQUIRED",
+                "max_duration": preview.maxDurationMinutes,
+            },
+        )
+        catalog_debug_log(
+            trace_id, "routing",
+            legs=[{
+                "from": route_points[index - 1].name if index else "start",
+                "to": point.name,
+                "walking_minutes": math.ceil(legs[index].durationSeconds / 60),
+            } for index, point in enumerate(route_points)],
+        )
+        catalog_debug_log(
+            trace_id, "final", visit_minutes=sum(point.visitMinutes for point in route_points),
+            walking_minutes=math.ceil(best.walking_seconds / 60), total_minutes=total_minutes,
+        )
     return Route(
         routeId=uuid4(), routeVersion=1, status="READY", cityId=payload.cityId,
         query=payload.query, filters=payload.filters, searchArea=best_area,
@@ -284,6 +380,17 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         totalMinutes=total_minutes, unusedMinutes=unused_minutes,
         points=route_points, legs=legs, warnings=warnings,
     )
+
+
+def _retrieve_candidates(city_id: str, preview: QueryPreview, area: SearchArea,
+                         geo: GeoProvider, catalog: CatalogPlaceProvider | None,
+                         catalog_first: bool) -> list[PlaceCandidate]:
+    if not catalog_first or catalog is None:
+        return geo.search_places(city_id, preview, area)
+    sights = catalog.list_candidates(city_id, preview, area)
+    food_search = getattr(geo, "search_food_places", None)
+    food = food_search(city_id, preview, area) if callable(food_search) else []
+    return [*sights, *food]
 
 
 def _comparison_order(plans: list[_RoutePlan], start: tuple[float, float],
@@ -387,11 +494,13 @@ def _approximate_route(candidates: list[PlaceCandidate], preview: QueryPreview,
     current = start
     selected: list[PlaceCandidate] = []
     elapsed = walking = walking_distance = 0
-    budget_seconds = (preview.maxDurationMinutes or preview.durationMinutes) * 60
+    budget_seconds = _duration_budget_minutes(preview) * 60
     max_points = preview.requestedPlaceCount or 8
     for candidate in candidates:
         if len(selected) >= max_points:
             break
+        if _catalog_parent_conflict(selected, candidate):
+            continue
         distance = _approx_distance_meters(current, (candidate.lat, candidate.lon))
         leg_seconds = max(60, round(distance / 80 * 60))
         if preview.maxWalkingMinutes is not None and leg_seconds > preview.maxWalkingMinutes * 60:
@@ -424,10 +533,12 @@ def _materialize_plan(plan: _RoutePlan, preview: QueryPreview, geo: GeoProvider,
                       routing_budget: _RoutingChecks, reserve: int = 0) -> _BuiltPlan:
     built = _BuiltPlan(plan=plan)
     current = start
-    budget_seconds = (preview.maxDurationMinutes or preview.durationMinutes) * 60
+    budget_seconds = _duration_budget_minutes(preview) * 60
     for candidate in plan.candidates:
         if len(built.points) >= (preview.requestedPlaceCount or 8):
             break
+        if _catalog_parent_conflict(built.candidates, candidate):
+            continue
         distance = _approx_distance_meters(current, (candidate.lat, candidate.lon))
         if (preview.maxWalkingMinutes is not None
                 and distance > preview.maxWalkingMinutes * 130):
@@ -447,6 +558,8 @@ def _materialize_plan(plan: _RoutePlan, preview: QueryPreview, geo: GeoProvider,
         except _RoutingBudgetExhausted:
             built.budget_limited = True
             break
+        except _TransientRouteUnavailable:
+            continue
         except GeoRouteNotFound:
             continue
         if (preview.maxWalkingMinutes is not None
@@ -494,11 +607,6 @@ def _hard_violations(route: _BuiltPlan, preview: QueryPreview) -> list[str]:
         violations.append("MINIMUM_TWO_POINTS")
     if preview.requestedPlaceCount is not None and len(route.points) != preview.requestedPlaceCount:
         violations.append("REQUESTED_PLACE_COUNT")
-    if preview.minDurationMinutes is not None and total_minutes < preview.minDurationMinutes:
-        violations.append("MINIMUM_DURATION")
-    for concept in preview.hardInterests:
-        if not any(candidate_matches_concept(item, concept) for item in route.candidates):
-            violations.append(f"INTEREST:{concept}")
     for concept in preview.hardExclusions:
         if any(candidate_matches_concept(item, concept) for item in route.candidates):
             violations.append(f"EXCLUSION:{concept}")
@@ -562,7 +670,19 @@ def _quality_components(candidates: list[PlaceCandidate], total_minutes: int,
     if preview.durationMode == "MAXIMUM":
         duration_score = 100.0
     else:
-        duration_score = max(0.0, 100 - abs(total_minutes - target) / target * 140)
+        # Duration is deliberately soft: a good 65–80% route is preferable to NO_ROUTE.
+        ratio = total_minutes / max(1, target)
+        if 0.80 <= ratio <= 1.0:
+            # Preferred range, with a gentle preference for using more of the time.
+            duration_score = 90.0 + (ratio - 0.80) / 0.20 * 10.0
+        elif 1.0 < ratio <= 1.15:
+            duration_score = 100.0 - (ratio - 1.0) / 0.15 * 5.0
+        elif 0.65 <= ratio < 0.80:
+            duration_score = 70.0 + (ratio - 0.65) / 0.15 * 30.0
+        elif ratio < 0.65:
+            duration_score = max(0.0, ratio / 0.65 * 70.0)
+        else:
+            duration_score = max(0.0, 100.0 - (ratio - 1.15) / 0.25 * 100.0)
     priority_weight = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
     possible = sum(priority_weight[preview.interestPriorities.get(item, "MEDIUM")]
                    for item in preview.interests)
@@ -643,9 +763,6 @@ def _enough_points_and_time(candidates: list[PlaceCandidate], elapsed_seconds: i
                             preview: QueryPreview) -> bool:
     if preview.foodMode == "REQUIRED" and not any(item.isFood for item in candidates):
         return False
-    if any(not any(candidate_matches_concept(item, concept) for item in candidates)
-           for concept in preview.hardInterests):
-        return False
     if preview.requestedPlaceCount is not None:
         return len(candidates) >= preview.requestedPlaceCount
     minimum_points = 1 if preview.allowSinglePlace else 2
@@ -684,6 +801,26 @@ def _merge_candidates(first: list[PlaceCandidate], second: list[PlaceCandidate])
             )),
         })
     return result
+
+
+def _catalog_parent_conflict(selected: list[PlaceCandidate],
+                             candidate: PlaceCandidate) -> bool:
+    """Prevent a COMPLEX and its CONTAINS child from becoming two visits."""
+    if candidate.catalogId is None:
+        return False
+    if candidate.catalogLevel == "COMPLEX":
+        return any(
+            item.catalogParentId == candidate.catalogId
+            and item.catalogRelation == "CONTAINS"
+            for item in selected
+        )
+    if candidate.catalogRelation == "CONTAINS" and candidate.catalogParentId:
+        return any(
+            item.catalogId == candidate.catalogParentId
+            and item.catalogLevel == "COMPLEX"
+            for item in selected
+        )
+    return False
 
 
 def _candidate_debug(candidates: list[PlaceCandidate]) -> list[dict[str, object]]:
@@ -841,33 +978,41 @@ def _preference_order(candidates: list[PlaceCandidate], start: tuple[float, floa
                       preview: QueryPreview,
                       soft_scale: float = 1.0) -> list[PlaceCandidate]:
     remaining, ordered, current = list(candidates), [], start
+    concept_counts: dict[str, int] = {}
     while remaining:
         candidate = min(remaining, key=lambda item: _candidate_score(
-            current, item, direction_target, preview, soft_scale,
+            current, item, direction_target, preview, soft_scale, concept_counts,
         ))
         remaining.remove(candidate)
         ordered.append(candidate)
+        for concept in preview.interests:
+            if candidate_matches_concept(candidate, concept):
+                concept_counts[concept] = concept_counts.get(concept, 0) + 1
         current = candidate.lat, candidate.lon
     return ordered
 
 
 def _candidate_score(current: tuple[float, float], candidate: PlaceCandidate,
                      direction_target: tuple[float, float] | None,
-                     preview: QueryPreview, soft_scale: float = 1.0) -> float:
+                     preview: QueryPreview, soft_scale: float = 1.0,
+                     concept_counts: dict[str, int] | None = None) -> float:
     coordinates = candidate.lat, candidate.lon
     leg = _approx_distance_meters(current, coordinates)
     compactness_weight = {"LOW": 0.7, "NORMAL": 1.0, "HIGH": 1.8}[preview.compactness]
     score = leg * (1 + (compactness_weight - 1) * soft_scale)
-    hard_interest_value = sum(
-        {"LOW": 1, "MEDIUM": 2, "HIGH": 3}[
-            preview.interestPriorities.get(concept, "MEDIUM")
-        ]
-        for concept in preview.hardInterests
-        if candidate_matches_concept(candidate, concept)
-    )
-    soft_interest_value = max(0, _candidate_interest_value(candidate, preview)
-                              - hard_interest_value)
-    score -= hard_interest_value * 900 + soft_interest_value * 650 * soft_scale
+    # First coverage of a requested theme is far more valuable than repetition.
+    counts = concept_counts or {}
+    weights = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+    coverage_bonus = 0.0
+    for concept in preview.interests:
+        if not candidate_matches_concept(candidate, concept):
+            continue
+        weight = weights[preview.interestPriorities.get(concept, "MEDIUM")]
+        occurrences = counts.get(concept, 0)
+        coverage_bonus += weight * (1_400 if occurrences == 0 else 260 / occurrences)
+    score -= coverage_bonus * soft_scale
+    if candidate.catalogRelaxationLevel is not None:
+        score += candidate.catalogRelaxationLevel * 225 * soft_scale
     if preview.preferredWalkingMinutes is not None:
         preferred_distance = preview.preferredWalkingMinutes * 80
         score += max(0.0, leg - preferred_distance) * 1.5 * soft_scale
@@ -894,14 +1039,27 @@ def _candidate_interest_value(candidate: PlaceCandidate, preview: QueryPreview) 
     )
 
 
+def _covered_concepts(candidates: list[PlaceCandidate], preview: QueryPreview) -> list[str]:
+    return [concept for concept in preview.interests
+            if any(candidate_matches_concept(candidate, concept) for candidate in candidates)]
+
+
 
 
 def _good_duration_utilization() -> float:
     try:
-        value = float(os.getenv("ROUTE_GOOD_DURATION_UTILIZATION", "0.85"))
+        value = float(os.getenv("ROUTE_GOOD_DURATION_UTILIZATION", "0.80"))
     except ValueError:
-        return 0.85
+        return 0.80
     return max(0.65, min(1.0, value))
+
+
+def _duration_budget_minutes(preview: QueryPreview) -> int:
+    """Keep an explicit maximum hard, otherwise allow a small useful overrun."""
+    if preview.maxDurationMinutes is not None:
+        return preview.maxDurationMinutes
+    target = preview.targetDurationMinutes or preview.durationMinutes
+    return math.ceil(target * 1.15)
 
 
 def _good_quality_score() -> float:

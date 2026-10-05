@@ -27,6 +27,9 @@ class Filters(StrictModel):
     withChildren: bool | None = None
     includeFood: bool | None = None
     unusualPlaces: bool | None = None
+    freeOnly: bool | None = None
+    maxBudgetRub: int | None = Field(default=None, ge=0, le=1_000_000)
+    excludedPlaceTypes: list[str] = Field(default_factory=list, max_length=20)
 
 
 class CreateRoute(StrictModel):
@@ -49,6 +52,7 @@ InterestConcept = Literal[
     "ARCHITECTURE", "HISTORIC_PLACES", "LANDMARKS", "MUSEUMS", "PARKS",
     "VIEWPOINTS", "RELIGIOUS_PLACES", "STREET_ART", "UNUSUAL_PLACES",
     "CHILD_FRIENDLY", "CULTURE", "NATURE", "SHOPPING", "ENTERTAINMENT",
+    "SCIENCE", "SOVIET", "MILITARY",
 ]
 
 
@@ -168,6 +172,9 @@ class QueryPreview(StrictModel):
     excludedFoodPreferences: list[str] = Field(default_factory=list)
     withChildren: bool
     unusualPlaces: bool
+    freeOnly: bool = False
+    maxBudgetRub: int | None = Field(default=None, ge=0, le=1_000_000)
+    excludedPlaceTypes: list[str] = Field(default_factory=list, max_length=20)
     centerOnly: bool
     areaStrength: Literal["SOFT", "HARD"] = "SOFT"
     locationHint: str | None = Field(default=None, max_length=120)
@@ -214,6 +221,18 @@ class PlaceCandidate(StrictModel):
     providerType: str = ""
     matchedConcepts: list[str] = Field(default_factory=list)
     matchedFoodPreferences: list[str] = Field(default_factory=list)
+    catalogId: str | None = None
+    catalogLevel: Literal["AREA", "COMPLEX", "POI"] | None = None
+    catalogParentId: str | None = None
+    catalogRelation: Literal["CONTAINS", "CLUSTER_MEMBER"] | None = None
+    catalogType: str | None = None
+    catalogTags: list[str] = Field(default_factory=list)
+    catalogAccessCost: Literal["FREE", "PAID", "MIXED"] | None = None
+    catalogPriceFromRub: int | None = Field(default=None, ge=0)
+    catalogPriceToRub: int | None = Field(default=None, ge=0)
+    catalogVisitMin: int | None = Field(default=None, ge=1)
+    catalogVisitMax: int | None = Field(default=None, ge=1)
+    catalogRelaxationLevel: int | None = Field(default=None, ge=0, le=3)
 
 
 class PlaceSummary(StrictModel):
@@ -270,7 +289,9 @@ class Route(StrictModel):
     approximateStart: bool
     startLat: float | None = Field(default=None, ge=-90, le=90)
     startLon: float | None = Field(default=None, ge=-180, le=180)
-    startSource: Literal["USER_GEO", "TEXT_ANCHOR", "CITY_CENTER", "LEGACY"] = "LEGACY"
+    startSource: Literal[
+        "USER_GEO", "TEXT_ANCHOR", "CITY_NO_GEO_OVERRIDE", "CITY_CENTER", "LEGACY",
+    ] = "LEGACY"
     maxWalkingMinutes: int | None = Field(default=None, ge=1, le=120)
     planningStatus: Literal["SUCCESS", "DEGRADED"] = "SUCCESS"
     durationUtilization: float = Field(default=1.0, ge=0)

@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 from gulyay.api import (CLIENT_REQUESTS, IDEMPOTENT_REVISIONS, IDEMPOTENT_ROUTES,
                         POSITION_REQUESTS, RECENT_ROUTES,
                         app, get_geo_provider, get_intent_provider,
-                        get_route_repository)
+                        get_catalog_provider, get_route_repository)
+from gulyay.catalog import CatalogPlaceProvider, PlaceCatalog
 from gulyay.geo import GeoRateLimited, GeoUnavailable
 from gulyay.models import IntentExtraction, PlaceCandidate, RouteLeg, SearchArea
 from gulyay.repository import RouteRepository
@@ -99,8 +100,13 @@ class MissingGeo:
 @pytest.fixture(autouse=True)
 def reset_state():
     repository.clear()
+    catalog = PlaceCatalog(":memory:")
     app.dependency_overrides[get_route_repository] = lambda: repository
+    # API tests asserting provider behaviour must not depend on whatever
+    # enrichment happens to be stored in the developer's persistent catalogue.
+    app.dependency_overrides[get_catalog_provider] = lambda: CatalogPlaceProvider(catalog)
     yield
+    catalog.close()
     app.dependency_overrides.clear()
     IDEMPOTENT_ROUTES.clear()
     IDEMPOTENT_REVISIONS.clear()
@@ -163,8 +169,41 @@ def test_never_publish_a_fabricated_route():
         "X-Request-Id": str(uuid4())}, json={"cityId": "tula", "query": "Посмотреть кремль за четыре часа",
         "deviceSessionId": session})
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "GEO_UNAVAILABLE"
+    assert response.json()["error"]["code"] == "DGIS_UNAVAILABLE"
     assert "points" not in response.json()
+
+
+def test_strict_preferences_relax_to_a_real_route_instead_of_503():
+    class StrictIntent(FakeIntent):
+        def extract(self, query):
+            result = super().extract(query).model_dump()
+            result["interests"] = [
+                {"concept": "SCIENCE", "priority": "HIGH", "strength": "SOFT",
+                 "sourceText": "science", "broadeningAllowed": True},
+                {"concept": "VIEWPOINTS", "priority": "HIGH", "strength": "SOFT",
+                 "sourceText": "views", "broadeningAllowed": True},
+            ]
+            return IntentExtraction.model_validate(result)
+
+    app.dependency_overrides[get_intent_provider] = StrictIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    response = client.post("/v1/routes", headers={"X-Device-Session": session}, json={
+        "cityId": "tula", "query": "science and views", "deviceSessionId": session,
+    })
+    assert response.status_code == 200
+    assert response.json()["points"]
+
+
+def test_shorter_than_requested_duration_is_still_a_successful_response():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    response = client.post("/v1/routes", headers={"X-Device-Session": session}, json={
+        "cityId": "tula", "query": "two hours", "deviceSessionId": session,
+    })
+    assert response.status_code == 200
+    assert response.json()["totalMinutes"] < response.json()["requestedMinutes"]
 
 
 def test_builds_and_saves_real_provider_route_idempotently():
@@ -451,7 +490,7 @@ def test_2gis_rate_limit_has_retry_contract():
         "cityId": "tula", "query": "История два часа", "deviceSessionId": session})
     assert result.status_code == 503
     assert result.headers["Retry-After"] == "17"
-    assert result.json()["error"]["code"] == "DGIS_RATE_LIMITED"
+    assert result.json()["error"]["code"] == "DGIS_RATE_LIMIT"
     assert result.json()["error"]["details"]["retryAfterSeconds"] == 17
     assert result.json()["error"]["details"]["dependency"] == "2gis"
 

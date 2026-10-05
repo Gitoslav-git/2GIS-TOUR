@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
+from .catalog import (CatalogPlaceProvider, PlaceCatalog, bundled_seed_paths)
 from .geo import (DgisGeoProvider, GeoAuthenticationError, GeoConstraintNotFound,
                   GeoInvalidResponse, GeoPlaceNotFound, GeoRateLimited,
                   GeoUnavailable)
@@ -32,6 +33,10 @@ CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="В
           City(cityId="moscow", name="Москва"),
           City(cityId="borovsk", name="Боровск, Калужская область"))
 ROUTE_REPOSITORY = RouteRepository()
+PLACE_CATALOG = PlaceCatalog()
+for seed_path in bundled_seed_paths():
+    PLACE_CATALOG.import_seed(seed_path)
+CATALOG_PROVIDER = CatalogPlaceProvider(PLACE_CATALOG)
 IDEMPOTENT_ROUTES: dict[tuple[UUID, UUID], Route] = {}
 IDEMPOTENT_REVISIONS: dict[tuple[UUID, UUID], Route] = {}
 RECENT_ROUTES: dict[tuple[UUID, str], tuple[float, Route]] = {}
@@ -42,9 +47,30 @@ POSITION_REQUESTS: dict[UUID, deque[float]] = defaultdict(deque)
 
 def failure(code: str, message: str, status: int, request_id: str | None = None,
             details: dict | None = None, headers: dict[str, str] | None = None) -> JSONResponse:
+    # Keep legacy call sites internally while exposing one stable 2GIS contract.
+    if code == "GEO_UNAVAILABLE":
+        if (details or {}).get("reason") == "authentication":
+            code, message = "DGIS_AUTH_ERROR", "2GIS API authorization failed"
+        else:
+            code, message = "DGIS_UNAVAILABLE", "2GIS routing service is temporarily unavailable"
+    elif code == "DGIS_RATE_LIMITED":
+        code, message = "DGIS_RATE_LIMIT", "2GIS request limit reached"
     return JSONResponse(status_code=status, content={"error": {
         "code": code, "message": message, "details": details or {}, "requestId": request_id,
     }}, headers=headers)
+
+
+def dgis_failure(exc: Exception, request_id: str | None = None) -> JSONResponse:
+    """Stable public contract for real 2GIS-provider failures only."""
+    if isinstance(exc, GeoAuthenticationError):
+        return failure("DGIS_AUTH_ERROR", "2GIS API authorization failed", 503, request_id)
+    if isinstance(exc, GeoRateLimited):
+        seconds = exc.retry_after_seconds
+        return failure("DGIS_RATE_LIMIT", "2GIS request limit reached", 503, request_id,
+                       {"retryAfterSeconds": seconds, "dependency": "2gis"},
+                       {"Retry-After": str(seconds)})
+    return failure("DGIS_UNAVAILABLE", "2GIS routing service is temporarily unavailable",
+                   503, request_id)
 
 
 def get_intent_provider() -> OpenAIIntentProvider:
@@ -57,6 +83,10 @@ def get_geo_provider() -> DgisGeoProvider:
 
 def get_route_repository() -> RouteRepository:
     return ROUTE_REPOSITORY
+
+
+def get_catalog_provider() -> CatalogPlaceProvider:
+    return CATALOG_PROVIDER
 
 
 @app.exception_handler(RequestValidationError)
@@ -136,6 +166,7 @@ def create_route(payload: CreateRoute, x_device_session: UUID | None = Header(de
                  x_request_id: UUID | None = Header(default=None),
                  intent_provider: OpenAIIntentProvider = Depends(get_intent_provider),
                  geo: DgisGeoProvider = Depends(get_geo_provider),
+                 catalog: CatalogPlaceProvider = Depends(get_catalog_provider),
                  repository: RouteRepository = Depends(get_route_repository)) -> Route | JSONResponse:
     request_id = str(x_request_id) if x_request_id else None
     authorization = _authorize_create(payload, x_device_session, request_id)
@@ -155,7 +186,7 @@ def create_route(payload: CreateRoute, x_device_session: UUID | None = Header(de
     limited = _client_rate_limit(x_device_session, request_id)
     if limited:
         return limited
-    route_or_error = _build(payload, intent_provider, geo, request_id)
+    route_or_error = _build(payload, intent_provider, geo, request_id, catalog)
     if isinstance(route_or_error, JSONResponse):
         return route_or_error
     route = route_or_error
@@ -343,6 +374,7 @@ def revise_route(route_id: UUID, revision: RouteRevision,
                  x_request_id: UUID | None = Header(default=None),
                  intent_provider: OpenAIIntentProvider = Depends(get_intent_provider),
                  geo: DgisGeoProvider = Depends(get_geo_provider),
+                 catalog: CatalogPlaceProvider = Depends(get_catalog_provider),
                  repository: RouteRepository = Depends(get_route_repository)) -> Route | JSONResponse:
     request_id = str(x_request_id) if x_request_id else None
     if x_device_session is None:
@@ -370,7 +402,7 @@ def revise_route(route_id: UUID, revision: RouteRevision,
             filters=revision.filters if revision.filters is not None else source.filters,
             startLocation=source.startLocation, deviceSessionId=x_device_session,
         )
-        route_or_error = _build(payload, intent_provider, geo, request_id)
+        route_or_error = _build(payload, intent_provider, geo, request_id, catalog)
         if isinstance(route_or_error, JSONResponse):
             return route_or_error
         replacement = route_or_error.model_copy(update={
@@ -452,12 +484,13 @@ def _authorize_create(payload: CreateRoute, session: UUID | None,
 
 
 def _build(payload: CreateRoute, intent_provider: OpenAIIntentProvider,
-           geo: DgisGeoProvider, request_id: str | None) -> Route | JSONResponse:
+           geo: DgisGeoProvider, request_id: str | None,
+           catalog: CatalogPlaceProvider | None = None) -> Route | JSONResponse:
     trace_id = request_id or str(uuid4())
     try:
         geo.ensure_configured()
         preview = interpret(payload, intent_provider, trace_id)
-        return build_route(payload, preview, geo, trace_id=trace_id)
+        return build_route(payload, preview, geo, trace_id=trace_id, catalog=catalog)
     except IntentNeedsClarification as exc:
         planning_log(trace_id, "planning_error", error="QUERY_NEEDS_CLARIFICATION",
                      fields=exc.fields)

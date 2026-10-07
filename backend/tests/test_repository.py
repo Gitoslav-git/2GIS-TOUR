@@ -37,6 +37,19 @@ def test_route_survives_repository_reopen(tmp_path):
     reopened.close()
 
 
+def test_legacy_persisted_route_without_duration_metadata_uses_safe_defaults():
+    legacy = route(uuid4()).model_dump()
+    legacy.pop("durationSource")
+    legacy.pop("durationMode")
+    legacy.pop("maxDurationMinutes")
+    legacy.pop("durationOverrunAccepted")
+    restored = Route.model_validate(legacy)
+    assert restored.durationSource == "default"
+    assert restored.durationMode == "DEFAULT"
+    assert restored.maxDurationMinutes is None
+    assert restored.durationOverrunAccepted is False
+
+
 def test_atomic_replace_rejects_stale_version():
     repository = RouteRepository(":memory:")
     owner, route_id = uuid4(), uuid4()

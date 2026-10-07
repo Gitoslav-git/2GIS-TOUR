@@ -5,7 +5,7 @@ import pytest
 
 from gulyay.models import (CreateRoute, PlaceCandidate, QueryPreview, RouteLeg,
                            SearchArea, StartLocation)
-from gulyay.route_builder import (RouteNotFound, TimeBudgetExceeded, build_route, city_timezone,
+from gulyay.route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, _candidate_score, build_route, city_timezone,
                                   rebuild_route_with_points, schedule_status_at)
 
 
@@ -229,14 +229,15 @@ def test_density_and_pace_change_how_many_places_fit():
     assert len(intensive.points) > len(slow.points)
 
 
-def test_ordinary_walk_never_publishes_one_point_route():
-    with pytest.raises(RouteNotFound):
-        build_route(
-            CreateRoute(cityId="tula", query="Прогулка на три часа"),
-            preferences(allowSinglePlace=False),
-            FakeGeo([candidate("Кремль", "only", schedule={"is_24x7": True})]),
-            datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
-        )
+def test_ordinary_walk_publishes_hard_valid_terminal_fallback():
+    route = build_route(
+        CreateRoute(cityId="tula", query="Прогулка на три часа"),
+        preferences(allowSinglePlace=False),
+        FakeGeo([candidate("Кремль", "only", schedule={"is_24x7": True})]),
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert [point.placeId for point in route.points] == ["only"]
+    assert route.planningStatus == "DEGRADED"
 
 
 def test_explicit_one_place_request_may_return_one_point():
@@ -247,6 +248,45 @@ def test_explicit_one_place_request_may_return_one_point():
         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
     )
     assert [point.placeId for point in route.points] == ["only"]
+
+
+def test_terminal_fallback_returns_degraded_one_point_route():
+    route = build_route(
+        CreateRoute(cityId="tula", query="walk"),
+        preferences(allowSinglePlace=False, interests=[]),
+        FakeGeo([candidate("only", "only", schedule={"is_24x7": True})]),
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert [point.placeId for point in route.points] == ["only"]
+    assert route.planningStatus == "DEGRADED"
+    assert "ROUTE_VARIETY" in route.unmetPreferences
+
+
+def test_terminal_fallback_keeps_explicit_exclusions_hard():
+    museum = PlaceCandidate(
+        placeId="museum", name="museum", lat=54.195, lon=37.620,
+        rubrics=["museum"], schedule={"is_24x7": True}, isFood=False,
+        matchedConcepts=["MUSEUMS"],
+    )
+    with pytest.raises(RouteNotFound):
+        build_route(
+            CreateRoute(cityId="tula", query="walk"),
+            preferences(allowSinglePlace=False, interests=[], hardExclusions=["MUSEUMS"]),
+            FakeGeo([museum]),
+            datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+        )
+
+
+def test_strong_catalog_specific_match_beats_slightly_closer_neutral_poi():
+    direct = PlaceCandidate(placeId="direct", name="Космический ковчег", lat=54.201,
+                            lon=37.620, rubrics=[], schedule={}, isFood=False,
+                            catalogFinalScore=0.95, catalogLexicalScore=1.0)
+    neutral = PlaceCandidate(placeId="neutral", name="Нейтральная точка", lat=54.1951,
+                             lon=37.620, rubrics=[], schedule={}, isFood=False,
+                             catalogFinalScore=0.35, catalogLexicalScore=0.0)
+    current = (54.195, 37.620)
+    intent = preferences(interests=["SCIENCE"], interestPriorities={"SCIENCE": "HIGH"})
+    assert _candidate_score(current, direct, None, intent) < _candidate_score(current, neutral, None, intent)
 
 
 def test_schedule_checks_whole_visit_not_only_arrival():
@@ -455,19 +495,20 @@ def test_returned_area_belongs_to_selected_route(wider_is_better):
     assert all("поиск был расширен" not in warning for warning in route.warnings)
 
 
-def test_hard_area_never_expands():
+def test_hard_area_terminal_fallback_never_expands():
     class HardAreaGeo(FakeGeo):
         def resolve_search_area(self, city_id, location_hint, center):
             assert location_hint == "центр"
             return super().resolve_search_area(city_id, location_hint, center)
 
     geo = HardAreaGeo([candidate("Одно место", "local", schedule={"is_24x7": True})])
-    with pytest.raises(RouteNotFound):
-        build_route(
-            CreateRoute(cityId="tula", query="Только в центре, прогулка на три часа"),
-            preferences(locationHint="центр", areaStrength="HARD", allowSinglePlace=False),
-            geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
-        )
+    route = build_route(
+        CreateRoute(cityId="tula", query="Только в центре, прогулка на три часа"),
+        preferences(locationHint="центр", areaStrength="HARD", allowSinglePlace=False),
+        geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert route.planningStatus == "DEGRADED"
+    assert route.searchArea.label != "Весь город"
 
 
 def test_walking_limit_skips_long_leg_without_reporting_geo_failure():
@@ -568,6 +609,23 @@ def test_maximum_duration_is_a_ceiling_not_a_target_to_fill():
     assert route.totalMinutes < 300
     assert route.planningStatus == "SUCCESS"
     assert "DURATION_TARGET" not in route.unmetPreferences
+
+
+def test_target_duration_allows_small_overrun_without_maximum():
+    places = [
+        PlaceCandidate(placeId=f"p{index}", name=f"p{index}",
+                       lat=54.195 + index * 0.001, lon=37.620 + index * 0.001,
+                       rubrics=[], schedule={"is_24x7": True}, isFood=False,
+                       catalogVisitMin=55, catalogVisitMax=55)
+        for index in range(2)
+    ]
+    route = build_route(
+        CreateRoute(cityId="tula", query="walk"),
+        preferences(durationMinutes=120, targetDurationMinutes=120,
+                    maxDurationMinutes=None, interests=[], allowSinglePlace=False),
+        FakeGeo(places), datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert 120 < route.totalMinutes <= 138
 
 
 def test_hard_exclusion_is_rechecked_even_if_provider_adapter_misses_it():
@@ -684,16 +742,115 @@ def test_point_edit_recovers_exact_start_from_route_created_before_0_5_4():
     assert geo.walking_starts[0] == (54.250, 37.700)
 
 
-def test_manual_edit_over_budget_does_not_publish_partial_route():
+def test_manual_edit_over_explicit_duration_requires_confirmation_then_accepts():
     places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True})
               for index in range(1, 5)]
     geo = FakeGeo(places)
     payload = CreateRoute(cityId="tula", query="История 3 часа")
     source = build_route(payload, preferences(), geo,
                          datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
-    with pytest.raises(TimeBudgetExceeded) as error:
+    with pytest.raises(DurationConfirmationRequired) as error:
         rebuild_route_with_points(
             source, payload, places, geo,
             datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
         )
-    assert error.value.minimum_minutes == 200
+    assert error.value.requested_minutes == 180
+    assert error.value.projected_minutes == 200
+    accepted = rebuild_route_with_points(
+        source, payload, places, geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+        allow_duration_overrun=True,
+    )
+    assert accepted.totalMinutes == 200
+    assert accepted.unusedMinutes == 0
+    assert accepted.durationOverrunAccepted is True
+
+
+def test_manual_edit_without_explicit_duration_can_exceed_planner_default():
+    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True})
+              for index in range(1, 5)]
+    geo = FakeGeo(places)
+    payload = CreateRoute(cityId="tula", query="Прогулка")
+    source = build_route(payload, preferences(), geo,
+                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    source = source.model_copy(update={"durationSource": "default", "durationMode": "DEFAULT",
+                                       "requestedMinutes": 120})
+    revised = rebuild_route_with_points(
+        source, payload, places, geo,
+        datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+    assert revised.totalMinutes == 200
+    assert revised.unusedMinutes == 0
+    assert revised.durationOverrunAccepted is False
+
+
+def test_manual_edit_target_120_returns_exact_145_minute_confirmation():
+    class TimedGeo(FakeGeo):
+        def walking_leg(self, start, end, from_order, to_order):
+            seconds = 900 if to_order == 1 else 600
+            return RouteLeg(fromOrder=from_order, toOrder=to_order, distanceMeters=500,
+                            durationSeconds=seconds,
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    first = PlaceCandidate(placeId="first", name="Первая", lat=54.195, lon=37.620,
+                           rubrics=[], schedule={"is_24x7": True}, isFood=False,
+                           catalogVisitMin=60, catalogVisitMax=60)
+    second = PlaceCandidate(placeId="second", name="Вторая", lat=54.196, lon=37.621,
+                            rubrics=[], schedule={"is_24x7": True}, isFood=False,
+                            catalogVisitMin=60, catalogVisitMax=60)
+    geo = TimedGeo([first])
+    payload = CreateRoute(cityId="tula", query="На 2 часа")
+    source = build_route(payload, preferences(durationMinutes=120, targetDurationMinutes=120), geo,
+                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    source = source.model_copy(update={"requestedMinutes": 120, "durationSource": "text",
+                                       "durationMode": "TARGET"})
+    with pytest.raises(DurationConfirmationRequired) as error:
+        rebuild_route_with_points(source, payload, [first, second], geo,
+                                  datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    assert error.value.projected_minutes == 145
+    assert error.value.overrun_minutes == 25
+    accepted = rebuild_route_with_points(source, payload, [first, second], geo,
+                                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+                                         allow_duration_overrun=True)
+    assert accepted.totalMinutes == 145
+    assert accepted.unusedMinutes == 0
+
+
+def test_manual_edit_maximum_duration_can_be_confirmed_but_walking_limit_stays_hard():
+    class LongLegGeo(FakeGeo):
+        def walking_leg(self, start, end, from_order, to_order):
+            return RouteLeg(fromOrder=from_order, toOrder=to_order, distanceMeters=3000,
+                            durationSeconds=1800,
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    point = candidate("Далеко", "far", schedule={"is_24x7": True})
+    geo = LongLegGeo([point])
+    payload = CreateRoute(cityId="tula", query="Максимум 2 часа")
+    source = build_route(payload, preferences(maxWalkingMinutes=None), geo,
+                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    source = source.model_copy(update={"requestedMinutes": 60, "durationSource": "text",
+                                       "durationMode": "MAXIMUM", "maxWalkingMinutes": 20})
+    with pytest.raises(RouteNotFound):
+        rebuild_route_with_points(source, payload, [point], geo,
+                                  datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+                                  allow_duration_overrun=True)
+
+
+def test_manual_edit_maximum_duration_requires_confirmation_before_override():
+    places = [candidate(f"Место {index}", f"2gis-{index}", schedule={"is_24x7": True})
+              for index in range(1, 5)]
+    geo = FakeGeo(places)
+    payload = CreateRoute(cityId="tula", query="Максимум 2 часа")
+    source = build_route(payload, preferences(), geo,
+                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    source = source.model_copy(update={"requestedMinutes": 120, "durationSource": "text",
+                                       "durationMode": "MAXIMUM", "maxDurationMinutes": 120})
+    with pytest.raises(DurationConfirmationRequired) as error:
+        rebuild_route_with_points(source, payload, places, geo,
+                                  datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
+    assert error.value.duration_mode == "MAXIMUM"
+    accepted = rebuild_route_with_points(source, payload, places, geo,
+                                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+                                         allow_duration_overrun=True)
+    assert accepted.totalMinutes == 200
+    assert accepted.durationOverrunAccepted is True

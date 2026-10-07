@@ -6,6 +6,7 @@ if (!backendUrl.startsWith('https://')) {
     throw new GradleException('BACKEND_BASE_URL must be HTTPS')
 }
 def dgisSdkVersion = providers.environmentVariable('DGIS_SDK_VERSION').orElse('13.6.0').get()
+def appVersion = rootProject.file('VERSION').getText('UTF-8').trim()
 android {
     namespace 'ru.gulyay.app'
     compileSdk 35
@@ -15,7 +16,7 @@ android {
         minSdk 23
         targetSdk 35
         versionCode 35
-        versionName '0.7.1'
+        versionName appVersion
         buildConfigField 'String', 'BACKEND_BASE_URL', '"' + backendUrl.replace('"', '\\"') + '"'
     }
     buildTypes { debug { } }

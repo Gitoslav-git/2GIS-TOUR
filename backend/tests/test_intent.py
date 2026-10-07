@@ -3,7 +3,8 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from gulyay.api import app, get_intent_provider
+from gulyay.api import (CLIENT_REQUESTS, POSITION_REQUESTS, SOURCE_REQUESTS,
+                        app, get_intent_provider)
 from gulyay.intent import (IntentAuthenticationError, IntentInvalidResponse,
                            IntentUnavailable, configured_model)
 from gulyay.models import IntentExtraction
@@ -99,6 +100,9 @@ def request(**updates):
 def reset_overrides():
     yield
     app.dependency_overrides.clear()
+    CLIENT_REQUESTS.clear()
+    POSITION_REQUESTS.clear()
+    SOURCE_REQUESTS.clear()
 
 
 def test_extracts_preferences_without_claiming_real_locations():
@@ -410,6 +414,26 @@ def test_duration_semantics_are_not_collapsed_into_one_budget(query, parsed_mode
     assert result.json()["targetDurationMinutes"] == 180
 
 
+def test_target_and_filter_durations_do_not_create_hidden_hard_caps():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
+        parsed(durationMinutes=120))
+    text_target = request(query="walk for two hours")
+    filtered_target = request(query="walk", filters={"durationMinutes": 120})
+    assert text_target.json()["maxDurationMinutes"] is None
+    assert filtered_target.json()["maxDurationMinutes"] is None
+
+
+def test_explicit_maximum_duration_keeps_the_hard_cap():
+    intent = parsed(durationMinutes=120)
+    intent = intent.model_copy(update={
+        "duration": intent.duration.model_copy(update={"mode": "MAXIMUM", "maxMinutes": 120}),
+    })
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(intent)
+    result = request(query="walk")
+    assert result.json()["durationMode"] == "MAXIMUM"
+    assert result.json()["maxDurationMinutes"] == 120
+
+
 def test_optional_food_and_soft_exclusion_stay_soft():
     data = parsed(durationMinutes=180).model_dump()
     data["food"].update({"mode": "OPTIONAL", "timing": "MIDDLE",
@@ -441,3 +465,11 @@ def test_explicit_place_count_and_specific_cuisine_are_preserved():
     assert result.json()["allowSinglePlace"] is True
     assert result.json()["foodPreferences"] == ["ITALIAN"]
     assert result.json()["foodTiming"] == "END"
+
+
+def test_specific_lexical_terms_are_preserved_from_original_query():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed())
+    result = request(query="Космос, фрески и настенные росписи Циолковского")
+    assert result.status_code == 200
+    terms = result.json()["specificTerms"]
+    assert {"космос", "фрески", "росписи", "циолковского"}.issubset(terms)

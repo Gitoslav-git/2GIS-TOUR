@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from .models import QueryPreview
 
@@ -60,6 +61,29 @@ class CatalogQuery:
     pace: str
     requested_concepts: tuple[str, ...]
     hard_concepts: tuple[str, ...]
+    specific_terms: tuple[str, ...]
+
+
+_LEXICAL_STOPWORDS = frozenset({
+    "хочу", "прогулка", "прогуляться", "город", "городу", "города", "час", "часа",
+    "часов", "место", "места", "мест", "маршрут", "главное", "главным", "рядом",
+    "необычная", "необычный", "архитектура", "вид", "виды", "музей", "музеи",
+    "музеев", "без", "с", "и", "в", "на", "по", "для",
+})
+
+
+def normalize_lexical_tokens(value: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[а-яa-z0-9]+", value.casefold().replace("ё", "е")))
+
+
+def extract_specific_terms(query: str) -> list[str]:
+    """Conservative lexical hints, not a fuzzy full-text search contract."""
+    terms: list[str] = []
+    for token in normalize_lexical_tokens(query):
+        if len(token) < 5 or token in _LEXICAL_STOPWORDS or token in terms:
+            continue
+        terms.append(token)
+    return terms[:12]
 
 
 def catalog_query_from_preview(preview: QueryPreview) -> CatalogQuery:
@@ -71,11 +95,17 @@ def catalog_query_from_preview(preview: QueryPreview) -> CatalogQuery:
             if old is None or PRIORITY_WEIGHTS[priority] > PRIORITY_WEIGHTS[old]:
                 requested[tag] = priority
 
-    required: set[str] = set()
+    requested_concepts = list(preview.interests)
+    # Boolean UI filters express a strong preference, not a family/unusual-only
+    # route. Explicit HARD interests are retained independently below.
     if preview.withChildren:
-        required.add("FAMILY")
+        requested["FAMILY"] = "HIGH"
+        if "CHILD_FRIENDLY" not in requested_concepts:
+            requested_concepts.insert(0, "CHILD_FRIENDLY")
     if preview.unusualPlaces:
-        required.add("UNUSUAL")
+        requested["UNUSUAL"] = "HIGH"
+        if "UNUSUAL_PLACES" not in requested_concepts:
+            requested_concepts.insert(0, "UNUSUAL_PLACES")
 
     excluded: set[str] = set()
     for concept in preview.hardExclusions:
@@ -83,7 +113,7 @@ def catalog_query_from_preview(preview: QueryPreview) -> CatalogQuery:
 
     return CatalogQuery(
         requested_tags=requested,
-        required_tags=frozenset(required),
+        required_tags=frozenset(),
         excluded_concepts=frozenset(preview.hardExclusions),
         excluded_tags=frozenset(excluded),
         excluded_types=frozenset(preview.excludedPlaceTypes),
@@ -94,9 +124,11 @@ def catalog_query_from_preview(preview: QueryPreview) -> CatalogQuery:
         include_food=preview.includeFood,
         duration=preview.targetDurationMinutes or preview.durationMinutes,
         pace=preview.routePace,
-        requested_concepts=tuple(preview.interests),
-        # Positive intent is deliberately soft: a route may cover only part of it.
-        hard_concepts=(),
+        requested_concepts=tuple(requested_concepts),
+        # Normal positive intent is soft. This list contains only an explicit
+        # HARD classification made by the intent parser (for example, "only").
+        hard_concepts=tuple(preview.hardInterests),
+        specific_terms=tuple(preview.specificTerms),
     )
 
 

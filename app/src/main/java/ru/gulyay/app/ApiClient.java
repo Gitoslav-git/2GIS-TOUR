@@ -65,6 +65,9 @@ final class ApiClient {
         final List<GeoCoordinate> path;
         int totalMinutes;
         int requestedMinutes;
+        int projectedMinutes;
+        int overrunMinutes;
+        String durationMode;
         int totalDistanceMeters;
         double startLat;
         double startLon;
@@ -100,6 +103,9 @@ final class ApiClient {
             this.path = path;
             this.totalMinutes = -1;
             this.requestedMinutes = -1;
+            this.projectedMinutes = -1;
+            this.overrunMinutes = -1;
+            this.durationMode = "";
             this.totalDistanceMeters = -1;
             this.startLat = Double.NaN;
             this.startLon = Double.NaN;
@@ -300,13 +306,24 @@ final class ApiClient {
     }
 
     static Result revisePoints(String routeId, int baseVersion, String cityId,
-                               List<PlaceOption> points, String sessionId) throws Exception {
+                               List<PlaceOption> points, String sessionId,
+                               boolean allowDurationOverrun) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("baseVersion", baseVersion);
         payload.put("mode", "EDIT_POINTS");
         JSONArray ids = new JSONArray();
         for (PlaceOption point : points) ids.put(point.placeId);
         payload.put("pointIds", ids);
+        if (allowDurationOverrun) payload.put("allowDurationOverrun", true);
+        return send("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
+    }
+
+    static Result chatRevision(String routeId, int baseVersion, String cityId,
+                               String message, String sessionId) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("baseVersion", baseVersion);
+        payload.put("mode", "CHAT_REVISION");
+        payload.put("message", message);
         return send("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
     }
 
@@ -601,8 +618,15 @@ final class ApiClient {
         JSONObject details = error.optJSONObject("details");
         int retryAfter = details == null ? 0 : details.optInt("retryAfterSeconds", 0);
         String code = error.optString("code");
-        return new Result(false, humanError(code, error.optString("message")),
+        Result result = new Result(false, humanError(code, error.optString("message")),
                 null, 0, retryAfter, code);
+        if (details != null && "TIME_BUDGET_CONFIRMATION_REQUIRED".equals(code)) {
+            result.requestedMinutes = details.optInt("requestedMinutes", -1);
+            result.projectedMinutes = details.optInt("projectedMinutes", -1);
+            result.overrunMinutes = details.optInt("overrunMinutes", -1);
+            result.durationMode = details.optString("durationMode", "");
+        }
+        return result;
     }
 
     private static SearchResult searchError(JSONObject response, int status) {
@@ -684,9 +708,12 @@ final class ApiClient {
                 (cityId.equals("borovsk") ? "Боровск" : "Владимир"));
         int requested = response.optInt("requestedMinutes", response.getInt("totalMinutes"));
         int unused = response.optInt("unusedMinutes", Math.max(0, requested - response.getInt("totalMinutes")));
-        StringBuilder summary = new StringBuilder("Маршрут готов: " + city + ", " +
-                response.getInt("totalMinutes") + " из " + requested + " мин. · версия " + response.getInt("routeVersion") +
-                "\nПожелания: " + response.getString("query"));
+        boolean explicitDuration = !"default".equals(response.optString("durationSource", "default"));
+        String duration = explicitDuration
+                ? response.getInt("totalMinutes") + " из " + requested + " мин."
+                : response.getInt("totalMinutes") + " мин.";
+        StringBuilder summary = new StringBuilder("Маршрут готов: " + city + ", " + duration +
+                " · версия " + response.getInt("routeVersion") + "\nПожелания: " + response.getString("query"));
         if ("DEGRADED".equals(response.optString("planningStatus"))) {
             int utilization = (int) Math.round(response.optDouble("durationUtilization", 0) * 100);
             summary.append("\nМаршрут сокращён: удалось заполнить ")
@@ -738,6 +765,9 @@ final class ApiClient {
     private static String humanError(String code, String message) {
         switch (code) {
             case "RATE_LIMITED": return message.isEmpty() ? "Слишком много запросов приложения. Подождите и повторите." : message;
+            case "DGIS_AUTH_ERROR": return "2ГИС отклонил ключ backend. Обратитесь к администратору приложения.";
+            case "DGIS_RATE_LIMIT": return message.isEmpty() ? "2ГИС временно ограничил запросы. Подождите и повторите." : message;
+            case "DGIS_UNAVAILABLE": return message.isEmpty() ? "2ГИС временно недоступен. Попробуйте позже." : message;
             case "DGIS_RATE_LIMITED": return message.isEmpty() ? "2ГИС временно ограничил запросы. Подождите и повторите." : message;
             case "GEO_UNAVAILABLE": return message.isEmpty() ? "Данные 2ГИС недоступны. Попробуйте позже." : message;
             case "GEO_CONSTRAINT_NOT_FOUND": return "Не удалось найти указанную часть города. Сформулируйте район или ориентир точнее.";
@@ -750,6 +780,8 @@ final class ApiClient {
                     "Подходящих мест не найдено. Измените пожелания." : message;
             case "TIME_BUDGET_EXCEEDED": return message.isEmpty() ?
                     "Маршрут не помещается в выбранное время." : message;
+            case "TIME_BUDGET_CONFIRMATION_REQUIRED": return message.isEmpty() ?
+                    "Нужно подтвердить увеличение длительности маршрута." : message;
             case "VERSION_CONFLICT": return "Маршрут уже изменился. Повторите правку с актуальной версии.";
             case "ACTIVE_WALK_EXISTS": return "У вас уже есть активная прогулка. Сначала продолжите или завершите её.";
             case "WALK_NOT_ACTIVE": return "Прогулка на паузе или уже завершена.";

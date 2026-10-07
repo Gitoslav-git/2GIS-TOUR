@@ -20,6 +20,8 @@ jobs:
           python-version: '3.12'
       - name: Install server and tests
         run: python -m pip install -e './backend[test]'
+      - name: Verify shared version source
+        run: python scripts/check_version.py
       - name: Test server
         run: python -m pytest backend/tests -q
 

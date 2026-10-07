@@ -199,6 +199,7 @@ class QueryPreview(StrictModel):
     ] = "NOT_SPECIFIED"
     requestedPlaceCount: int | None = Field(default=None, ge=1, le=8)
     allowSinglePlace: bool = False
+    specificTerms: list[str] = Field(default_factory=list, max_length=12)
     warnings: list[str]
 
 
@@ -233,6 +234,9 @@ class PlaceCandidate(StrictModel):
     catalogVisitMin: int | None = Field(default=None, ge=1)
     catalogVisitMax: int | None = Field(default=None, ge=1)
     catalogRelaxationLevel: int | None = Field(default=None, ge=0, le=3)
+    catalogSemanticScore: float | None = Field(default=None, ge=0, le=1)
+    catalogFinalScore: float | None = Field(default=None, ge=0, le=1)
+    catalogLexicalScore: float | None = Field(default=None, ge=0, le=1)
 
 
 class PlaceSummary(StrictModel):
@@ -299,6 +303,12 @@ class Route(StrictModel):
     planningAttempts: int = Field(default=1, ge=1)
     unmetPreferences: list[str] = Field(default_factory=list)
     requestedMinutes: int
+    # Persist duration provenance: EDIT_POINTS must never turn an internal
+    # default into a user-facing restriction after a restart.
+    durationSource: Literal["text", "filter", "default"] = "default"
+    durationMode: Literal["TARGET", "MAXIMUM", "APPROXIMATE", "DEFAULT"] = "DEFAULT"
+    maxDurationMinutes: int | None = Field(default=None, ge=30, le=720)
+    durationOverrunAccepted: bool = False
     routePace: Literal["RELAXED", "NORMAL", "INTENSIVE"] = "NORMAL"
     totalMinutes: int
     unusedMinutes: int
@@ -320,10 +330,12 @@ class GuestHistoryItem(StrictModel):
 
 class RouteRevision(StrictModel):
     baseVersion: int = Field(ge=1)
-    mode: Literal["CHANGE_QUERY", "EDIT_POINTS"]
+    mode: Literal["CHANGE_QUERY", "EDIT_POINTS", "CHAT_REVISION"]
     query: str | None = Field(default=None, min_length=3, max_length=1000)
+    message: str | None = Field(default=None, min_length=2, max_length=1000)
     filters: Filters | None = None
     pointIds: list[str] | None = Field(default=None, min_length=1, max_length=8)
+    allowDurationOverrun: bool = False
 
     @field_validator("query")
     @classmethod

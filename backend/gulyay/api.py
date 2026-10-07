@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+import secrets
 import threading
 import time
 from collections import defaultdict, deque
@@ -23,12 +25,13 @@ from .models import (City, CreateRoute, GuestHistoryItem, PlaceSummary, QueryPre
                      WalkProgress, WalkSession)
 from .planning_debug import planning_log
 from .repository import RouteRepository
-from .route_builder import (RouteNotFound, TimeBudgetExceeded, build_route,
+from .route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, build_route,
                             rebuild_route_with_points)
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, start_walk)
+from .version import __version__ as APP_VERSION
 
-app = FastAPI(title="Гуляй API", version="0.7.1")
+app = FastAPI(title="Гуляй API", version=APP_VERSION)
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"),
           City(cityId="borovsk", name="Боровск, Калужская область"))
@@ -43,6 +46,10 @@ RECENT_ROUTES: dict[tuple[UUID, str], tuple[float, Route]] = {}
 STATE_LOCK = threading.RLock()
 CLIENT_REQUESTS: dict[UUID, deque[float]] = defaultdict(deque)
 POSITION_REQUESTS: dict[UUID, deque[float]] = defaultdict(deque)
+SOURCE_REQUESTS: dict[str, deque[float]] = defaultdict(deque)
+PROVIDER_HEALTH_CACHE: dict[str, tuple[float, str]] = {}
+PROVIDER_HEALTH_LOCK = threading.Lock()
+SOURCE_RATE_SALT = os.getenv("SOURCE_RATE_SALT") or secrets.token_hex(16)
 
 
 def failure(code: str, message: str, status: int, request_id: str | None = None,
@@ -100,13 +107,64 @@ def health() -> dict[str, str]:
     return {"status": "ok", "version": app.version, "llmModel": configured_model()}
 
 
+@app.get("/health/providers", response_model=None)
+def provider_health(active: bool = False, x_health_token: str | None = Header(default=None),
+                    geo: DgisGeoProvider = Depends(get_geo_provider),
+                    intent_provider: OpenAIIntentProvider = Depends(get_intent_provider)) -> dict | JSONResponse:
+    """Passive by default; active probes are token-gated and TTL-cached."""
+    if active:
+        token = os.getenv("HEALTH_PROBE_TOKEN", "")
+        if not token or x_health_token != token:
+            return failure("FORBIDDEN", "Active provider checks are not publicly available", 403)
+        states = _active_provider_health(geo, intent_provider)
+    else:
+        states = {
+            "llm": "not_checked" if os.getenv("OPENAI_API_KEY") else "not_configured",
+            "dgis_places": "not_checked" if getattr(geo, "places_key", None) else "not_configured",
+            "dgis_routing": "not_checked" if getattr(geo, "routing_key", None) else "not_configured",
+        }
+    return {"status": "ok", "active": active, "providers": states}
+
+
+def _active_provider_health(geo: DgisGeoProvider, intent_provider: OpenAIIntentProvider) -> dict[str, str]:
+    now = time.monotonic()
+    with PROVIDER_HEALTH_LOCK:
+        cached = {name: state for name, (until, state) in PROVIDER_HEALTH_CACHE.items()
+                  if until > now}
+        if len(cached) == 3:
+            return cached
+        checks = {
+            "dgis_places": lambda: geo.resolve_city_center("tula"),
+            "dgis_routing": lambda: geo.walking_leg((54.193, 37.617), (54.194, 37.618), 0, 1),
+            "llm": lambda: intent_provider.extract("Короткая прогулка"),
+        }
+        states: dict[str, str] = {}
+        for name, probe in checks.items():
+            try:
+                probe()
+                state = "ok"
+            except (GeoAuthenticationError, IntentAuthenticationError):
+                state = "auth_error"
+            except GeoRateLimited:
+                state = "rate_limited"
+            except (GeoInvalidResponse, IntentInvalidResponse):
+                state = "invalid_response"
+            except (GeoUnavailable, IntentUnavailable):
+                state = "not_configured" if ((name == "llm" and not os.getenv("OPENAI_API_KEY"))
+                                              or (name == "dgis_places" and not getattr(geo, "places_key", None))
+                                              or (name == "dgis_routing" and not getattr(geo, "routing_key", None))) else "unavailable"
+            PROVIDER_HEALTH_CACHE[name] = (now + 30, state)
+            states[name] = state
+        return states
+
+
 @app.get("/v1/cities", response_model=dict[str, list[City]])
 def cities() -> dict[str, list[City]]:
     return {"cities": list(CITIES)}
 
 
 @app.get("/v1/places", response_model=dict[str, list[PlaceSummary]])
-def places(cityId: str, q: str = Query(min_length=2, max_length=120),
+def places(request: Request, cityId: str, q: str = Query(min_length=2, max_length=120),
            x_device_session: UUID | None = Header(default=None),
            x_request_id: UUID | None = Header(default=None),
            geo: DgisGeoProvider = Depends(get_geo_provider)) -> dict | JSONResponse:
@@ -115,7 +173,7 @@ def places(cityId: str, q: str = Query(min_length=2, max_length=120),
         return failure("UNAUTHORIZED", "Укажите гостевую сессию", 401, request_id)
     if cityId not in {city.cityId for city in CITIES} or len(q.strip()) < 2:
         return failure("VALIDATION_ERROR", "Проверьте город и строку поиска", 400, request_id)
-    limited = _client_rate_limit(x_device_session, request_id)
+    limited = _client_rate_limit(x_device_session, request_id, request)
     if limited:
         return limited
     try:
@@ -124,20 +182,12 @@ def places(cityId: str, q: str = Query(min_length=2, max_length=120),
             placeId=item.placeId, name=item.name, lat=item.lat, lon=item.lon,
             isFood=item.isFood,
         ) for item in candidates]}
-    except GeoAuthenticationError:
-        return failure("GEO_UNAVAILABLE", "Ключ 2ГИС не принят сервером", 503, request_id,
-                       {"reason": "authentication"})
-    except GeoRateLimited as exc:
-        return failure("DGIS_RATE_LIMITED", f"2ГИС временно ограничил запросы. Повторите через {exc.retry_after_seconds} сек.",
-                       503, request_id, {"retryAfterSeconds": exc.retry_after_seconds,
-                                         "dependency": "2gis"},
-                       {"Retry-After": str(exc.retry_after_seconds)})
-    except (GeoInvalidResponse, GeoUnavailable):
-        return failure("GEO_UNAVAILABLE", "Поиск мест 2ГИС недоступен", 503, request_id)
+    except (GeoAuthenticationError, GeoRateLimited, GeoInvalidResponse, GeoUnavailable) as exc:
+        return dgis_failure(exc, request_id)
 
 
 @app.post("/v1/routes/interpret", response_model=QueryPreview)
-def preview_route(payload: CreateRoute,
+def preview_route(request: Request, payload: CreateRoute,
                   x_device_session: UUID | None = Header(default=None),
                   x_request_id: UUID | None = Header(default=None),
                   provider: OpenAIIntentProvider = Depends(get_intent_provider)) -> QueryPreview | JSONResponse:
@@ -145,7 +195,7 @@ def preview_route(payload: CreateRoute,
     authorization = _authorize_create(payload, x_device_session, request_id)
     if authorization:
         return authorization
-    limited = _client_rate_limit(x_device_session, request_id)
+    limited = _client_rate_limit(x_device_session, request_id, request)
     if limited:
         return limited
     try:
@@ -162,7 +212,7 @@ def preview_route(payload: CreateRoute,
 
 
 @app.post("/v1/routes", response_model=Route)
-def create_route(payload: CreateRoute, x_device_session: UUID | None = Header(default=None),
+def create_route(request: Request, payload: CreateRoute, x_device_session: UUID | None = Header(default=None),
                  x_request_id: UUID | None = Header(default=None),
                  intent_provider: OpenAIIntentProvider = Depends(get_intent_provider),
                  geo: DgisGeoProvider = Depends(get_geo_provider),
@@ -183,7 +233,7 @@ def create_route(payload: CreateRoute, x_device_session: UUID | None = Header(de
             return recent[1]
         if recent:
             RECENT_ROUTES.pop(recent_key, None)
-    limited = _client_rate_limit(x_device_session, request_id)
+    limited = _client_rate_limit(x_device_session, request_id, request)
     if limited:
         return limited
     route_or_error = _build(payload, intent_provider, geo, request_id, catalog)
@@ -369,7 +419,7 @@ def delete_route(route_id: UUID, x_device_session: UUID | None = Header(default=
 
 
 @app.post("/v1/routes/{route_id}/revisions", response_model=Route)
-def revise_route(route_id: UUID, revision: RouteRevision,
+def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
                  x_device_session: UUID | None = Header(default=None),
                  x_request_id: UUID | None = Header(default=None),
                  intent_provider: OpenAIIntentProvider = Depends(get_intent_provider),
@@ -383,7 +433,7 @@ def revise_route(route_id: UUID, revision: RouteRevision,
     with STATE_LOCK:
         if idempotency_key and idempotency_key in IDEMPOTENT_REVISIONS:
             return IDEMPOTENT_REVISIONS[idempotency_key]
-    limited = _client_rate_limit(x_device_session, request_id)
+    limited = _client_rate_limit(x_device_session, request_id, request)
     if limited:
         return limited
     state = repository.get(route_id, x_device_session)
@@ -393,12 +443,21 @@ def revise_route(route_id: UUID, revision: RouteRevision,
     if revision.baseVersion != current.routeVersion:
         return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
                        {"currentVersion": current.routeVersion})
-    if revision.mode == "CHANGE_QUERY":
-        if revision.query is None or revision.pointIds is not None:
+    if revision.mode in {"CHANGE_QUERY", "CHAT_REVISION"}:
+        if revision.mode == "CHAT_REVISION":
+            if revision.message is None or revision.query is not None or revision.pointIds is not None:
+                return failure("VALIDATION_ERROR", "Для сообщения чата нужен только текст правки", 400,
+                               request_id, {"fields": ["message"]})
+            # Keep the route source compact and preserve the previous intent context for
+            # the existing structured parser. The model receives no POI/provider facts.
+            next_query = source.query + "\nУточнение к текущему маршруту: " + revision.message
+        else:
+            next_query = revision.query
+        if next_query is None or revision.pointIds is not None:
             return failure("VALIDATION_ERROR", "Для изменения маршрута нужен новый текст", 400,
                            request_id, {"fields": ["query"]})
         payload = CreateRoute(
-            cityId=source.cityId, query=revision.query,
+            cityId=source.cityId, query=next_query,
             filters=revision.filters if revision.filters is not None else source.filters,
             startLocation=source.startLocation, deviceSessionId=x_device_session,
         )
@@ -415,24 +474,30 @@ def revise_route(route_id: UUID, revision: RouteRevision,
         payload = source
         try:
             candidates = geo.resolve_places(current.cityId, revision.pointIds)
-            replacement = rebuild_route_with_points(current, source, candidates, geo).model_copy(
+            replacement = rebuild_route_with_points(
+                current, source, candidates, geo,
+                allow_duration_overrun=revision.allowDurationOverrun,
+            ).model_copy(
                 update={"routeVersion": revision.baseVersion + 1}
             )
         except GeoPlaceNotFound:
             return failure("ROUTE_NOT_FOUND", "Одна из точек не найдена в выбранном городе", 422,
                            request_id)
-        except GeoAuthenticationError:
-            return failure("GEO_UNAVAILABLE", "Ключ 2ГИС не принят сервером", 503, request_id,
-                           {"reason": "authentication"})
-        except GeoRateLimited as exc:
-            return failure("DGIS_RATE_LIMITED",
-                           f"2ГИС временно ограничил запросы. Повторите через {exc.retry_after_seconds} сек.",
-                           503, request_id, {"retryAfterSeconds": exc.retry_after_seconds,
-                                             "dependency": "2gis"},
-                           {"Retry-After": str(exc.retry_after_seconds)})
-        except (GeoInvalidResponse, GeoUnavailable):
-            return failure("GEO_UNAVAILABLE", "Сервис мест или пеших маршрутов 2ГИС недоступен",
-                           503, request_id)
+        except (GeoAuthenticationError, GeoRateLimited, GeoInvalidResponse, GeoUnavailable) as exc:
+            return dgis_failure(exc, request_id)
+        except DurationConfirmationRequired as exc:
+            return failure(
+                "TIME_BUDGET_CONFIRMATION_REQUIRED",
+                "После изменения маршрут займёт больше выбранного времени",
+                409, request_id,
+                {
+                    "requestedMinutes": exc.requested_minutes,
+                    "projectedMinutes": exc.projected_minutes,
+                    "overrunMinutes": exc.overrun_minutes,
+                    "durationMode": exc.duration_mode,
+                    "canOverride": True,
+                },
+            )
         except TimeBudgetExceeded as exc:
             details = {"minimumMinutes": exc.minimum_minutes} if exc.minimum_minutes else {}
             return failure("TIME_BUDGET_EXCEEDED", "Точки не помещаются в выбранное время", 422,
@@ -488,7 +553,11 @@ def _build(payload: CreateRoute, intent_provider: OpenAIIntentProvider,
            catalog: CatalogPlaceProvider | None = None) -> Route | JSONResponse:
     trace_id = request_id or str(uuid4())
     try:
-        geo.ensure_configured()
+        # Routing is mandatory for every published walk. Keep a cheap legacy
+        # preflight, but do not require a Places key until a Places operation
+        # is actually requested by build_route.
+        ensure_routing = getattr(geo, "ensure_routing_configured", geo.ensure_configured)
+        ensure_routing()
         preview = interpret(payload, intent_provider, trace_id)
         return build_route(payload, preview, geo, trace_id=trace_id, catalog=catalog)
     except IntentNeedsClarification as exc:
@@ -505,24 +574,16 @@ def _build(payload: CreateRoute, intent_provider: OpenAIIntentProvider,
     except IntentInvalidResponse:
         planning_log(trace_id, "planning_error", error="LLM_INVALID_RESPONSE")
         return failure("LLM_INVALID_RESPONSE", "Не удалось понять пожелания. Попробуйте ещё раз", 502, request_id)
-    except GeoAuthenticationError:
-        planning_log(trace_id, "planning_error", error="GEO_AUTHENTICATION")
-        return failure("GEO_UNAVAILABLE", "Ключ 2ГИС не принят сервером", 503, request_id,
-                       {"reason": "authentication"})
-    except GeoRateLimited as exc:
-        planning_log(trace_id, "planning_error", error="DGIS_RATE_LIMITED",
-                     retryAfterSeconds=exc.retry_after_seconds)
-        seconds = exc.retry_after_seconds
-        return failure("DGIS_RATE_LIMITED", f"2ГИС временно ограничил запросы. Повторите через {seconds} сек.", 503,
-                       request_id, {"retryAfterSeconds": seconds, "dependency": "2gis"},
-                       {"Retry-After": str(seconds)})
+    except (GeoAuthenticationError, GeoRateLimited) as exc:
+        planning_log(trace_id, "planning_error", error=type(exc).__name__)
+        return dgis_failure(exc, request_id)
     except GeoConstraintNotFound:
         planning_log(trace_id, "planning_error", error="GEO_CONSTRAINT_NOT_FOUND")
         return failure("GEO_CONSTRAINT_NOT_FOUND", "Не удалось найти указанную часть города в 2ГИС", 422,
                        request_id, {"fields": ["locationHint"]})
-    except (GeoInvalidResponse, GeoUnavailable):
-        planning_log(trace_id, "planning_error", error="GEO_UNAVAILABLE")
-        return failure("GEO_UNAVAILABLE", "Сервис мест или пеших маршрутов 2ГИС недоступен", 503, request_id)
+    except (GeoInvalidResponse, GeoUnavailable) as exc:
+        planning_log(trace_id, "planning_error", error=type(exc).__name__)
+        return dgis_failure(exc, request_id)
     except TimeBudgetExceeded as exc:
         planning_log(trace_id, "planning_error", error="TIME_BUDGET_EXCEEDED",
                      minimumMinutes=exc.minimum_minutes)
@@ -557,12 +618,38 @@ def _clarification_message(fields: list[str]) -> str:
     return "Уточните параметры прогулки"
 
 
-def _client_rate_limit(session: UUID | None, request_id: str | None) -> JSONResponse | None:
+def _source_key(request: Request | None) -> str | None:
+    if request is None or request.client is None:
+        return None
+    peer = request.client.host
+    trusted = {item.strip() for item in os.getenv("TRUSTED_PROXY_HOSTS", "").split(",") if item.strip()}
+    if peer in trusted:
+        forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if forwarded:
+            peer = forwarded
+    return hashlib.blake2b(f"{SOURCE_RATE_SALT}:{peer}".encode(), digest_size=16).hexdigest()
+
+
+def _prune_rate_state(now: float) -> None:
+    for store in (CLIENT_REQUESTS, POSITION_REQUESTS, SOURCE_REQUESTS):
+        for key in list(store):
+            window = store[key]
+            while window and window[0] <= now - 60:
+                window.popleft()
+            if not window:
+                store.pop(key, None)
+        while len(store) > 4096:
+            store.pop(next(iter(store)), None)
+
+
+def _client_rate_limit(session: UUID | None, request_id: str | None,
+                       request: Request | None = None) -> JSONResponse | None:
     """Allow five expensive client operations per rolling minute and device session."""
     if session is None:
         return None
     now = time.monotonic()
     with STATE_LOCK:
+        _prune_rate_state(now)
         window = CLIENT_REQUESTS[session]
         while window and window[0] <= now - 60:
             window.popleft()
@@ -575,6 +662,16 @@ def _client_rate_limit(session: UUID | None, request_id: str | None) -> JSONResp
                 {"Retry-After": str(retry_after)},
             )
         window.append(now)
+        source = _source_key(request)
+        if source is not None:
+            source_window = SOURCE_REQUESTS[source]
+            if len(source_window) >= 20:
+                retry_after = max(1, int(61 - (now - source_window[0])))
+                return failure("RATE_LIMITED", "Слишком много тяжёлых запросов с этого источника. Повторите позже.",
+                               429, request_id,
+                               {"retryAfterSeconds": retry_after, "dependency": "source"},
+                               {"Retry-After": str(retry_after)})
+            source_window.append(now)
     return None
 
 

@@ -4,12 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gulyay-backend"
-version = "0.6.0"
+dynamic = ["version"]
 requires-python = ">=3.12"
 dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "pydantic>=2.10,<3", "httpx>=0.28,<1", "openai>=1.95,<3", "tzdata>=2025.2"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
+
+[tool.setuptools.dynamic]
+version = {attr = "gulyay.version.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

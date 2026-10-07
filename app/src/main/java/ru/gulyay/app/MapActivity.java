@@ -75,6 +75,7 @@ import ru.dgis.sdk.map.ZIndex;
 import ru.dgis.sdk.map.Zoom;
 
 public final class MapActivity extends ComponentActivity {
+    private static final int ROUTE_CHAT_REQUEST = 207;
     private static final String MEMORY_LOG = "GulyayMapMemory";
     private static final long POSITION_WINDOW_MILLIS = 60_000L;
     private static final long MIN_POSITION_INTERVAL_MILLIS = 5_000L;
@@ -106,6 +107,7 @@ public final class MapActivity extends ComponentActivity {
     private Image userMarkerImage;
     private Marker userMarker;
     private ApiClient.Result route;
+    private boolean routeServerBacked;
     private ApiClient.WalkResult walk;
     private RouteViewModel routeViewModel;
     private boolean restoredCamera;
@@ -352,7 +354,7 @@ public final class MapActivity extends ComponentActivity {
             if (pointEditing) cancelPointEditing();
             else returnToMain();
         });
-        editQuery.setOnClickListener(view -> returnForEdit(ACTION_EDIT_QUERY));
+        editQuery.setOnClickListener(view -> openRouteChat());
         editPoints.setOnClickListener(view -> {
             if (pointEditing) applyPointChangesInline();
             else enterPointEditing();
@@ -406,6 +408,28 @@ public final class MapActivity extends ComponentActivity {
         if (walkMode) {
             if (walk == null) loadWalk(); else showWalkStatus();
         }
+    }
+
+    private void openRouteChat() {
+        if (route == null || route.routeId == null) return;
+        Intent chat = new Intent(this, RouteChatActivity.class);
+        chat.putExtra(RouteChatActivity.EXTRA_CITY, routeCityId());
+        chat.putExtra(RouteChatActivity.EXTRA_SESSION, getIntent().getStringExtra(EXTRA_SESSION_ID));
+        chat.putExtra(RouteChatActivity.EXTRA_ROUTE_ID, route.routeId);
+        chat.putExtra(RouteChatActivity.EXTRA_ROUTE_VERSION, route.routeVersion);
+        startActivityForResult(chat, ROUTE_CHAT_REQUEST);
+    }
+
+    private String routeCityId() { return getIntent().getStringExtra(EXTRA_CITY_ID); }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != ROUTE_CHAT_REQUEST || resultCode != RESULT_OK || data == null) return;
+        String newRouteId = data.getStringExtra(RouteChatActivity.EXTRA_ROUTE_ID);
+        if (newRouteId == null || !newRouteId.equals(getIntent().getStringExtra(EXTRA_ROUTE_ID))) return;
+        getIntent().putExtra(EXTRA_ROUTE_SNAPSHOT, data.getStringExtra(RouteChatActivity.EXTRA_SNAPSHOT));
+        getIntent().putExtra(EXTRA_ROUTE_ID, newRouteId);
+        loadRoute();
     }
 
     private Button compactAction(String text) {
@@ -548,6 +572,16 @@ public final class MapActivity extends ComponentActivity {
                 if (isFinishing() || isDestroyed()) return;
                 route = finalResponse;
                 if (!route.success) {
+                    // A snapshot can help the user view a route during a
+                    // transient outage, but must never mask an ownership/404
+                    // failure or be used as a startable backend route.
+                    if ("NOT_FOUND".equals(route.errorCode)
+                            || "UNAUTHORIZED".equals(route.errorCode)
+                            || "VERSION_CONFLICT".equals(route.errorCode)) {
+                        status.setText(route.message);
+                        primaryAction.setEnabled(false);
+                        return;
+                    }
                     ApiClient.Result saved = ApiClient.routeFromSnapshot(
                             getIntent().getStringExtra(EXTRA_ROUTE_SNAPSHOT));
                     if (saved == null) {
@@ -555,7 +589,11 @@ public final class MapActivity extends ComponentActivity {
                         return;
                     }
                     route = saved;
+                    routeServerBacked = false;
                     status.setText("Backend временно недоступен: открыт сохранённый маршрут.");
+                    primaryAction.setEnabled(false);
+                } else {
+                    routeServerBacked = true;
                 }
                 routeViewModel.route = route;
                 showRouteStatus();
@@ -905,6 +943,10 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void applyPointChangesInline() {
+        applyPointChangesInline(false);
+    }
+
+    private void applyPointChangesInline(boolean allowDurationOverrun) {
         if (!pointEditing || applyingPointChanges || route == null || editingPoints.isEmpty()) return;
         applyingPointChanges = true;
         editPoints.setEnabled(false);
@@ -920,7 +962,7 @@ public final class MapActivity extends ComponentActivity {
             boolean refreshedAfterConflict = false;
             try {
                 response = ApiClient.revisePoints(routeId, baseVersion, cityId,
-                        requested, sessionId);
+                        requested, sessionId, allowDurationOverrun);
                 if (!response.success && "VERSION_CONFLICT".equals(response.errorCode)) {
                     response = ApiClient.getRoute(routeId, cityId, sessionId);
                     refreshedAfterConflict = response.success;
@@ -937,6 +979,10 @@ public final class MapActivity extends ComponentActivity {
                 if (!finalResponse.success) {
                     editPoints.setEnabled(true);
                     editPoints.setText("Подтвердить");
+                    if ("TIME_BUDGET_CONFIRMATION_REQUIRED".equals(finalResponse.errorCode)) {
+                        showDurationOverrunConfirmation(finalResponse);
+                        return;
+                    }
                     mapRouteSummary.setText(finalResponse.message);
                     return;
                 }
@@ -959,6 +1005,27 @@ public final class MapActivity extends ComponentActivity {
                 finishPointEditing();
             });
         });
+    }
+
+    private void showDurationOverrunConfirmation(ApiClient.Result response) {
+        String message = "После изменения маршрут займёт около "
+                + formatDuration(response.projectedMinutes) + " — на "
+                + response.overrunMinutes + " мин. больше выбранных вами "
+                + formatDuration(response.requestedMinutes) + ". Всё равно применить?";
+        new AlertDialog.Builder(this)
+                .setMessage(message)
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Всё равно применить",
+                        (dialog, which) -> applyPointChangesInline(true))
+                .show();
+    }
+
+    private static String formatDuration(int minutes) {
+        if (minutes < 0) return "неизвестное время";
+        int hours = minutes / 60;
+        int rest = minutes % 60;
+        if (hours == 0) return minutes + " мин.";
+        return rest == 0 ? hours + " ч." : hours + " ч " + rest + " мин.";
     }
 
     private void showPlaceSearch() {
@@ -1150,7 +1217,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void startWalk() {
-        if (startingWalk || route == null || !route.success) return;
+        if (startingWalk || route == null || !route.success || !routeServerBacked) return;
         startingWalk = true;
         primaryAction.setEnabled(false);
         status.setText("Запускаем прогулку…");

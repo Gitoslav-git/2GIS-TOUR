@@ -42,6 +42,7 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final int LOCATION_PERMISSION_REQUEST = 75;
     private static final int ROUTE_SCREEN_REQUEST = 76;
+    private static final int ROUTE_CHAT_REQUEST = 77;
     private static final long GEO_ATTEMPT_WINDOW_MILLIS = 60_000L;
     private static final String ROUTE_LIFECYCLE_PREFERENCES = "route_lifecycle";
     private static final String FINISHED_ROUTE_ID = "finishedRouteId";
@@ -653,6 +654,17 @@ public final class MainActivity extends Activity {
             clearCoordinatesKeepingCity();
             locationStatus.setText("Город выбран вручную. Если в пожеланиях нет старта, маршрут начнётся от центра города.");
         }
+        Intent chat = new Intent(this, RouteChatActivity.class);
+        chat.putExtra(RouteChatActivity.EXTRA_CITY, cityId);
+        chat.putExtra(RouteChatActivity.EXTRA_QUERY, text);
+        chat.putExtra(RouteChatActivity.EXTRA_SESSION, sessionId());
+        if (routeId != null && !routeFinished && cityId.equals(routeCityId)) {
+            chat.putExtra(RouteChatActivity.EXTRA_ROUTE_ID, routeId);
+            chat.putExtra(RouteChatActivity.EXTRA_ROUTE_VERSION, routeVersion);
+        }
+        startActivityForResult(chat, ROUTE_CHAT_REQUEST);
+        if (!isFinishing()) return;
+
         boolean revise = routeId != null && !routeFinished && cityId.equals(routeCityId)
                 && !routeLocationDirty;
         String previous = lastSuccessfulResult;
@@ -866,6 +878,10 @@ public final class MainActivity extends Activity {
     }
 
     private void applyPointChanges() {
+        applyPointChanges(false);
+    }
+
+    private void applyPointChanges(boolean allowDurationOverrun) {
         if (requestInFlight || routeId == null || currentPoints.isEmpty()) return;
         final List<ApiClient.PlaceOption> requestedPoints = new ArrayList<>(currentPoints);
         final String requestedRouteId = routeId;
@@ -880,7 +896,7 @@ public final class MainActivity extends Activity {
             boolean refreshedAfterConflict = false;
             try {
                 response = ApiClient.revisePoints(requestedRouteId, requestedVersion,
-                        requestedCityId, requestedPoints, owner);
+                        requestedCityId, requestedPoints, owner, allowDurationOverrun);
                 if (!response.success && "VERSION_CONFLICT".equals(response.errorCode)) {
                     ApiClient.Result latest = ApiClient.getRoute(requestedRouteId,
                             requestedCityId, owner);
@@ -915,6 +931,10 @@ public final class MainActivity extends Activity {
                     }
                     persistRouteState(query.getText().toString().trim());
                     if (!finalRefreshedAfterConflict) openMap();
+                } else if ("TIME_BUDGET_CONFIRMATION_REQUIRED".equals(finalResponse.errorCode)) {
+                    finishNetwork(finalResponse.retryAfterSeconds);
+                    showDurationOverrunConfirmation(finalResponse);
+                    return;
                 } else {
                     result.setText(previous + "\n\nИзменение точек не применено: " +
                             finalResponse.message);
@@ -1516,6 +1536,28 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void showDurationOverrunConfirmation(ApiClient.Result response) {
+        int projected = response.projectedMinutes;
+        int requested = response.requestedMinutes;
+        int overrun = response.overrunMinutes;
+        String message = "После изменения маршрут займёт около " + formatDuration(projected)
+                + " — на " + overrun + " мин. больше выбранных вами "
+                + formatDuration(requested) + ". Всё равно применить?";
+        new AlertDialog.Builder(this)
+                .setMessage(message)
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Всё равно применить", (dialog, which) -> applyPointChanges(true))
+                .show();
+    }
+
+    private static String formatDuration(int minutes) {
+        if (minutes < 0) return "неизвестное время";
+        int hours = minutes / 60;
+        int rest = minutes % 60;
+        if (hours == 0) return minutes + " мин.";
+        return rest == 0 ? hours + " ч." : hours + " ч " + rest + " мин.";
+    }
+
     private void refreshGuestHistory() {
         if (guestHistoryList == null || guestHistoryScroll == null) return;
         final String currentRouteId = routeId;
@@ -1895,6 +1937,31 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == ROUTE_CHAT_REQUEST) {
+            // Chat is a child UI flow, not a network request owned by this
+            // Activity. Always release the pre-launch busy guard first.
+            setNetworkBusy(false);
+            if (resultCode == RESULT_OK && data != null) {
+                if (data.getBooleanExtra(RouteChatActivity.EXTRA_RESET_ROUTE, false)) {
+                    clearLocalRouteState("Маршрут сброшен. Можно составить новый.");
+                    refreshGuestHistory();
+                    return;
+                }
+                routeId = data.getStringExtra(RouteChatActivity.EXTRA_ROUTE_ID);
+                routeVersion = data.getIntExtra(RouteChatActivity.EXTRA_ROUTE_VERSION, 0);
+                routeCityId = data.getStringExtra(RouteChatActivity.EXTRA_CITY);
+                routeSnapshot = data.getStringExtra(RouteChatActivity.EXTRA_SNAPSHOT);
+                ApiClient.Result restored = ApiClient.routeFromSnapshot(routeSnapshot);
+                if (restored != null) { currentPoints.clear(); currentPoints.addAll(restored.points); lastSuccessfulResult = restored.message; }
+                routeFinished = false; routeLocationDirty = false;
+                if (routeId != null && routeCityId != null && lastSuccessfulResult != null) {
+                    persistRouteState(data.getStringExtra(RouteChatActivity.EXTRA_QUERY));
+                    updateQueryEditActions(); refreshHomeRouteCard(); refreshGuestHistory();
+                    if (data.getBooleanExtra(RouteChatActivity.EXTRA_OPEN_ROUTE, false)) openMap();
+                }
+            }
+            return;
+        }
         if (requestCode != ROUTE_SCREEN_REQUEST) return;
         if (resultCode != RESULT_OK || data == null) {
             if (routeId != null) {

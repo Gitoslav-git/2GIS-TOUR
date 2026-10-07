@@ -12,7 +12,7 @@ from gulyay.geo import CatalogPlaceResolution, GeoUnavailable
 from gulyay.models import (CreateRoute, PlaceCandidate, QueryPreview, RouteLeg,
                            SearchArea)
 from gulyay.repository import RouteRepository
-from gulyay.route_builder import build_route
+from gulyay.route_builder import _merge_candidates, build_route
 from gulyay.visit_categories import visit_minutes
 
 
@@ -109,10 +109,10 @@ def test_seed_import_is_idempotent_and_route_clear_does_not_touch_catalog(tmp_pa
     catalog = PlaceCatalog(database)
     first = catalog.import_seed(bundled_seed_path())
     second = catalog.import_seed(bundled_seed_path())
-    assert first == second == 63
-    assert len(catalog.list_places("moscow")) == 63
+    assert first == second == 66
+    assert len(catalog.list_places("moscow")) == 66
     RouteRepository(database).clear()
-    assert len(catalog.list_places("moscow")) == 63
+    assert len(catalog.list_places("moscow")) == 66
 
 
 def test_reimport_of_synced_seed_keeps_current_visit_ranges(tmp_path):
@@ -257,13 +257,18 @@ def test_invalid_seed_values_are_rejected(tmp_path, change, expected):
         PlaceCatalog(":memory:").import_seed(seed(tmp_path, [invalid]))
 
 
-def test_moscow_is_catalog_supported_but_unresolved_seed_is_not_runtime_ready(tmp_path):
+def test_committed_enrichment_makes_fresh_catalog_runtime_ready(tmp_path):
     catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
-    catalog.import_seed(bundled_seed_path())
+    for path in bundled_seed_paths():
+        catalog.import_seed(path)
     catalog_provider = CatalogPlaceProvider(catalog)
-    assert catalog_provider.has_city("moscow")
-    assert not catalog_provider.has_sufficient_resolved("moscow")
-    assert catalog_provider.list_candidates("moscow", preview(), area()) == []
+    assert all(catalog_provider.has_sufficient_resolved(city)
+               for city in ("moscow", "tula", "vladimir", "borovsk"))
+    moscow = {place.id: place for place in catalog.list_places("moscow")}
+    assert moscow["msk001"].lat is not None
+    assert moscow["msk001"].dgis_place_id is not None
+    assert moscow["msk001"].provider_name is not None
+    assert moscow["msk035"].search_aliases
 
 
 def test_unsupported_city_keeps_provider_fallback(tmp_path):
@@ -281,6 +286,21 @@ def test_unsupported_city_keeps_provider_fallback(tmp_path):
     )
     assert geo.attraction_searches == 1
     assert route.points
+
+
+def test_incomplete_catalog_augments_provider_but_keeps_local_terminal_point(tmp_path):
+    geo = TrackingGeo(fallback=[])
+    catalog_provider = provider(tmp_path, [
+        row("local", "Local point", city_id="moscow", lat="55.750", lon="37.610"),
+    ])
+    route = build_route(
+        CreateRoute(cityId="moscow", query="walk"), preview(cityId="moscow"), geo,
+        datetime(2026, 10, 1, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+        catalog=catalog_provider,
+    )
+    assert geo.attraction_searches == 1
+    assert [point.placeId for point in route.points] == ["dgis-local"]
+    assert route.planningStatus == "DEGRADED"
 
 
 def test_moscow_catalog_avoids_text_attraction_search_and_keeps_routing(tmp_path):
@@ -301,7 +321,7 @@ def test_moscow_catalog_avoids_text_attraction_search_and_keeps_routing(tmp_path
     assert any("локального каталога" in warning for warning in route.warnings)
 
 
-def test_quick_filters_are_hard_catalog_constraints(tmp_path):
+def test_quick_filters_are_strong_catalog_preferences_not_constraints(tmp_path):
     catalog_provider = provider(tmp_path, [
         row("family", "Семейное", tags="FAMILY,UNUSUAL"),
         row("unusual", "Необычное", tags="UNUSUAL"),
@@ -316,9 +336,38 @@ def test_quick_filters_are_hard_catalog_constraints(tmp_path):
     both = catalog_provider.list_candidates(
         "moscow", preview(withChildren=True, unusualPlaces=True), area(),
     )
-    assert {item.catalogId for item in family} == {"family"}
-    assert {item.catalogId for item in unusual} == {"family", "unusual"}
-    assert {item.catalogId for item in both} == {"family"}
+    assert {item.catalogId for item in family} == {"family", "unusual", "ordinary"}
+    assert {item.catalogId for item in unusual} == {"family", "unusual", "ordinary"}
+    assert {item.catalogId for item in both} == {"family", "unusual", "ordinary"}
+    assert family[0].catalogId == "family"
+    assert unusual[0].catalogId == "unusual"
+
+
+def test_explicit_hard_unusual_interest_remains_a_catalog_constraint(tmp_path):
+    catalog_provider = provider(tmp_path, [
+        row("unusual", "Unusual", tags="UNUSUAL"),
+        row("ordinary", "Ordinary", tags="HISTORY"),
+    ])
+    candidates = catalog_provider.list_candidates(
+        "moscow", preview(unusualPlaces=True, hardInterests=["UNUSUAL_PLACES"]), area(),
+    )
+    assert [item.catalogId for item in candidates] == ["unusual"]
+
+
+def test_with_children_route_can_include_non_family_points(tmp_path):
+    catalog_provider = provider(tmp_path, [
+        row("family", "Family", tags="FAMILY", lat="55.750", lon="37.610"),
+        row("history", "History", tags="HISTORY", lat="55.752", lon="37.612"),
+        row("view", "View", tags="PANORAMIC", lat="55.754", lon="37.614"),
+    ])
+    route = build_route(
+        CreateRoute(cityId="moscow", query="walk"),
+        preview(withChildren=True, durationMinutes=120), TrackingGeo(),
+        datetime(2026, 10, 1, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+        catalog=catalog_provider,
+    )
+    assert any(point.placeId == "dgis-family" for point in route.points)
+    assert any(point.placeId != "dgis-family" for point in route.points)
 
 
 def test_semantic_relevance_outweighs_distance(tmp_path):
@@ -398,6 +447,101 @@ def test_catalog_city_intent_prioritizes_matching_seed_places(
         SearchArea(label="test", lat=anchor[0], lon=anchor[1], radiusMeters=20000, source="city"),
     )
     assert expected_ids.intersection(item.catalogId for item in ranked[:3])
+
+
+def test_borovsk_specific_lexical_terms_rank_cosmos_and_frescoes(tmp_path):
+    catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
+    catalog.import_seed(next(path for path in bundled_seed_paths()
+                             if path.name == "borovsk_places_v0_1.csv"))
+    layer = CatalogPlaceProvider(catalog)
+    anchor = SearchArea(label="Боровск", lat=55.2075, lon=36.4844,
+                        radiusMeters=12000, source="city")
+    cosmos = layer.list_candidates("borovsk", preview(
+        cityId="borovsk", interests=["SCIENCE", "UNUSUAL_PLACES", "VIEWPOINTS"],
+        interestPriorities={"SCIENCE": "HIGH", "UNUSUAL_PLACES": "HIGH", "VIEWPOINTS": "HIGH"},
+        hardExclusions=["MUSEUMS"], specificTerms=["космос", "циолковский"],
+    ), anchor)
+    cosmos_ids = [item.catalogId for item in cosmos]
+    assert "brv020" in cosmos_ids[:4]  # Космический ковчег
+    assert "brv018" in cosmos_ids[:6]  # памятник Циолковскому; музей исключён
+    assert "brv019" not in cosmos_ids
+    frescoes = layer.list_candidates("borovsk", preview(
+        cityId="borovsk", specificTerms=["фрески"],
+    ), anchor)
+    aliases = layer.list_candidates("borovsk", preview(
+        cityId="borovsk", specificTerms=["настенные", "росписи"],
+    ), anchor)
+    assert frescoes[0].catalogId == "brv001"
+    assert aliases[0].catalogId == "brv001"
+    assert cosmos[0].catalogLexicalScore is not None
+
+
+def test_direct_catalog_relevance_survives_candidate_conversion_and_merge(tmp_path):
+    layer = provider(tmp_path, [
+        row("direct", "Космический ковчег", tags="SCIENCE_TECH", lat="55.760", lon="37.630"),
+        row("near", "Нейтральная точка", tags="SCIENCE_TECH", lat="55.7501", lon="37.6101"),
+    ])
+    ranked = layer.list_candidates("moscow", preview(
+        interests=["SCIENCE"], interestPriorities={"SCIENCE": "HIGH"},
+        specificTerms=["космос"],
+    ), area())
+    direct = next(item for item in ranked if item.catalogId == "direct")
+    assert direct.catalogLexicalScore == 1
+    assert direct.catalogFinalScore is not None
+    merged = _merge_candidates([direct], [PlaceCandidate(
+        placeId=direct.placeId, name="provider", lat=direct.lat, lon=direct.lon,
+        rubrics=[], schedule={"is_24x7": True}, isFood=False,
+    )])
+    assert merged[0].catalogFinalScore == direct.catalogFinalScore
+    assert merged[0].catalogLexicalScore == direct.catalogLexicalScore
+
+
+def test_lazy_schedule_verification_replaces_closed_point_without_full_shortlist_lookup(tmp_path):
+    class ScheduleGeo(TrackingGeo):
+        def __init__(self):
+            super().__init__()
+            self.schedule_ids = []
+
+        def lookup_schedules(self, ids):
+            self.schedule_ids.extend(ids)
+            return {place_id: ({"is_24x7": True} if place_id != "dgis-closed"
+                               else {"Mon": {"working_hours": []}})
+                    for place_id in ids}
+
+    rows = [row("closed", "Закрыто", provider_id="dgis-closed", lat="55.750", lon="37.610")]
+    rows.extend(row(f"open-{index}", f"Открыто {index}", lat=str(55.751 + index / 1000),
+                    lon="37.611") for index in range(20))
+    geo = ScheduleGeo()
+    route = build_route(CreateRoute(cityId="moscow", query="Прогулка"),
+                        preview(durationMinutes=120, requestedPlaceCount=2), geo,
+                        datetime(2026, 10, 5, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+                        catalog=provider(tmp_path, rows))
+    assert "dgis-closed" not in [point.placeId for point in route.points]
+    assert geo.schedule_ids and len(set(geo.schedule_ids)) <= 10 < len(rows)
+
+
+def test_optional_schedule_failures_and_coords_only_do_not_break_catalog_route(tmp_path):
+    class OptionalFailureGeo(TrackingGeo):
+        def __init__(self):
+            super().__init__()
+            self.schedule_calls = 0
+
+        def lookup_schedules(self, ids):
+            self.schedule_calls += 1
+            raise GeoUnavailable()
+
+    geo = OptionalFailureGeo()
+    local = provider(tmp_path, [
+        row("coords-a", "Площадь", level="AREA", provider_id=""),
+        row("coords-b", "Набережная", level="AREA", provider_id="", lat="55.752", lon="37.612"),
+    ])
+    route = build_route(CreateRoute(cityId="moscow", query="Прогулка"),
+                        preview(durationMinutes=120, requestedPlaceCount=2), geo,
+                        datetime(2026, 10, 5, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+                        catalog=local)
+    assert route.points
+    assert geo.schedule_calls == 0  # coords-only candidates never use Places metadata
+    assert all(point.scheduleStatus == "UNKNOWN" for point in route.points)
 
 
 def test_catalog_hard_free_budget_and_type_filters(tmp_path):

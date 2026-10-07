@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Iterable
 
 from .catalog_intent import (CONCEPT_TAGS, PRIORITY_WEIGHTS, RELATED_TAGS, CatalogQuery,
-                             catalog_query_from_preview, type_matches_concept)
+                             catalog_query_from_preview, normalize_lexical_tokens,
+                             type_matches_concept)
 from .models import PlaceCandidate, QueryPreview, SearchArea
 
 
@@ -589,10 +590,14 @@ class CatalogPlaceProvider:
 
     def list_candidates(self, city_id: str, preview: QueryPreview,
                         anchor: SearchArea) -> list[PlaceCandidate]:
-        ranked, _ = self.rank_candidates(city_id, preview, anchor)
-        return [self._to_candidate(row, preview,
-                                   self._relaxation_level(row, catalog_query_from_preview(preview)))
-                for row in ranked]
+        ranked, trace = self.rank_candidates(city_id, preview, anchor)
+        scores = {str(item["id"]): item for item in trace}
+        return [self._to_candidate(
+            row, preview, self._relaxation_level(row, catalog_query_from_preview(preview)),
+            semantic_score=float(scores[row.id]["semantic_score"]),
+            final_score=float(scores[row.id]["final_score"]),
+            lexical_score=float(scores[row.id].get("lexical_score", 0.0)),
+        ) for row in ranked]
 
     def rank_candidates(self, city_id: str, preview: QueryPreview,
                         anchor: SearchArea) -> tuple[list[CatalogPlace], list[dict[str, object]]]:
@@ -602,7 +607,8 @@ class CatalogPlaceProvider:
         rows = [row for row in rows if self._passes_hard_filters(row, query)]
         if not rows:
             return [], []
-        semantic = {row.id: self._semantic_score(row, query) for row in rows}
+        lexical = {row.id: self._lexical_score(row, query) for row in rows}
+        semantic = {row.id: self._semantic_score(row, query, lexical[row.id]) for row in rows}
         geo = {row.id: self._geo_score(row, anchor) for row in rows}
         levels = {row.id: self._relaxation_level(row, query) for row in rows}
         ranked: list[CatalogPlace] = []
@@ -623,6 +629,7 @@ class CatalogPlaceProvider:
                     "id": selected.id, "name": selected.name, "type": selected.place_type,
                     "tags": list(selected.tags), "relaxation_level": level,
                     "semantic_score": round(semantic[selected.id], 4),
+                    "lexical_score": round(lexical[selected.id], 4),
                     "geo_score": round(geo[selected.id], 4),
                     "variety_adjustment": round(variety, 4),
                     "final_score": round(score(selected), 4),
@@ -634,10 +641,6 @@ class CatalogPlaceProvider:
 
     @staticmethod
     def _passes_hard_filters(row: CatalogPlace, query: CatalogQuery) -> bool:
-        if query.with_children and "FAMILY" not in row.tags:
-            return False
-        if query.unusual_places and "UNUSUAL" not in row.tags:
-            return False
         if row.place_type in query.excluded_types or set(row.tags).intersection(query.excluded_tags):
             return False
         if any(_row_matches_concept(row, concept) for concept in query.excluded_concepts):
@@ -652,9 +655,11 @@ class CatalogPlaceProvider:
         return all(_row_matches_concept(row, concept) for concept in query.hard_concepts)
 
     @staticmethod
-    def _semantic_score(row: CatalogPlace, query: CatalogQuery) -> float:
+    def _semantic_score(row: CatalogPlace, query: CatalogQuery,
+                        lexical_score: float = 0.0) -> float:
         if not query.requested_concepts:
-            return 0.55 + (0.15 if "LOCAL_CULTURE" in row.tags else 0.0)
+            base = 0.55 + (0.15 if "LOCAL_CULTURE" in row.tags else 0.0)
+            return min(1.0, base + lexical_score * 0.25)
         possible = sum(PRIORITY_WEIGHTS[priority] for priority in query.requested_tags.values())
         matched = sum(PRIORITY_WEIGHTS[priority] for tag, priority in query.requested_tags.items()
                       if tag in row.tags)
@@ -663,7 +668,23 @@ class CatalogPlaceProvider:
             if type_matches_concept(row.place_type, concept):
                 matched += PRIORITY_WEIGHTS.get("MEDIUM", 2) * 0.35
                 possible += PRIORITY_WEIGHTS.get("MEDIUM", 2) * 0.35
-        return matched / max(1, possible)
+        base = matched / max(1, possible)
+        # Tags remain primary; a direct name/alias signal differentiates a
+        # specific request ("фрески", "Циолковский") among similar tagged POI.
+        return min(1.0, base * 0.78 + lexical_score * 0.22)
+
+    @staticmethod
+    def _lexical_score(row: CatalogPlace, query: CatalogQuery) -> float:
+        if not query.specific_terms:
+            return 0.0
+        haystack = normalize_lexical_tokens(" ".join(
+            [row.name, row.provider_name or "", *row.search_aliases]
+        ))
+        if not haystack:
+            return 0.0
+        matched = sum(1 for term in query.specific_terms
+                      if _lexical_term_matches(term, haystack))
+        return matched / len(query.specific_terms)
 
     @staticmethod
     def _relaxation_level(row: CatalogPlace, query: CatalogQuery) -> int:
@@ -695,7 +716,10 @@ class CatalogPlaceProvider:
 
     @staticmethod
     def _to_candidate(row: CatalogPlace, preview: QueryPreview,
-                      relaxation_level: int | None = None) -> PlaceCandidate:
+                      relaxation_level: int | None = None,
+                      semantic_score: float | None = None,
+                      final_score: float | None = None,
+                      lexical_score: float | None = None) -> PlaceCandidate:
         assert row.lat is not None and row.lon is not None
         concepts = [concept for concept in preview.interests
                     if _row_matches_concept(row, concept)]
@@ -711,6 +735,8 @@ class CatalogPlaceProvider:
             catalogPriceToRub=row.base_price_to_rub,
             catalogVisitMin=row.visit_min, catalogVisitMax=row.visit_max,
             catalogRelaxationLevel=relaxation_level,
+            catalogSemanticScore=semantic_score, catalogFinalScore=final_score,
+            catalogLexicalScore=lexical_score,
         )
 
 
@@ -719,6 +745,19 @@ def _row_matches_concept(row: CatalogPlace, concept: str) -> bool:
     if tags and tags.intersection(row.tags):
         return True
     return type_matches_concept(row.place_type, concept)
+
+
+def _lexical_term_matches(term: str, haystack: tuple[str, ...]) -> bool:
+    """Small deterministic Russian normalization; intentionally no edit distance."""
+    stems = {
+        "космос": ("космос", "космич"),
+        "космический": ("космос", "космич"),
+        "фрески": ("фреск", "роспис"),
+        "фреска": ("фреск", "роспис"),
+        "росписи": ("роспис", "фреск"),
+        "роспись": ("роспис", "фреск"),
+    }.get(term, (term,))
+    return any(token.startswith(stem) for stem in stems for token in haystack)
 
 
 def _haversine_meters(start: tuple[float, float], end: tuple[float, float]) -> float:

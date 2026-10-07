@@ -1,13 +1,17 @@
 from datetime import datetime, timedelta, timezone
+import time
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from gulyay.api import (CLIENT_REQUESTS, IDEMPOTENT_REVISIONS, IDEMPOTENT_ROUTES,
-                        POSITION_REQUESTS, RECENT_ROUTES,
+                        POSITION_REQUESTS, RECENT_ROUTES, SOURCE_REQUESTS,
+                        PROVIDER_HEALTH_CACHE,
                         app, get_geo_provider, get_intent_provider,
-                        get_catalog_provider, get_route_repository)
+                        get_catalog_provider, get_route_repository,
+                        _client_rate_limit, _prune_rate_state, _source_key)
 from gulyay.catalog import CatalogPlaceProvider, PlaceCatalog
 from gulyay.geo import GeoRateLimited, GeoUnavailable
 from gulyay.models import IntentExtraction, PlaceCandidate, RouteLeg, SearchArea
@@ -113,6 +117,8 @@ def reset_state():
     RECENT_ROUTES.clear()
     POSITION_REQUESTS.clear()
     CLIENT_REQUESTS.clear()
+    SOURCE_REQUESTS.clear()
+    PROVIDER_HEALTH_CACHE.clear()
 
 
 def test_pilot_cities_are_explicit():
@@ -203,7 +209,7 @@ def test_shorter_than_requested_duration_is_still_a_successful_response():
         "cityId": "tula", "query": "two hours", "deviceSessionId": session,
     })
     assert response.status_code == 200
-    assert response.json()["totalMinutes"] < response.json()["requestedMinutes"]
+    assert response.json()["totalMinutes"] <= response.json()["requestedMinutes"] * 1.15
 
 
 def test_builds_and_saves_real_provider_route_idempotently():
@@ -389,6 +395,7 @@ def test_search_and_edit_points_use_real_ids_and_preserve_requested_order():
     revised = client.post(f"/v1/routes/{route_id}/revisions", headers=headers, json={
         "baseVersion": 1, "mode": "EDIT_POINTS",
         "pointIds": ["second-provider-id", "real-provider-id"],
+        "allowDurationOverrun": True,
     })
     assert revised.status_code == 200
     assert revised.json()["routeVersion"] == 2
@@ -418,6 +425,7 @@ def test_paused_walk_is_rebased_and_can_resume_after_point_edit():
     revised = client.post(f"/v1/routes/{route_id}/revisions", headers=headers, json={
         "baseVersion": 1, "mode": "EDIT_POINTS",
         "pointIds": ["second-provider-id", "real-provider-id"],
+        "allowDurationOverrun": True,
     })
     assert revised.status_code == 200 and revised.json()["routeVersion"] == 2
     rebased = client.get(f"/v1/walks/{walk_id}", headers=headers)
@@ -429,7 +437,7 @@ def test_paused_walk_is_rebased_and_can_resume_after_point_edit():
     assert resumed.json()["routeVersion"] == 2
 
 
-def test_failed_point_edit_keeps_previous_route_version():
+def test_explicit_duration_edit_requires_confirmation_then_accepts_override():
     app.dependency_overrides[get_intent_provider] = FakeIntent
     app.dependency_overrides[get_geo_provider] = FakeGeo
     session = str(uuid4())
@@ -438,15 +446,26 @@ def test_failed_point_edit_keeps_previous_route_version():
         "cityId": "tula", "query": "История в центре два часа", "deviceSessionId": session})
     route_id = created.json()["routeId"]
     original_points = [point["placeId"] for point in created.json()["points"]]
-    failed = client.post(f"/v1/routes/{route_id}/revisions", headers=headers, json={
+    confirmation = client.post(f"/v1/routes/{route_id}/revisions", headers=headers, json={
         "baseVersion": 1, "mode": "EDIT_POINTS",
         "pointIds": ["real-provider-id", "second-provider-id", "third-provider-id"],
     })
-    assert failed.status_code == 422
-    assert failed.json()["error"]["code"] == "TIME_BUDGET_EXCEEDED"
+    assert confirmation.status_code == 409
+    error = confirmation.json()["error"]
+    assert error["code"] == "TIME_BUDGET_CONFIRMATION_REQUIRED"
+    assert error["details"]["canOverride"] is True
+    assert error["details"]["overrunMinutes"] > 0
     current = client.get(f"/v1/routes/{route_id}", headers=headers)
     assert current.json()["routeVersion"] == 1
     assert [point["placeId"] for point in current.json()["points"]] == original_points
+    accepted = client.post(f"/v1/routes/{route_id}/revisions", headers=headers, json={
+        "baseVersion": 1, "mode": "EDIT_POINTS",
+        "pointIds": ["real-provider-id", "second-provider-id", "third-provider-id"],
+        "allowDurationOverrun": True,
+    })
+    assert accepted.status_code == 200
+    assert accepted.json()["durationOverrunAccepted"] is True
+    assert accepted.json()["unusedMinutes"] == 0
 
 
 def test_duplicate_manual_points_are_rejected_before_geo_calls():
@@ -493,6 +512,68 @@ def test_2gis_rate_limit_has_retry_contract():
     assert result.json()["error"]["code"] == "DGIS_RATE_LIMIT"
     assert result.json()["error"]["details"]["retryAfterSeconds"] == 17
     assert result.json()["error"]["details"]["dependency"] == "2gis"
+
+
+def _request_from(peer: str, forwarded: str | None = None) -> Request:
+    headers = [] if forwarded is None else [(b"x-forwarded-for", forwarded.encode())]
+    return Request({"type": "http", "method": "GET", "path": "/", "headers": headers,
+                    "client": (peer, 1234), "scheme": "http", "server": ("test", 80),
+                    "query_string": b""})
+
+
+def test_provider_health_is_passive_by_default_and_active_is_token_gated(monkeypatch):
+    class CountingGeo(FakeGeo):
+        places_key = "places"
+        routing_key = "routing"
+        calls = 0
+
+        def resolve_city_center(self, city_id):
+            type(self).calls += 1
+            return super().resolve_city_center(city_id)
+
+    class CountingIntent(FakeIntent):
+        calls = 0
+
+        def extract(self, query):
+            type(self).calls += 1
+            return super().extract(query)
+
+    app.dependency_overrides[get_geo_provider] = CountingGeo
+    app.dependency_overrides[get_intent_provider] = CountingIntent
+    passive = client.get("/health/providers")
+    assert passive.status_code == 200
+    assert passive.json()["active"] is False
+    assert CountingGeo.calls == 0 and CountingIntent.calls == 0
+
+    monkeypatch.setenv("HEALTH_PROBE_TOKEN", "probe-token")
+    denied = client.get("/health/providers?active=true")
+    assert denied.status_code == 403
+    assert CountingGeo.calls == 0 and CountingIntent.calls == 0
+
+    active = client.get("/health/providers?active=true", headers={"X-Health-Token": "probe-token"})
+    assert active.status_code == 200
+    assert active.json()["providers"] == {
+        "dgis_places": "ok", "dgis_routing": "ok", "llm": "ok",
+    }
+
+
+def test_source_limiter_uses_peer_unless_proxy_is_explicitly_trusted(monkeypatch):
+    peer = _request_from("10.1.2.3", "198.51.100.1")
+    spoofed = _request_from("10.1.2.3", "203.0.113.9")
+    assert _source_key(peer) == _source_key(spoofed)
+    monkeypatch.setenv("TRUSTED_PROXY_HOSTS", "10.1.2.3")
+    assert _source_key(peer) != _source_key(spoofed)
+
+    for _ in range(20):
+        assert _client_rate_limit(uuid4(), None, peer) is None
+    limited = _client_rate_limit(uuid4(), None, peer)
+    assert limited is not None
+    assert limited.status_code == 429
+    assert b'"dependency":"source"' in limited.body
+
+    SOURCE_REQUESTS["expired"].append(0.0)
+    _prune_rate_state(time.monotonic())
+    assert "expired" not in SOURCE_REQUESTS
 
 
 def test_route_requires_matching_guest_session():

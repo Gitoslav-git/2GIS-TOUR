@@ -7,6 +7,9 @@ from gulyay.geo import (DgisGeoProvider, GeoAuthenticationError,
                         GeoInvalidResponse, GeoPlaceNotFound, GeoRateLimited,
                         GeoRouteNotFound, GeoUnavailable, clear_geo_caches)
 from gulyay.models import QueryPreview, RouteLeg
+from gulyay.catalog import CatalogPlaceProvider, PlaceCatalog, bundled_seed_paths
+from gulyay.route_builder import build_route
+from gulyay.models import CreateRoute, SearchArea
 
 
 def response(request: httpx.Request) -> httpx.Response:
@@ -61,6 +64,50 @@ def test_places_and_walking_route_use_real_provider_payloads():
     leg = provider.walking_leg(center, (places[0].lat, places[0].lon), 0, 1)
     assert leg.distanceMeters == 430 and leg.durationSeconds == 330
     assert leg.geometry == [(37.617, 54.193), (37.618, 54.194), (37.619, 54.196)]
+
+
+def test_catalog_route_with_device_geo_and_routing_key_does_not_need_places_key(tmp_path):
+    calls = []
+
+    def routing_only(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host)
+        assert request.url.host == "routing.api.2gis.com"
+        return httpx.Response(200, json={
+            "status": "OK", "result": [{"total_distance": 200, "total_duration": 180,
+                "begin_pedestrian_path": {"geometry": {"selection": "LINESTRING(37.617 54.193, 37.618 54.194)"}},
+                "maneuvers": []}],
+        })
+
+    catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
+    catalog.import_seed(next(path for path in bundled_seed_paths()
+                             if path.name == "tula_places_v0_1.csv"))
+    provider = DgisGeoProvider(places_key=None, routing_key="routing-only",
+                               transport=httpx.MockTransport(routing_only))
+    route = build_route(
+        CreateRoute(cityId="tula", query="Прогулка", startLocation={
+            "lat": 54.193, "lon": 37.617, "accuracyMeters": 10,
+        }),
+        QueryPreview(cityId="tula", durationMinutes=120, durationSource="default",
+                     interests=[], includeFood=False, withChildren=False,
+                     unusualPlaces=False, centerOnly=False, warnings=[]),
+        provider, catalog=CatalogPlaceProvider(catalog),
+    )
+    assert route.startSource == "USER_GEO"
+    assert calls and set(calls) == {"routing.api.2gis.com"}
+
+
+def test_text_start_still_requires_places_geocoding():
+    provider = DgisGeoProvider(places_key=None, routing_key="routing-only",
+                               transport=httpx.MockTransport(response))
+    with pytest.raises(GeoUnavailable):
+        build_route(
+            CreateRoute(cityId="tula", query="От кремля"),
+            QueryPreview(cityId="tula", durationMinutes=120, durationSource="text",
+                         interests=[], includeFood=False, withChildren=False,
+                         unusualPlaces=False, centerOnly=False,
+                         startLocationHint="Кремль", warnings=[]),
+            provider,
+        )
 
 
 def test_borovsk_city_center_is_resolved_by_exact_city_name():

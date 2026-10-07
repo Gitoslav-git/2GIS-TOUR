@@ -27,6 +27,17 @@ class TimeBudgetExceeded(Exception):
         self.minimum_minutes = minimum_minutes
 
 
+class DurationConfirmationRequired(Exception):
+    """An explicitly requested duration needs a user decision after an edit."""
+
+    def __init__(self, requested_minutes: int, projected_minutes: int,
+                 duration_mode: str):
+        self.requested_minutes = requested_minutes
+        self.projected_minutes = projected_minutes
+        self.overrun_minutes = projected_minutes - requested_minutes
+        self.duration_mode = duration_mode
+
+
 class _RoutingBudgetExhausted(Exception):
     pass
 
@@ -104,18 +115,32 @@ class _BuiltPlan:
 def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
                 now: datetime | None = None, trace_id: str | None = None,
                 catalog: CatalogPlaceProvider | None = None) -> Route:
-    city_center = geo.resolve_city_center(payload.cityId)
     location_hint = preview.locationHint or ("центр" if preview.centerOnly else None)
-    try:
-        search_area = geo.resolve_search_area(payload.cityId, location_hint, city_center)
-    except GeoConstraintNotFound:
-        if preview.areaStrength == "HARD":
-            raise
-        search_area = geo.resolve_search_area(payload.cityId, None, city_center)
-        location_hint = None
-        preview.warnings.append(
-            "Предпочтительный район не найден — поиск расширен на город"
-        )
+    catalog_first = bool(catalog and catalog.has_sufficient_resolved(payload.cityId))
+    catalog_available = bool(catalog and catalog.has_city(payload.cityId))
+    local_start = (payload.startLocation.lat, payload.startLocation.lon) if payload.startLocation else \
+        CITY_NO_GEO_START_OVERRIDES.get(payload.cityId)
+    can_skip_places = bool(
+        catalog_first and local_start and not location_hint and not preview.startLocationHint
+        and not preview.directionHint and preview.foodMode == "NONE"
+    )
+    if can_skip_places:
+        city_center = local_start
+        search_area = SearchArea(label="Рядом с геопозицией" if payload.startLocation else "Старт маршрута",
+                                 lat=local_start[0], lon=local_start[1], radiusMeters=6500,
+                                 source="geo")
+    else:
+        city_center = geo.resolve_city_center(payload.cityId)
+        try:
+            search_area = geo.resolve_search_area(payload.cityId, location_hint, city_center)
+        except GeoConstraintNotFound:
+            if preview.areaStrength == "HARD":
+                raise
+            search_area = geo.resolve_search_area(payload.cityId, None, city_center)
+            location_hint = None
+            preview.warnings.append(
+                "Предпочтительный район не найден — поиск расширен на город"
+            )
     explicit_start_area = None
     if preview.startLocationHint:
         explicit_start_area = geo.resolve_search_area(
@@ -167,10 +192,12 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     attempts = 0
     best: _BuiltPlan | None = None
     best_area = search_area
-    # City membership is the source-selection rule. A catalog city must never silently
-    # fall back to broad 2GIS attraction text-search because some rows are unresolved.
-    catalog_first = bool(catalog and catalog.has_city(payload.cityId))
-    if catalog_first and catalog is not None:
+    terminal_best: _BuiltPlan | None = None
+    terminal_area = search_area
+    # A city record alone is not enough to lock planning into an almost-empty
+    # local catalogue. Ready cities stay catalogue-first; incomplete catalogues
+    # retain their resolved local points and are augmented by the provider.
+    if catalog_available and catalog is not None:
         ranked_rows, ranking = catalog.rank_candidates(payload.cityId, preview, search_area)
         catalog_debug_log(
             trace_id, "intent", city=payload.cityId,
@@ -205,6 +232,13 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
             plans = _make_route_plans(
                 active_candidates, preview, start, direction_target, search_relaxation,
             )
+            # Verify only the provider-backed points that actually appear in a
+            # small tentative shortlist. This is metadata enrichment, never a
+            # second Places discovery/ranking pass.
+            active_candidates = _verify_tentative_schedules(active_candidates, plans, geo)
+            plans = _make_route_plans(
+                active_candidates, preview, start, direction_target, search_relaxation,
+            )
         planning_log(trace_id, "route_variants", area=active_area.label,
                      variants=[_plan_debug(plan) for plan in plans])
         plans, reserve = _comparison_order(plans, start, routing_budget)
@@ -228,13 +262,26 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
                                      else "NO_REACHABLE_OPEN_POINTS"))
                 continue
             built.hard_violations = _hard_violations(built, preview)
-            if built.hard_violations:
+            planner_only = {"MINIMUM_TWO_POINTS", "REQUESTED_PLACE_COUNT"}
+            blocking_violations = [item for item in built.hard_violations
+                                   if item not in planner_only]
+            if blocking_violations:
                 planning_log(trace_id, "route_variant_rejected", planId=plan.plan_id,
-                             hardViolations=built.hard_violations,
+                             hardViolations=blocking_violations,
                              points=[point.name for point in built.points])
                 continue
             built.score, built.score_breakdown = _route_quality(built, preview)
             built.unmet = _unmet_preferences(built, preview)
+            if built.hard_violations:
+                # Keep a real, hard-valid route as the last resort, but do not
+                # let it compete with ordinary multi-point variants.
+                if terminal_best is None or built.score > terminal_best.score:
+                    terminal_best = built
+                    terminal_area = active_area
+                planning_log(trace_id, "route_variant_deferred", planId=plan.plan_id,
+                             reason="TERMINAL_DEGRADED_FALLBACK",
+                             points=[point.name for point in built.points])
+                continue
             planning_log(
                 trace_id, "route_variant_evaluated", planId=plan.plan_id,
                 relaxation=plan.relaxation, score=round(built.score, 2),
@@ -265,6 +312,12 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
                          candidates=_candidate_debug(merged))
             search_rounds.append((city_area, merged, 1))
 
+    terminal_fallback = False
+    if best is None and terminal_best is not None:
+        best = terminal_best
+        best_area = terminal_area
+        terminal_fallback = True
+
     if best is None:
         if routing_budget.transient_failures:
             planning_log(trace_id, "planner_result", planner_status="PROVIDER_UNAVAILABLE",
@@ -290,6 +343,8 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
 
     warnings = [*preview.warnings,
                 "Время посещения оценено по типу места и темпу прогулки"]
+    if terminal_fallback:
+        warnings.append("Only one reachable place matched the hard constraints")
     if catalog_first:
         warnings.append("Достопримечательности подобраны из локального каталога")
     if best.plan.area_relaxed:
@@ -376,7 +431,9 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         startSource=start_source, maxWalkingMinutes=preview.maxWalkingMinutes,
         planningStatus=planning_status, durationUtilization=round(utilization, 3),
         planningScore=round(best.score, 2), planningAttempts=max(1, attempts),
-        unmetPreferences=unmet, requestedMinutes=target_minutes, routePace=preview.routePace,
+        unmetPreferences=unmet, requestedMinutes=target_minutes,
+        durationSource=preview.durationSource, durationMode=preview.durationMode,
+        maxDurationMinutes=preview.maxDurationMinutes, routePace=preview.routePace,
         totalMinutes=total_minutes, unusedMinutes=unused_minutes,
         points=route_points, legs=legs, warnings=warnings,
     )
@@ -385,9 +442,13 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
 def _retrieve_candidates(city_id: str, preview: QueryPreview, area: SearchArea,
                          geo: GeoProvider, catalog: CatalogPlaceProvider | None,
                          catalog_first: bool) -> list[PlaceCandidate]:
-    if not catalog_first or catalog is None:
+    if catalog is None or not catalog.has_city(city_id):
         return geo.search_places(city_id, preview, area)
     sights = catalog.list_candidates(city_id, preview, area)
+    if not catalog_first:
+        # Do not discard the local data merely because the catalogue is too
+        # small to be trusted as the sole source.
+        return _merge_candidates(sights, geo.search_places(city_id, preview, area))
     food_search = getattr(geo, "search_food_places", None)
     food = food_search(city_id, preview, area) if callable(food_search) else []
     return [*sights, *food]
@@ -607,6 +668,9 @@ def _hard_violations(route: _BuiltPlan, preview: QueryPreview) -> list[str]:
         violations.append("MINIMUM_TWO_POINTS")
     if preview.requestedPlaceCount is not None and len(route.points) != preview.requestedPlaceCount:
         violations.append("REQUESTED_PLACE_COUNT")
+    for concept in preview.hardInterests:
+        if not any(candidate_matches_concept(item, concept) for item in route.candidates):
+            violations.append(f"INTEREST:{concept}")
     for concept in preview.hardExclusions:
         if any(candidate_matches_concept(item, concept) for item in route.candidates):
             violations.append(f"EXCLUSION:{concept}")
@@ -631,6 +695,9 @@ def _unmet_preferences(route: _BuiltPlan, preview: QueryPreview) -> list[str]:
         unmet.append("DURATION_TARGET")
     if len(route.points) < 2 and not preview.allowSinglePlace:
         unmet.append("ROUTE_VARIETY")
+    if (preview.requestedPlaceCount is not None
+            and len(route.points) != preview.requestedPlaceCount):
+        unmet.append("POINT_COUNT")
     if route.score < _good_quality_score():
         unmet.append("ROUTE_QUALITY")
     return unmet
@@ -792,15 +859,57 @@ def _merge_candidates(first: list[PlaceCandidate], second: list[PlaceCandidate])
             continue
         index = positions[item.placeId]
         current = result[index]
-        result[index] = current.model_copy(update={
+        updates = {
             "matchedConcepts": list(dict.fromkeys(
                 [*current.matchedConcepts, *item.matchedConcepts]
             )),
             "matchedFoodPreferences": list(dict.fromkeys(
                 [*current.matchedFoodPreferences, *item.matchedFoodPreferences]
             )),
-        })
+        }
+        # Preserve local catalog relevance when the same provider object also
+        # arrives from a fallback Places search.
+        for field_name in ("catalogId", "catalogLevel", "catalogParentId", "catalogRelation",
+                           "catalogType", "catalogAccessCost", "catalogPriceFromRub",
+                           "catalogPriceToRub", "catalogVisitMin", "catalogVisitMax",
+                           "catalogRelaxationLevel", "catalogSemanticScore",
+                           "catalogFinalScore", "catalogLexicalScore"):
+            if getattr(current, field_name) is None and getattr(item, field_name) is not None:
+                updates[field_name] = getattr(item, field_name)
+        if not current.schedule and item.schedule:
+            updates["schedule"] = item.schedule
+        result[index] = current.model_copy(update=updates)
     return result
+
+
+def _verify_tentative_schedules(candidates: list[PlaceCandidate], plans: list[_RoutePlan],
+                                geo: GeoProvider) -> list[PlaceCandidate]:
+    lookup = getattr(geo, "lookup_schedules", None)
+    if not callable(lookup) or not plans:
+        return candidates
+    ids: list[str] = []
+    for plan in plans[:2]:
+        for candidate in plan.candidates:
+            if (candidate.catalogId is not None and not candidate.placeId.startswith("catalog:")
+                    and candidate.placeId not in ids):
+                ids.append(candidate.placeId)
+            if len(ids) >= 10:
+                break
+        if len(ids) >= 10:
+            break
+    if not ids:
+        return candidates
+    try:
+        schedules = lookup(ids)
+    except Exception:
+        # Schedule metadata is optional. Routing remains sufficient for a
+        # viable catalog route and UNKNOWN is an intentional state.
+        return candidates
+    if not isinstance(schedules, dict):
+        return candidates
+    return [candidate.model_copy(update={"schedule": schedules[candidate.placeId]})
+            if candidate.placeId in schedules and isinstance(schedules[candidate.placeId], dict)
+            else candidate for candidate in candidates]
 
 
 def _catalog_parent_conflict(selected: list[PlaceCandidate],
@@ -840,7 +949,8 @@ def _plan_debug(plan: _RoutePlan) -> dict[str, object]:
 
 def rebuild_route_with_points(source: Route, payload: CreateRoute,
                               candidates: list[PlaceCandidate], geo: GeoProvider,
-                              now: datetime | None = None) -> Route:
+                              now: datetime | None = None,
+                              allow_duration_overrun: bool = False) -> Route:
     """Recalculate an explicitly ordered point list without silently optimizing it."""
     if not 1 <= len(candidates) <= 8:
         raise RouteNotFound()
@@ -889,9 +999,12 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
         elapsed_seconds = projected_seconds
 
     total_minutes = math.ceil(elapsed_seconds / 60)
-    if total_minutes > source.requestedMinutes:
-        raise TimeBudgetExceeded(total_minutes)
-    unused_minutes = source.requestedMinutes - total_minutes
+    explicitly_requested_duration = source.durationSource != "default"
+    if (explicitly_requested_duration and total_minutes > source.requestedMinutes
+            and not allow_duration_overrun):
+        raise DurationConfirmationRequired(source.requestedMinutes, total_minutes,
+                                           source.durationMode)
+    unused_minutes = max(0, source.requestedMinutes - total_minutes)
     food_required = (any(point.isFood for point in source.points)
                      or any("место для еды" in warning for warning in source.warnings))
     warnings = _route_warnings(
@@ -908,9 +1021,17 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
         "Каждый пеший переход — не более",
     )
     utilization = total_minutes / source.requestedMinutes
+    overrun_accepted = (explicitly_requested_duration
+                         and total_minutes > source.requestedMinutes)
     unmet = [item for item in source.unmetPreferences if item != "DURATION_TARGET"]
     if utilization < _good_duration_utilization():
         unmet.append("DURATION_TARGET")
+    if overrun_accepted:
+        unmet.append("DURATION_TARGET")
+        warnings.append(
+            f"Длительность после ручного редактирования превышает исходную на "
+            f"{total_minutes - source.requestedMinutes} мин.; пользователь подтвердил изменение"
+        )
     retained = [warning for warning in source.warnings
                 if warning.startswith(retained_prefixes)]
     warnings = retained + [warning for warning in warnings if warning not in retained]
@@ -920,6 +1041,7 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
         "durationUtilization": round(utilization, 3),
         "planningStatus": "DEGRADED" if unmet else "SUCCESS",
         "unmetPreferences": list(dict.fromkeys(unmet)),
+        "durationOverrunAccepted": overrun_accepted,
     })
 
 
@@ -1013,6 +1135,13 @@ def _candidate_score(current: tuple[float, float], candidate: PlaceCandidate,
     score -= coverage_bonus * soft_scale
     if candidate.catalogRelaxationLevel is not None:
         score += candidate.catalogRelaxationLevel * 225 * soft_scale
+    # Catalog score is already the authoritative semantic/geo/variety ranking.
+    # Use it as a stable bias, while route cost and theme-coverage still decide
+    # the actual walking sequence.
+    if candidate.catalogFinalScore is not None:
+        score -= candidate.catalogFinalScore * 850 * soft_scale
+    if candidate.catalogLexicalScore:
+        score -= candidate.catalogLexicalScore * 500 * soft_scale
     if preview.preferredWalkingMinutes is not None:
         preferred_distance = preview.preferredWalkingMinutes * 80
         score += max(0.0, leg - preferred_distance) * 1.5 * soft_scale

@@ -263,6 +263,14 @@ class DgisGeoProvider:
         if not self.places_key or not self.routing_key:
             raise GeoUnavailable("DGIS_PLACES_API_KEY and DGIS_ROUTING_API_KEY must be configured")
 
+    def ensure_places_configured(self) -> None:
+        if not self.places_key:
+            raise GeoUnavailable("DGIS_PLACES_API_KEY must be configured")
+
+    def ensure_routing_configured(self) -> None:
+        if not self.routing_key:
+            raise GeoUnavailable("DGIS_ROUTING_API_KEY must be configured")
+
     def _client(self) -> httpx.Client:
         return httpx.Client(timeout=12.0, transport=self.transport,
                             headers={"User-Agent": "Gulyay-Backend/0.5"})
@@ -270,8 +278,11 @@ class DgisGeoProvider:
     def _request(self, method: str, url: str, *, request_type: str | None = None,
                  **kwargs) -> dict:
         global _RATE_LIMITED_UNTIL
-        self.ensure_configured()
         kind = request_type or ("routing" if url == ROUTING_URL else "places")
+        if kind == "routing":
+            self.ensure_routing_configured()
+        else:
+            self.ensure_places_configured()
         for attempt in range(self.max_retries + 1):
             now = self.clock()
             with _RATE_LIMIT_LOCK:
@@ -649,6 +660,22 @@ class DgisGeoProvider:
         if any(place_id not in by_id for place_id in place_ids):
             raise GeoPlaceNotFound()
         return [by_id[place_id] for place_id in place_ids]
+
+    def lookup_schedules(self, place_ids: list[str]) -> dict[str, dict]:
+        """Fetch schedule metadata only; caller keeps local catalog identity."""
+        if not place_ids:
+            return {}
+        items = self._places_from(
+            PLACES_BY_ID_URL, id=",".join(sorted(set(place_ids))), locale="ru_RU",
+            fields="items.schedule", request_type="places",
+        )
+        result: dict[str, dict] = {}
+        for item in items:
+            place_id = str(item.get("id", "")).strip()
+            schedule = item.get("schedule")
+            if place_id in place_ids and isinstance(schedule, dict):
+                result[place_id] = schedule
+        return result
 
     def walking_leg(self, start: tuple[float, float], end: tuple[float, float],
                     from_order: int, to_order: int) -> RouteLeg:

@@ -8,6 +8,7 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
+from .catalog_intent import extract_specific_terms
 from .models import CreateRoute, IntentExtraction, QueryPreview
 from .planning_debug import planning_log
 from .query_policy import looks_like_walking_constraint
@@ -240,17 +241,17 @@ def interpret(payload: CreateRoute, provider: IntentProvider,
             priorities[interest.concept] = interest.priority
         if interest.strength == "HARD" and interest.concept not in hard_interests:
             hard_interests.append(interest.concept)
-    if (payload.filters.unusualPlaces is True or parsed.unusualPlaces) and "UNUSUAL_PLACES" not in concepts:
+    unusual_requested = (payload.filters.unusualPlaces is True
+                         or (payload.filters.unusualPlaces is None and parsed.unusualPlaces))
+    children_requested = (payload.filters.withChildren is True
+                          or (payload.filters.withChildren is None and parsed.withChildren))
+    if unusual_requested and "UNUSUAL_PLACES" not in concepts:
         concepts.insert(0, "UNUSUAL_PLACES")
         priorities["UNUSUAL_PLACES"] = "HIGH"
-    if payload.filters.unusualPlaces is True and "UNUSUAL_PLACES" not in hard_interests:
-        hard_interests.append("UNUSUAL_PLACES")
-    if payload.filters.withChildren is True:
+    if children_requested:
         if "CHILD_FRIENDLY" not in concepts:
             concepts.insert(0, "CHILD_FRIENDLY")
             priorities["CHILD_FRIENDLY"] = "HIGH"
-        if "CHILD_FRIENDLY" not in hard_interests:
-            hard_interests.append("CHILD_FRIENDLY")
 
     hard_exclusions = _unique(
         item.concept for item in parsed.exclusions if item.strength == "HARD_EXCLUSION"
@@ -334,6 +335,7 @@ def interpret(payload: CreateRoute, provider: IntentProvider,
         popularityPreference=parsed.routeStyle.popularityPreference,
         requestedPlaceCount=requested_place_count,
         allowSinglePlace=requested_place_count == 1,
+        specificTerms=extract_specific_terms(payload.query),
         warnings=warnings,
     )
     planning_log(
@@ -369,7 +371,7 @@ def _duration_settings(payload: CreateRoute, parsed: IntentExtraction) -> dict[s
     explicit = payload.filters.durationMinutes
     if explicit is not None:
         return {"duration": explicit, "source": "filter", "mode": "TARGET",
-                "target": explicit, "maximum": explicit, "minimum": None}
+                "target": explicit, "maximum": None, "minimum": None}
 
     mode = _duration_mode(payload.query, parsed.duration.mode)
     target = parsed.duration.targetMinutes
@@ -378,7 +380,7 @@ def _duration_settings(payload: CreateRoute, parsed: IntentExtraction) -> dict[s
     if mode == "DEFAULT" or (target is None and maximum is None):
         return {"duration": DEFAULT_ROUTE_DURATION_MINUTES, "source": "default",
                 "mode": "DEFAULT", "target": DEFAULT_ROUTE_DURATION_MINUTES,
-                "maximum": DEFAULT_ROUTE_DURATION_MINUTES, "minimum": None}
+                "maximum": None, "minimum": None}
     if mode == "MAXIMUM":
         budget = maximum or target
         if budget is None:
@@ -390,13 +392,11 @@ def _duration_settings(payload: CreateRoute, parsed: IntentExtraction) -> dict[s
     if target is None:
         raise IntentNeedsClarification(["durationMinutes"])
     if mode == "APPROXIMATE":
-        maximum = max(target, maximum or min(720, math.ceil(target * 1.15)))
         minimum = min(target, minimum or max(30, math.floor(target * 0.85)))
     else:
-        maximum = target
         minimum = min(minimum, target) if minimum is not None else None
     return {"duration": target, "source": "text", "mode": mode,
-            "target": target, "maximum": maximum, "minimum": minimum}
+            "target": target, "maximum": None, "minimum": minimum}
 
 
 def _duration_mode(query: str, parsed_mode: str) -> str:

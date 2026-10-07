@@ -76,6 +76,37 @@ def test_expired_guest_route_is_not_returned(monkeypatch):
     assert repository.get(route_id, owner) is None
 
 
+def test_default_retention_keeps_ready_route_after_six_minutes(monkeypatch):
+    monkeypatch.delenv("GULYAY_ROUTE_RETENTION_MINUTES", raising=False)
+    repository = RouteRepository(":memory:")
+    owner, route_id = uuid4(), uuid4()
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+    repository.save_new(route(route_id), owner, payload)
+    with repository._connection:
+        repository._connection.execute(
+            "UPDATE routes SET updated_at = datetime('now', '-6 minutes') WHERE route_id = ?",
+            (str(route_id),),
+        )
+    assert repository.retention_minutes >= 1440
+    assert repository.get(route_id, owner) is not None
+
+
+def test_active_walk_route_is_not_purged_by_short_retention(monkeypatch):
+    monkeypatch.setenv("GULYAY_ROUTE_RETENTION_MINUTES", "5")
+    repository = RouteRepository(":memory:")
+    owner, route_id = uuid4(), uuid4()
+    itinerary = route(route_id)
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+    repository.save_new(itinerary, owner, payload)
+    repository.save_walk(start_walk(itinerary, StartWalk(routeVersion=1)), owner)
+    with repository._connection:
+        repository._connection.execute(
+            "UPDATE routes SET updated_at = datetime('now', '-2 hours') WHERE route_id = ?",
+            (str(route_id),),
+        )
+    assert repository.get(route_id, owner) is not None
+
+
 def test_walk_state_is_persisted_and_removed_with_route():
     repository = RouteRepository(":memory:")
     owner, route_id = uuid4(), uuid4()

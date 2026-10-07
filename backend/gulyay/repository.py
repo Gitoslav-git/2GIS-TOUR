@@ -24,9 +24,9 @@ class RouteRepository:
             Path(resolved).parent.mkdir(parents=True, exist_ok=True)
         self.path = resolved
         try:
-            retention_minutes = int(os.getenv("GULYAY_ROUTE_RETENTION_MINUTES", "5"))
+            retention_minutes = int(os.getenv("GULYAY_ROUTE_RETENTION_MINUTES", "1440"))
         except ValueError:
-            retention_minutes = 5
+            retention_minutes = 1440
         self.retention_minutes = max(1, min(10_080, retention_minutes))
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(resolved, check_same_thread=False, timeout=10)
@@ -247,7 +247,12 @@ class RouteRepository:
         modifier = f"-{self.retention_minutes} minutes"
         with self._lock, self._connection:
             self._connection.execute(
-                "DELETE FROM routes WHERE updated_at < datetime('now', ?)", (modifier,)
+                """DELETE FROM routes
+                   WHERE updated_at < datetime('now', ?)
+                     AND route_id NOT IN (
+                         SELECT route_id FROM walks
+                         WHERE json_extract(walk_json, '$.session.status') IN ('ACTIVE', 'PAUSED')
+                     )""", (modifier,)
             )
             self._connection.execute(
                 "DELETE FROM route_versions WHERE route_id NOT IN (SELECT route_id FROM routes)"

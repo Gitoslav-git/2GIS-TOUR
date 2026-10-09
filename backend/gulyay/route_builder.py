@@ -1000,8 +1000,15 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
 
     total_minutes = math.ceil(elapsed_seconds / 60)
     explicitly_requested_duration = source.durationSource != "default"
+    # A duration override belongs to this route revision chain.  Once the
+    # user explicitly accepted an overrun, later point edits must not ask the
+    # same question again.  Fresh routes start with the model default (False),
+    # so an override can never leak into a newly planned route.
+    duration_overrun_accepted = (
+        source.durationOverrunAccepted or allow_duration_overrun
+    )
     if (explicitly_requested_duration and total_minutes > source.requestedMinutes
-            and not allow_duration_overrun):
+            and not duration_overrun_accepted):
         raise DurationConfirmationRequired(source.requestedMinutes, total_minutes,
                                            source.durationMode)
     unused_minutes = max(0, source.requestedMinutes - total_minutes)
@@ -1041,7 +1048,7 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
         "durationUtilization": round(utilization, 3),
         "planningStatus": "DEGRADED" if unmet else "SUCCESS",
         "unmetPreferences": list(dict.fromkeys(unmet)),
-        "durationOverrunAccepted": overrun_accepted,
+        "durationOverrunAccepted": duration_overrun_accepted,
     })
 
 

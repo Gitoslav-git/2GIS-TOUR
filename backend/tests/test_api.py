@@ -466,6 +466,16 @@ def test_explicit_duration_edit_requires_confirmation_then_accepts_override():
     assert accepted.status_code == 200
     assert accepted.json()["durationOverrunAccepted"] is True
     assert accepted.json()["unusedMinutes"] == 0
+    # The confirmation is a persisted decision for this route.  A later
+    # manual point edit that still exceeds the same requested duration must
+    # apply immediately rather than asking the user again.
+    repeated_edit = client.post(f"/v1/routes/{route_id}/revisions", headers=headers, json={
+        "baseVersion": 2, "mode": "EDIT_POINTS",
+        "pointIds": ["third-provider-id", "second-provider-id", "real-provider-id"],
+    })
+    assert repeated_edit.status_code == 200
+    assert repeated_edit.json()["routeVersion"] == 3
+    assert repeated_edit.json()["durationOverrunAccepted"] is True
 
 
 def test_duplicate_manual_points_are_rejected_before_geo_calls():

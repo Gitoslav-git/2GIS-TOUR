@@ -152,6 +152,7 @@ public final class MapActivity extends ComponentActivity {
     private float routeMinZoom = 10.5f;
     private boolean mapInitializationStarted;
     private boolean cameraSnapshotFailureLogged;
+    private int renderedRouteVersion = -1;
     private double latestUserLat = Double.NaN;
     private double latestUserLon = Double.NaN;
     private final Runnable cameraBoundsGuard = this::enforceRouteCameraBounds;
@@ -570,6 +571,7 @@ public final class MapActivity extends ComponentActivity {
             ApiClient.Result finalResponse = response;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
+                int previousRenderedRouteVersion = renderedRouteVersion;
                 route = finalResponse;
                 if (!route.success) {
                     // A snapshot can help the user view a route during a
@@ -597,7 +599,16 @@ public final class MapActivity extends ComponentActivity {
                 }
                 routeViewModel.route = route;
                 showRouteStatus();
-                initializeMapIfReady();
+                // A chat revision keeps routeId but increments routeVersion.
+                // The existing MapView must therefore be redrawn explicitly:
+                // otherwise its old polyline and markers stay on screen.
+                boolean revisedRoute = route.success
+                        && route.routeVersion != previousRenderedRouteVersion;
+                if (map != null && revisedRoute) {
+                    renderRoute(true);
+                } else {
+                    initializeMapIfReady();
+                }
                 // The home-screen play button creates the walk first and then
                 // opens this activity with EXTRA_WALK_ID. Route loading is
                 // asynchronous, so continue by loading that walk once the
@@ -1611,6 +1622,10 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void renderRoute() {
+        renderRoute(false);
+    }
+
+    private void renderRoute(boolean fitCameraToRoute) {
         if (map == null || route == null || !route.success) return;
         if (objects == null) objects = new MapObjectManager(map, null);
         else objects.removeAll();
@@ -1657,7 +1672,7 @@ public final class MapActivity extends ComponentActivity {
         }
         updateUserMarker(markerLat, markerLon);
 
-        if (!restoredCamera && !route.path.isEmpty()) {
+        if ((fitCameraToRoute || !restoredCamera) && !route.path.isEmpty()) {
             double[] bounds = routeBounds(route.path);
             rememberRouteCameraBounds(route.path, bounds);
             map.getCamera().move(camera(bounds[0], bounds[1], (float) bounds[2]),
@@ -1665,6 +1680,7 @@ public final class MapActivity extends ComponentActivity {
         } else if (!route.path.isEmpty()) {
             rememberRouteCameraBounds(route.path, routeBounds(route.path));
         }
+        renderedRouteVersion = route.routeVersion;
     }
 
     private void rememberRouteCameraBounds(List<ApiClient.GeoCoordinate> path, double[] bounds) {

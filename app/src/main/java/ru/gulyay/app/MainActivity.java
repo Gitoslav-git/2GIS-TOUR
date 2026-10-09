@@ -67,6 +67,12 @@ public final class MainActivity extends Activity {
     private Button durationFilterButton, childrenFilterButton, foodFilterButton, unusualFilterButton;
     private boolean filterTwoHours, filterChildren, filterFood, filterUnusual;
     private boolean routeFinished;
+    // A route lifecycle is server-authoritative.  Preferences only provide a
+    // recovery hint after process death until this flag is set by a server read.
+    private boolean walkStateVerified;
+    private boolean walkStateSyncInFlight;
+    private String walkStateError;
+    private String currentWalkStatus;
     private Button routeControlButton;
     private Button editPointsButton;
     private Button findPlaceButton;
@@ -624,6 +630,15 @@ public final class MainActivity extends Activity {
             return;
         }
         if (requestInFlight) return;
+        if (routeId != null && !walkStateVerified) {
+            result.setText("Проверяем состояние сохранённой прогулки. Повторите создание маршрута после синхронизации.");
+            syncWalkStateFromBackend();
+            return;
+        }
+        if (isActiveWalkStatus(currentWalkStatus)) {
+            result.setText("Сначала завершите или поставьте на паузу текущую прогулку.");
+            return;
+        }
         String savedQuery = getPreferences(MODE_PRIVATE).getString("routeQuery", "").trim();
         if (routeId != null && !routeFinished && !text.equals(savedQuery)) {
             new AlertDialog.Builder(this).setTitle("Сбросить текущий маршрут?")
@@ -701,6 +716,9 @@ public final class MainActivity extends Activity {
                     routeVersion = finalResponse.routeVersion;
                     routeCityId = cityId;
                     routeFinished = false;
+                    currentWalkStatus = null;
+                    walkStateVerified = true;
+                    walkStateError = null;
                     routeLocationDirty = false;
                     lastSuccessfulResult = finalResponse.message;
                     result.setText(finalResponse.message);
@@ -1004,7 +1022,8 @@ public final class MainActivity extends Activity {
                 .putString("routeCityId", routeCityId)
                 .putString("lastSuccessfulResult", lastSuccessfulResult)
                 .putString("routeQuery", queryText).putString("routeSnapshot", routeSnapshot)
-                .putBoolean("routeFinished", routeFinished);
+                .putBoolean("routeFinished", routeFinished)
+                .putString("walkStatus", currentWalkStatus);
         editor.remove("startLatBits").remove("startLonBits").remove("startAccuracyBits");
         editor.putBoolean("routeLocationDirty", routeLocationDirty)
                 .remove("routeStartLatBits").remove("routeStartLonBits");
@@ -1022,7 +1041,11 @@ public final class MainActivity extends Activity {
         lastSuccessfulResult = preferences.getString("lastSuccessfulResult", null);
         routeSnapshot = preferences.getString("routeSnapshot", null);
         routeFinished = preferences.getBoolean("routeFinished", false);
-        reconcileFinishedRouteMarker();
+        currentWalkStatus = preferences.getString("walkStatus", null);
+        // Do not trust the persisted terminal marker after a crash.  It is
+        // useful only as a hint; onResume will reconcile it with the backend.
+        walkStateVerified = routeId == null;
+        walkStateError = null;
         preferences.edit().remove("startLatBits").remove("startLonBits")
                 .remove("startAccuracyBits").apply();
         routeLocationDirty = preferences.getBoolean("routeLocationDirty", false);
@@ -1034,6 +1057,8 @@ public final class MainActivity extends Activity {
             lastSuccessfulResult = null;
             routeSnapshot = null;
             routeFinished = false;
+            currentWalkStatus = null;
+            walkStateVerified = true;
             routeLocationDirty = false;
             return;
         }
@@ -1043,22 +1068,12 @@ public final class MainActivity extends Activity {
         submit.setText("▶");
     }
 
-    private boolean reconcileFinishedRouteMarker() {
-        if (routeId == null || routeFinished) return false;
-        String terminalRouteId = getSharedPreferences(
-                ROUTE_LIFECYCLE_PREFERENCES, MODE_PRIVATE)
-                .getString(FINISHED_ROUTE_ID, null);
-        if (!routeId.equals(terminalRouteId)) return false;
-        routeFinished = true;
-        getPreferences(MODE_PRIVATE).edit()
-                .putBoolean("routeFinished", true).commit();
-        clearActiveWalkState();
-        return true;
-    }
-
-    private void markCurrentRouteFinished() {
+    private void markCurrentRouteFinished(String walkStatus) {
         if (routeId == null) return;
         routeFinished = true;
+        currentWalkStatus = "STOPPED".equals(walkStatus) ? "STOPPED" : "COMPLETED";
+        walkStateVerified = true;
+        walkStateError = null;
         getSharedPreferences(ROUTE_LIFECYCLE_PREFERENCES, MODE_PRIVATE).edit()
                 .putString(FINISHED_ROUTE_ID, routeId).commit();
         persistRouteState(query.getText().toString().trim());
@@ -1404,13 +1419,16 @@ public final class MainActivity extends Activity {
         lastSuccessfulResult = null;
         routeSnapshot = null;
         routeFinished = false;
+        currentWalkStatus = null;
+        walkStateVerified = true;
+        walkStateError = null;
         routeLocationDirty = false;
         currentPoints.clear();
         clearActiveWalkState();
         getPreferences(MODE_PRIVATE).edit()
                 .remove("routeId").remove("routeVersion").remove("routeCityId")
                 .remove("lastSuccessfulResult").remove("routeQuery").remove("routeSnapshot")
-                .remove("routeLocationDirty").remove("routeFinished").apply();
+                .remove("routeLocationDirty").remove("routeFinished").remove("walkStatus").apply();
         updateQueryEditActions();
         refreshGuestHistory();
     }
@@ -1428,6 +1446,10 @@ public final class MainActivity extends Activity {
 
     private void returnToCurrentRoute() {
         if (routeId == null || routeCityId == null || requestInFlight) return;
+        if (!walkStateVerified) {
+            syncWalkStateFromBackend();
+            return;
+        }
         String savedQuery = getPreferences(MODE_PRIVATE).getString("routeQuery", null);
         if (savedQuery != null) query.setText(savedQuery);
         if (lastSuccessfulResult != null) result.setText(lastSuccessfulResult);
@@ -1435,7 +1457,7 @@ public final class MainActivity extends Activity {
         persistQueryEditMode();
         updateQueryEditActions();
         String activeWalkId = activeWalkIdForCurrentRoute();
-        if (activeWalkId != null) {
+        if (activeWalkId != null && isActiveWalkStatus(currentWalkStatus)) {
             openWalkMap(activeWalkId);
         } else {
             recoverActiveWalkOrOpenRoute();
@@ -1462,14 +1484,22 @@ public final class MainActivity extends Activity {
                 if (isFinishing() || isDestroyed()) return;
                 finishNetwork(0);
                 if (finalResponse.success && finalResponse.walkId != null) {
+                    currentWalkStatus = finalResponse.status;
+                    walkStateVerified = true;
                     getSharedPreferences("active_walk", MODE_PRIVATE).edit()
                             .putString("walkId", finalResponse.walkId)
                             .putString("routeId", requestedRouteId)
                             .putInt("routeVersion", routeVersion).apply();
                     openWalkMap(finalResponse.walkId);
-                } else {
+                } else if ("NOT_FOUND".equals(finalResponse.errorCode)) {
+                    currentWalkStatus = null;
+                    walkStateVerified = true;
                     if (lastSuccessfulResult != null) result.setText(lastSuccessfulResult);
                     openMap();
+                } else {
+                    walkStateVerified = false;
+                    walkStateError = finalResponse.message;
+                    result.setText(finalResponse.message);
                 }
             });
         });
@@ -1498,40 +1528,103 @@ public final class MainActivity extends Activity {
         // competing buttons when the user returns from an unfinished walk.
         routeActions.setVisibility(View.VISIBLE);
         returnToRouteButton.setVisibility(View.GONE);
-        routeCard.setVisibility(hasRoute ? View.VISIBLE : View.GONE);
+        routeCard.setVisibility(hasRoute && !(routeFinished && walkStateVerified)
+                ? View.VISIBLE : View.GONE);
         submit.setText("▶");
         if (hasRoute) renderRouteCard(null);
     }
 
     private void refreshHomeRouteCard() {
         if (routeCard == null || routeId == null) return;
-        String walkId = activeWalkIdForCurrentRoute();
-        if (walkId == null) {
+        if (!walkStateVerified) {
             renderRouteCard(null);
+            syncWalkStateFromBackend();
             return;
         }
-        final String requestedWalkId = walkId;
+        renderRouteCard(null);
+        if (isActiveWalkStatus(currentWalkStatus)) syncWalkStateFromBackend();
+    }
+
+    private static boolean isActiveWalkStatus(String status) {
+        return "ACTIVE".equals(status) || "PAUSED".equals(status);
+    }
+
+    private static boolean isTerminalWalkStatus(String status) {
+        return "STOPPED".equals(status) || "COMPLETED".equals(status);
+    }
+
+    /** Reconcile persisted recovery hints with the backend without changing walk state. */
+    private void syncWalkStateFromBackend() {
+        if (routeId == null || routeCityId == null || walkStateSyncInFlight) return;
         final String requestedRouteId = routeId;
+        final String knownWalkId = activeWalkIdForCurrentRoute();
+        final String owner = sessionId();
+        walkStateSyncInFlight = true;
+        walkStateError = null;
         network.execute(() -> {
-            ApiClient.WalkResult response;
+            ApiClient.WalkResult response = null;
+            String terminalStatus = null;
+            String error = null;
             try {
-                response = ApiClient.getWalk(requestedWalkId, sessionId());
+                if (knownWalkId != null) response = ApiClient.getWalk(knownWalkId, owner);
+                if (response == null || (!response.success
+                        && "NOT_FOUND".equals(response.errorCode))) {
+                    response = ApiClient.getActiveWalk(requestedRouteId, owner);
+                }
+                if (!response.success && "NOT_FOUND".equals(response.errorCode)) {
+                    for (ApiClient.GuestHistoryItem item : ApiClient.getGuestHistory(owner)) {
+                        if (requestedRouteId.equals(item.routeId)) {
+                            terminalStatus = item.walkStatus;
+                            break;
+                        }
+                    }
+                } else if (!response.success) {
+                    error = response.message;
+                }
             } catch (Exception exception) {
-                response = new ApiClient.WalkResult(false, "", requestedWalkId, null,
-                        0, 0, false, -1, null);
+                error = "Не удалось синхронизировать прогулку с сервером. Проверьте сеть и повторите попытку.";
             }
             ApiClient.WalkResult finalResponse = response;
+            String finalTerminalStatus = terminalStatus;
+            String finalError = error;
             runOnUiThread(() -> {
+                walkStateSyncInFlight = false;
                 if (isFinishing() || isDestroyed() || !requestedRouteId.equals(routeId)) return;
-                boolean active = finalResponse.success && ("ACTIVE".equals(finalResponse.status)
-                        || "PAUSED".equals(finalResponse.status));
-                if (finalResponse.success && ("STOPPED".equals(finalResponse.status)
-                        || "COMPLETED".equals(finalResponse.status))) {
-                    markCurrentRouteFinished();
-                } else if (!active) {
-                    clearActiveWalkState();
+                if (finalError != null) {
+                    walkStateVerified = false;
+                    walkStateError = finalError;
+                    result.setText(finalError);
+                    renderRouteCard(null);
+                    return;
                 }
-                renderRouteCard(active ? finalResponse : null);
+                if (finalResponse != null && finalResponse.success
+                        && isActiveWalkStatus(finalResponse.status)) {
+                    currentWalkStatus = finalResponse.status;
+                    routeFinished = false;
+                    walkStateVerified = true;
+                    getSharedPreferences("active_walk", MODE_PRIVATE).edit()
+                            .putString("walkId", finalResponse.walkId)
+                            .putString("routeId", requestedRouteId)
+                            .putInt("routeVersion", routeVersion).commit();
+                    getSharedPreferences(ROUTE_LIFECYCLE_PREFERENCES, MODE_PRIVATE).edit()
+                            .remove(FINISHED_ROUTE_ID).apply();
+                    persistRouteState(query.getText().toString().trim());
+                    renderRouteCard(finalResponse);
+                } else if ((finalResponse != null && finalResponse.success
+                        && isTerminalWalkStatus(finalResponse.status))
+                        || isTerminalWalkStatus(finalTerminalStatus)) {
+                    markCurrentRouteFinished(finalResponse != null && finalResponse.success
+                            ? finalResponse.status : finalTerminalStatus);
+                    updateQueryEditActions();
+                    refreshGuestHistory();
+                } else {
+                    currentWalkStatus = null;
+                    routeFinished = false;
+                    walkStateVerified = true;
+                    clearActiveWalkState();
+                    persistRouteState(query.getText().toString().trim());
+                    renderRouteCard(null);
+                }
             });
         });
     }
@@ -1561,7 +1654,6 @@ public final class MainActivity extends Activity {
     private void refreshGuestHistory() {
         if (guestHistoryList == null || guestHistoryScroll == null) return;
         final String currentRouteId = routeId;
-        final boolean hasCurrentRoute = currentRouteId != null;
         network.execute(() -> {
             List<ApiClient.GuestHistoryItem> items;
             try { items = ApiClient.getGuestHistory(sessionId()); }
@@ -1573,15 +1665,15 @@ public final class MainActivity extends Activity {
                 boolean recoveredTerminalRoute = false;
                 for (ApiClient.GuestHistoryItem item : finalItems) {
                     if (item.routeId.equals(currentRouteId) && item.finished()) {
-                        markCurrentRouteFinished();
+                        markCurrentRouteFinished(item.walkStatus);
                         recoveredTerminalRoute = true;
                         break;
                     }
                 }
                 if (recoveredTerminalRoute) updateQueryEditActions();
-                int remainingRouteSlots = hasCurrentRoute ? 2 : 3;
+                int remainingRouteSlots = 3;
                 for (ApiClient.GuestHistoryItem item : finalItems) {
-                    if (item.routeId.equals(currentRouteId)) continue;
+                    if (item.routeId.equals(currentRouteId) && !routeFinished) continue;
                     if (remainingRouteSlots-- <= 0) break;
                     addGuestHistoryCard(item);
                 }
@@ -1598,12 +1690,23 @@ public final class MainActivity extends Activity {
         TextView title = UiKit.label(this, cityName(item.cityId) + ": " + item.title, 14, UiKit.TEXT);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD); title.setMaxLines(1);
         title.setEllipsize(android.text.TextUtils.TruncateAt.END); card.addView(title);
+        if ("COMPLETED".equals(item.walkStatus)) title.setText("✓  " + title.getText());
         TextView subtitle = UiKit.label(this, "Гостевой маршрут • " + item.pointCount + " мест • "
                 + item.totalMinutes + " мин", 12, UiKit.MUTED);
+        subtitle.setText(historyStatusLabel(item.walkStatus) + " • " + item.pointCount
+                + " мест • " + item.totalMinutes + " мин");
         subtitle.setMaxLines(1); card.addView(subtitle);
         card.setOnClickListener(view -> openGuestHistoryRoute(item));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 58));
         params.bottomMargin = UiKit.dp(this, 6); guestHistoryList.addView(card, params);
+    }
+
+    private static String historyStatusLabel(String status) {
+        if ("ACTIVE".equals(status)) return "Прогулка идёт";
+        if ("PAUSED".equals(status)) return "На паузе";
+        if ("STOPPED".equals(status)) return "Прогулка остановлена";
+        if ("COMPLETED".equals(status)) return "Маршрут пройден";
+        return "Маршрут готов";
     }
 
     private void openGuestHistoryRoute(ApiClient.GuestHistoryItem item) {
@@ -1633,12 +1736,27 @@ public final class MainActivity extends Activity {
 
     private void renderRouteCard(ApiClient.WalkResult walk) {
         if (routeCard == null || routeId == null) return;
+        if (!walkStateVerified) {
+            routeCardTitle.setText(routeCityName() + ": синхронизация прогулки");
+            routeCardSubtitle.setText(walkStateError == null
+                    ? "Проверяем состояние на сервере…"
+                    : "Нет связи с backend — нажмите карточку, чтобы повторить");
+            routeCardActivity.setVisibility(View.GONE);
+            routeCardIcon.setVisibility(View.VISIBLE);
+            routeCardIcon.setText("…");
+            routeControlButton.setVisibility(View.GONE);
+            routeCard.setOnClickListener(view -> syncWalkStateFromBackend());
+            return;
+        }
         if (routeFinished) {
             routeCardTitle.setText(routeCityName() + ": " + (currentPoints.isEmpty()
                     ? "Маршрут завершён" : currentPoints.get(0).name));
             routeCardSubtitle.setText("Прогулка завершена • нажмите, чтобы посмотреть");
             routeCardActivity.setVisibility(View.GONE);
             routeCardIcon.setVisibility(View.VISIBLE);
+            routeCardSubtitle.setText("STOPPED".equals(currentWalkStatus)
+                    ? "Прогулка остановлена • нажмите, чтобы посмотреть"
+                    : "Маршрут пройден • нажмите, чтобы посмотреть");
             routeCardIcon.setText("✓"); routeCardIcon.setTextColor(UiKit.MUTED);
             routeCardIcon.setBackground(UiKit.rounded(UiKit.SOFT, 18, this));
             routeCard.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE4E9E5, 16, this));
@@ -1727,6 +1845,10 @@ public final class MainActivity extends Activity {
 
     private void showRouteControlMenu() {
         if (requestInFlight || routeId == null) return;
+        if (!walkStateVerified) {
+            syncWalkStateFromBackend();
+            return;
+        }
         String walkId = activeWalkIdForCurrentRoute();
         if (walkId == null) {
             new AlertDialog.Builder(this)
@@ -1755,12 +1877,21 @@ public final class MainActivity extends Activity {
             ApiClient.WalkResult finalResponse = response;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
-                if (!finalResponse.success || !("ACTIVE".equals(finalResponse.status)
-                        || "PAUSED".equals(finalResponse.status))) {
-                    clearActiveWalkState();
-                    renderRouteCard(null);
+                if (!finalResponse.success) {
+                    result.setText(finalResponse.message);
                     return;
                 }
+                if (isTerminalWalkStatus(finalResponse.status)) {
+                    markCurrentRouteFinished(finalResponse.status);
+                    updateQueryEditActions();
+                    refreshGuestHistory();
+                    return;
+                }
+                if (!isActiveWalkStatus(finalResponse.status)) {
+                    syncWalkStateFromBackend();
+                    return;
+                }
+                currentWalkStatus = finalResponse.status;
                 boolean paused = "PAUSED".equals(finalResponse.status);
                 String[] actions = paused
                         ? new String[]{"Продолжить прогулку", "Завершить прогулку"}
@@ -1802,10 +1933,13 @@ public final class MainActivity extends Activity {
                 if (isFinishing() || isDestroyed()) return;
                 if (finalResponse.success && ("ACTIVE".equals(finalResponse.status)
                         || "PAUSED".equals(finalResponse.status))) {
+                    currentWalkStatus = finalResponse.status;
+                    walkStateVerified = true;
                     renderRouteCard(finalResponse);
                 } else if (finalResponse.success) {
-                    markCurrentRouteFinished();
-                    renderRouteCard(null);
+                    markCurrentRouteFinished(finalResponse.status);
+                    updateQueryEditActions();
+                    refreshGuestHistory();
                 } else {
                     result.setText(finalResponse.message);
                 }
@@ -1816,11 +1950,16 @@ public final class MainActivity extends Activity {
 
     private void startWalkOrContinue() {
         if (requestInFlight || routeId == null || routeCityId == null) return;
+        if (!walkStateVerified) {
+            syncWalkStateFromBackend();
+            return;
+        }
         SharedPreferences walk = getSharedPreferences("active_walk", MODE_PRIVATE);
         String activeWalkId = walk.getString("walkId", null);
         String activeRouteId = walk.getString("routeId", null);
         if (activeWalkId != null && routeId.equals(activeRouteId)) {
-            openWalkMap(activeWalkId);
+            if (isActiveWalkStatus(currentWalkStatus)) openWalkMap(activeWalkId);
+            else syncWalkStateFromBackend();
             return;
         }
         setNetworkBusy(true);
@@ -1842,6 +1981,10 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 if (finalResponse.success) {
+                    currentWalkStatus = finalResponse.status;
+                    routeFinished = false;
+                    walkStateVerified = true;
+                    walkStateError = null;
                     getSharedPreferences("active_walk", MODE_PRIVATE).edit()
                             .putString("walkId", finalResponse.walkId)
                             .putString("routeId", requestedRouteId)
@@ -1930,7 +2073,8 @@ public final class MainActivity extends Activity {
                 .remove("routeId").remove("routeVersion").remove("routeCityId")
                 .remove("lastSuccessfulResult").remove("routeQuery")
                 .remove("routeSnapshot")
-                .remove("routeLocationDirty").remove("queryEditMode").remove("routeFinished").apply();
+                .remove("routeLocationDirty").remove("queryEditMode").remove("routeFinished")
+                .remove("walkStatus").apply();
         clearActiveWalkState();
         updateQueryEditActions();
     }
@@ -1954,6 +2098,7 @@ public final class MainActivity extends Activity {
                 ApiClient.Result restored = ApiClient.routeFromSnapshot(routeSnapshot);
                 if (restored != null) { currentPoints.clear(); currentPoints.addAll(restored.points); lastSuccessfulResult = restored.message; }
                 routeFinished = false; routeLocationDirty = false;
+                currentWalkStatus = null; walkStateVerified = true; walkStateError = null;
                 if (routeId != null && routeCityId != null && lastSuccessfulResult != null) {
                     persistRouteState(data.getStringExtra(RouteChatActivity.EXTRA_QUERY));
                     updateQueryEditActions(); refreshHomeRouteCard(); refreshGuestHistory();
@@ -1980,12 +2125,14 @@ public final class MainActivity extends Activity {
             getSharedPreferences("active_walk", MODE_PRIVATE).edit()
                     .putString("walkId", returnedWalkId)
                     .putString("routeId", returnedWalkRouteId).commit();
+            currentWalkStatus = "ACTIVE";
+            walkStateVerified = true;
         }
         String action = data.getStringExtra(MapActivity.EXTRA_RESULT_ACTION);
         if (MapActivity.ACTION_CANCEL_ROUTE.equals(action)) {
             clearLocalRouteState("Маршрут отменён. Можно составить новый.");
         } else if (MapActivity.ACTION_WALK_STOPPED.equals(action)) {
-            markCurrentRouteFinished();
+            markCurrentRouteFinished(data.getStringExtra(MapActivity.EXTRA_WALK_STATUS));
             updateQueryEditActions();
         } else if (MapActivity.ACTION_EDIT_QUERY.equals(action)) {
             queryEditMode = true;
@@ -2004,16 +2151,12 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         if (startWalkButton == null) return;
-        boolean finishedRecovered = reconcileFinishedRouteMarker();
-        if (finishedRecovered) {
-            updateQueryEditActions();
-            refreshGuestHistory();
-        }
+        if (routeId != null) syncWalkStateFromBackend();
         SharedPreferences walk = getSharedPreferences("active_walk", MODE_PRIVATE);
         String activeWalkId = walk.getString("walkId", null);
         String activeRouteId = walk.getString("routeId", null);
         boolean currentWalkActive = activeWalkId != null && routeId != null
-                && routeId.equals(activeRouteId);
+                && routeId.equals(activeRouteId) && isActiveWalkStatus(currentWalkStatus);
         startWalkButton.setText(currentWalkActive
                 ? "Продолжить прогулку" : "Начать прогулку");
         if (currentWalkActive) {

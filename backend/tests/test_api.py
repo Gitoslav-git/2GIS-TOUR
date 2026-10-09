@@ -346,6 +346,78 @@ def test_walk_actions_require_valid_state_and_active_walk_is_unique():
     assert invalid.json()["error"]["code"] == "WALK_INVALID_STATE"
 
 
+def test_walk_recovery_keeps_server_state_and_stop_unblocks_a_new_route():
+    """The backend is the source of truth after an Android process death."""
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    first = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "История в центре, одно место, два часа",
+        "deviceSessionId": session,
+    })
+    route_id = first.json()["routeId"]
+    started = client.post(f"/v1/routes/{route_id}/walks", headers=headers,
+                          json={"routeVersion": 1})
+    walk_id = started.json()["walkId"]
+    # This represents recovery without any Android-local walkId.
+    recovered = client.get(f"/v1/routes/{route_id}/walks/active", headers=headers)
+    assert recovered.status_code == 200
+    assert recovered.json()["walkId"] == walk_id
+    assert recovered.json()["status"] == "ACTIVE"
+    paused = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
+                         json={"action": "PAUSE"})
+    assert paused.status_code == 200 and paused.json()["status"] == "PAUSED"
+    assert client.get(f"/v1/routes/{route_id}/walks/active", headers=headers).json()["status"] == "PAUSED"
+    stopped = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
+                          json={"action": "STOP"})
+    assert stopped.status_code == 200 and stopped.json()["status"] == "STOPPED"
+    # Only a confirmed STOP releases the uniqueness lock for the next route.
+    second = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "История в центре, одно место, два часа новый",
+        "deviceSessionId": session,
+    })
+    assert second.status_code == 200 and second.json()["routeId"] != route_id
+    next_walk = client.post(f"/v1/routes/{second.json()['routeId']}/walks", headers=headers,
+                            json={"routeVersion": 1})
+    assert next_walk.status_code == 200
+
+
+def test_guest_history_reports_ready_and_completed_statuses():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+
+    def create(label):
+        response = client.post("/v1/routes", headers=headers, json={
+            "cityId": "tula", "query": f"История {label}, одно место, два часа",
+            "deviceSessionId": session,
+        })
+        assert response.status_code == 200
+        return response.json()["routeId"]
+
+    ready_id = create("готов")
+    active_id = create("активен")
+    active = client.post(f"/v1/routes/{active_id}/walks", headers=headers,
+                         json={"routeVersion": 1})
+    assert active.status_code == 200
+    active_walk_id = active.json()["walkId"]
+    client.post(f"/v1/walks/{active_walk_id}/actions", headers=headers,
+                json={"action": "STOP"})
+    # Replace the latest server lifecycle state to cover an already completed
+    # walk without waiting an hour in a test.
+    state = repository.get_walk(UUID(active_walk_id), UUID(session))
+    completed = state.model_copy(update={"session": state.session.model_copy(
+        update={"status": "COMPLETED"})})
+    repository.replace_walk(completed, UUID(session))
+    history = client.get("/v1/routes/history", headers=headers)
+    assert history.status_code == 200
+    statuses = {item["routeId"]: item["walkStatus"] for item in history.json()["items"]}
+    assert statuses[ready_id] is None
+    assert statuses[active_id] == "COMPLETED"
+
+
 def test_same_request_with_new_request_id_uses_recent_result_cache():
     intent = FakeIntent()
     app.dependency_overrides[get_intent_provider] = lambda: intent

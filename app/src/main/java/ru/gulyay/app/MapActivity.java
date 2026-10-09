@@ -86,6 +86,7 @@ public final class MapActivity extends ComponentActivity {
     static final String EXTRA_USER_LAT = "userLat";
     static final String EXTRA_USER_LON = "userLon";
     static final String EXTRA_RESULT_ACTION = "resultAction";
+    static final String EXTRA_WALK_STATUS = "walkStatus";
     static final String EXTRA_ROUTE_SNAPSHOT = "routeSnapshot";
     static final String EXTRA_HISTORY_READ_ONLY = "historyReadOnly";
     static final String ACTION_CANCEL_ROUTE = "cancelRoute";
@@ -1282,7 +1283,10 @@ public final class MapActivity extends ComponentActivity {
                 walk = finalResponse;
                 if (!walk.success) {
                     status.setText(walk.message);
-                    clearActiveWalk();
+                    // A timeout must not erase the only local pointer to an
+                    // ACTIVE backend walk.  Clear it only after a confirmed
+                    // not-found response; the user can retry synchronization.
+                    if ("NOT_FOUND".equals(walk.errorCode)) clearActiveWalk();
                     return;
                 }
                 routeViewModel.walk = walk;
@@ -1493,6 +1497,7 @@ public final class MapActivity extends ComponentActivity {
                 if ("STOP".equals(action)) {
                     Intent data = new Intent();
                     data.putExtra(EXTRA_RESULT_ACTION, ACTION_WALK_STOPPED);
+                    data.putExtra(EXTRA_WALK_STATUS, finalResponse.status);
                     setResult(RESULT_OK, data);
                     finish();
                 }
@@ -1575,15 +1580,38 @@ public final class MapActivity extends ComponentActivity {
         String routeId = getIntent().getStringExtra(EXTRA_ROUTE_ID);
         String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
         network.execute(() -> {
+            String failure = null;
             try {
-                if (walk != null && walk.success && ("ACTIVE".equals(walk.status)
-                        || "PAUSED".equals(walk.status))) {
-                    ApiClient.walkAction(walk.walkId, sessionId, "STOP");
+                ApiClient.WalkResult walkToStop = walk;
+                if (walkToStop == null || !walkToStop.success
+                        || !("ACTIVE".equals(walkToStop.status) || "PAUSED".equals(walkToStop.status))) {
+                    walkToStop = ApiClient.getActiveWalk(routeId, sessionId);
                 }
-            } catch (Exception ignored) { }
-            try { ApiClient.deleteRoute(routeId, sessionId); }
-            catch (Exception ignored) { }
+                if (walkToStop.success && ("ACTIVE".equals(walkToStop.status)
+                        || "PAUSED".equals(walkToStop.status))) {
+                    ApiClient.WalkResult stopped = ApiClient.walkAction(walkToStop.walkId, sessionId, "STOP");
+                    if (!stopped.success) failure = stopped.message;
+                } else if (!walkToStop.success && !"NOT_FOUND".equals(walkToStop.errorCode)) {
+                    failure = walkToStop.message;
+                }
+            } catch (Exception error) { failure = "Не удалось завершить прогулку. Проверьте backend."; }
+            if (failure == null) {
+                try {
+                    ApiClient.Result deleted = ApiClient.deleteRoute(routeId, sessionId);
+                    if (!deleted.success) failure = deleted.message;
+                } catch (Exception error) { failure = "Не удалось отменить маршрут. Проверьте backend."; }
+            }
+            String finalFailure = failure;
             runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (finalFailure != null) {
+                    startingWalk = false;
+                    primaryAction.setEnabled(true);
+                    editQuery.setEnabled(true);
+                    editPoints.setEnabled(true);
+                    status.setText(finalFailure);
+                    return;
+                }
                 clearActiveWalk();
                 Intent data = new Intent();
                 data.putExtra(EXTRA_RESULT_ACTION, ACTION_CANCEL_ROUTE);

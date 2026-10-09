@@ -332,7 +332,9 @@ final class ApiClient {
     }
 
     static List<GuestHistoryItem> getGuestHistory(String sessionId) throws Exception {
-        if (!BackendConfig.isConfigured()) return Collections.emptyList();
+        if (!BackendConfig.isConfigured()) {
+            throw new IllegalStateException("Backend is not configured");
+        }
         String path = "/v1/routes/history";
         long startedAt = BackendConfig.logRequest("GET", path);
         HttpURLConnection connection = null;
@@ -341,7 +343,10 @@ final class ApiClient {
             int status = connection.getResponseCode();
             BackendConfig.logResponse("GET", path, status, startedAt);
             JSONObject response = readJson(connection, status);
-            if (status >= 400) return Collections.emptyList();
+            if (status >= 400) {
+                Result error = routeError(response, status);
+                throw new IllegalStateException(error.message);
+            }
             JSONArray items = response.optJSONArray("items");
             if (items == null) return Collections.emptyList();
             List<GuestHistoryItem> result = new ArrayList<>();

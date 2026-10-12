@@ -1,12 +1,13 @@
+import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
 from gulyay.models import (Filters, Route, RouteLeg, RoutePoint, SearchArea,
-                           StartWalk, WalkAction, WalkPosition)
+                           StartWalk, WalkAction, WalkPosition, WalkState)
 from gulyay.walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
-                         register_position, start_walk)
+                         register_position, session_at, start_walk)
 
 
 def route(points=2, total_minutes=120):
@@ -49,9 +50,64 @@ def test_two_accurate_measurements_five_seconds_apart_reach_point():
         start + timedelta(minutes=10, seconds=5),
     )
     assert second.pointReached is True
-    assert state.session.currentPointOrder == 2
+    assert state.session.currentPointOrder == 1
+    assert state.session.phase == "VISITING"
+    assert state.session.visitStartedAt == start + timedelta(minutes=10, seconds=5)
+    assert state.session.visitElapsedSeconds == 0
     assert state.session.visits[0].pointOrder == 1
     assert state.session.estimatedRemainingMinutes == 110
+
+
+def test_visit_stays_on_current_point_until_two_confirmed_exit_measurements():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route()
+    point = itinerary.points[0]
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, _ = register_position(state, itinerary, position(point, start), start)
+    state, _ = register_position(
+        state, itinerary, position(point, start + timedelta(seconds=5)),
+        start + timedelta(seconds=5),
+    )
+    outside = WalkPosition(
+        lat=point.lat + 0.002, lon=point.lon, accuracyMeters=10,
+        measuredAt=start + timedelta(minutes=3),
+    )
+    state, first_exit = register_position(state, itinerary, outside, outside.measuredAt)
+    assert first_exit.pointExited is False
+    assert state.session.phase == "VISITING"
+    assert state.session.currentPointOrder == 1
+    state, second_exit = register_position(
+        state, itinerary,
+        outside.model_copy(update={"measuredAt": outside.measuredAt + timedelta(seconds=5)}),
+        outside.measuredAt + timedelta(seconds=5),
+    )
+    assert second_exit.pointExited is True
+    assert state.session.phase == "MOVING"
+    assert state.session.currentPointOrder == 2
+    assert state.session.visits[0].durationSeconds == 180
+    assert state.session.visits[0].leftAt == outside.measuredAt + timedelta(seconds=5)
+
+
+def test_one_outside_jump_is_cancelled_by_next_inside_measurement():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route()
+    point = itinerary.points[0]
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, _ = register_position(state, itinerary, position(point, start), start)
+    state, _ = register_position(
+        state, itinerary, position(point, start + timedelta(seconds=5)),
+        start + timedelta(seconds=5),
+    )
+    jump = WalkPosition(lat=point.lat + 0.002, lon=point.lon, accuracyMeters=10,
+                        measuredAt=start + timedelta(seconds=10))
+    state, _ = register_position(state, itinerary, jump, jump.measuredAt)
+    state, result = register_position(
+        state, itinerary, position(point, start + timedelta(seconds=15)),
+        start + timedelta(seconds=15),
+    )
+    assert result.pointExited is False
+    assert state.exitStartedAt is None
+    assert state.session.phase == "VISITING"
 
 
 def test_one_measurement_at_exact_point_does_not_confirm_arrival():
@@ -138,7 +194,7 @@ def test_poor_accuracy_breaks_arrival_confirmation_sequence():
     assert state.session.currentPointOrder == 1
 
 
-def test_last_point_starts_one_hour_visit_before_completion():
+def test_last_point_completes_only_after_confirmed_exit_without_time_limit():
     start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
     itinerary = route(points=1, total_minutes=50)
     state = start_walk(itinerary, StartWalk(routeVersion=1), start)
@@ -150,26 +206,34 @@ def test_last_point_starts_one_hour_visit_before_completion():
     assert reached.pointReached is True
     assert state.session.status == "ACTIVE"
     assert state.session.currentPointOrder == 1
-    assert state.session.finalPointVisitStartedAt == start + timedelta(seconds=5)
-    assert state.session.estimatedRemainingMinutes == 60
-    waiting_state, waiting = register_position(
-        state, itinerary, position(itinerary.points[0], start + timedelta(minutes=30)),
-        start + timedelta(minutes=30),
+    assert state.session.phase == "VISITING"
+    inside_state, inside = register_position(
+        state, itinerary, position(itinerary.points[0], start + timedelta(hours=3)),
+        start + timedelta(hours=3),
     )
-    assert waiting.pointReached is False
-    assert waiting_state.session.status == "ACTIVE"
-    assert waiting_state.session.estimatedRemainingMinutes == 31
+    assert inside.pointExited is False
+    assert inside_state.session.status == "ACTIVE"
+    assert inside_state.session.visitElapsedSeconds == 3 * 60 * 60 - 5
+    point = itinerary.points[0]
+    outside = WalkPosition(lat=point.lat + 0.002, lon=point.lon, accuracyMeters=10,
+                           measuredAt=start + timedelta(hours=3, seconds=5))
+    outside_state, first_exit = register_position(
+        inside_state, itinerary, outside, outside.measuredAt,
+    )
+    assert first_exit.pointExited is False
     completed_state, completed = register_position(
-        waiting_state, itinerary, position(itinerary.points[0], start + timedelta(hours=1, seconds=5)),
-        start + timedelta(hours=1, seconds=5),
+        outside_state, itinerary,
+        outside.model_copy(update={"measuredAt": outside.measuredAt + timedelta(seconds=5)}),
+        outside.measuredAt + timedelta(seconds=5),
     )
-    assert completed.pointReached is False
+    assert completed.pointExited is True
     assert completed_state.session.status == "COMPLETED"
     assert completed_state.session.currentPointOrder is None
     assert len(completed_state.session.visits) == 1
+    assert completed_state.session.visits[0].durationSeconds == 3 * 60 * 60 + 5
 
 
-def test_pause_does_not_consume_final_point_visit_time():
+def test_pause_stops_visit_stopwatch_and_resume_continues_it():
     start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
     itinerary = route(points=1, total_minutes=50)
     state = start_walk(itinerary, StartWalk(routeVersion=1), start)
@@ -182,12 +246,31 @@ def test_pause_does_not_consume_final_point_visit_time():
                          start + timedelta(minutes=20))
     state = apply_action(state, itinerary, WalkAction(action="RESUME"),
                          start + timedelta(minutes=50))
-    state, progress = register_position(
-        state, itinerary, position(itinerary.points[0], start + timedelta(hours=1, seconds=5)),
-        start + timedelta(hours=1, seconds=5),
-    )
-    assert progress.walk.status == "ACTIVE"
-    assert progress.walk.estimatedRemainingMinutes == 30
+    assert state.session.visitElapsedSeconds == 20 * 60 - 5
+    current = session_at(state, start + timedelta(hours=1, seconds=5))
+    assert current.status == "ACTIVE"
+    assert current.visitElapsedSeconds == 30 * 60
+
+
+def test_legacy_final_visit_json_restores_as_unlimited_visiting_stopwatch():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route(points=1)
+    original = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    legacy_payload = original.model_copy(update={
+        "session": original.session.model_copy(update={
+            "finalPointVisitStartedAt": start + timedelta(minutes=1),
+        }),
+        "finalPointPausedSeconds": 10,
+    }).model_dump(mode="json")
+    for field in ("phase", "visitStartedAt", "visitElapsedSeconds"):
+        legacy_payload["session"].pop(field)
+    for field in ("visitPausedSeconds", "exitStartedAt", "exitPointOrder"):
+        legacy_payload.pop(field)
+    restored = WalkState.model_validate_json(json.dumps(legacy_payload))
+    current = session_at(restored, start + timedelta(minutes=3))
+    assert current.phase == "VISITING"
+    assert current.currentPointOrder == 1
+    assert current.visitElapsedSeconds == 110
 
 
 def test_pause_time_is_excluded_from_remaining_time():

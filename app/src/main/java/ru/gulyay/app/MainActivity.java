@@ -79,6 +79,7 @@ public final class MainActivity extends Activity {
     // recovery hint after process death until this flag is set by a server read.
     private boolean walkStateVerified;
     private boolean walkStateSyncInFlight;
+    private boolean openSnapshotAfterWalkSyncFailure;
     private String walkStateError;
     private String currentWalkStatus;
     private Button routeControlButton;
@@ -1468,8 +1469,7 @@ public final class MainActivity extends Activity {
     private void returnToCurrentRoute() {
         if (routeId == null || routeCityId == null || requestInFlight) return;
         if (!walkStateVerified) {
-            if (openUnconfirmedSnapshotReadOnly()) return;
-            syncWalkStateFromBackend();
+            syncWalkStateFromBackend(true);
             return;
         }
         String savedQuery = getPreferences(MODE_PRIVATE).getString("routeQuery", null);
@@ -1489,7 +1489,8 @@ public final class MainActivity extends Activity {
     private boolean openUnconfirmedSnapshotReadOnly() {
         boolean snapshotValid = ApiClient.isSnapshotValidForOfflineView(routeSnapshot, routeId,
                 routeVersion, SystemClock.elapsedRealtime());
-        if (!RouteLifecycleRecovery.canOpenUnconfirmedSnapshot(walkStateVerified, snapshotValid)) {
+        if (!RouteLifecycleRecovery.canOpenUnconfirmedSnapshotAfterSyncFailure(
+                walkStateVerified, snapshotValid, true, true)) {
             return false;
         }
         Intent intent = new Intent(this, MapActivity.class);
@@ -1599,6 +1600,11 @@ public final class MainActivity extends Activity {
 
     /** Reconcile persisted recovery hints with the backend without changing walk state. */
     private void syncWalkStateFromBackend() {
+        syncWalkStateFromBackend(false);
+    }
+
+    private void syncWalkStateFromBackend(boolean allowSnapshotAfterFailure) {
+        if (allowSnapshotAfterFailure) openSnapshotAfterWalkSyncFailure = true;
         if (routeId == null || routeCityId == null || walkStateSyncInFlight) return;
         final String requestedRouteId = routeId;
         final int requestedGeneration = routeLifecycleGeneration;
@@ -1610,6 +1616,7 @@ public final class MainActivity extends Activity {
             ApiClient.WalkResult response = null;
             boolean routeLookupCompleted = false;
             boolean routeFound = false;
+            boolean transientFailure = false;
             String error = null;
             try {
                 if (knownWalkId != null) response = ApiClient.getWalk(knownWalkId, owner);
@@ -1628,32 +1635,42 @@ public final class MainActivity extends Activity {
                             response = latest;
                         } else if (!"NOT_FOUND".equals(latest.errorCode)) {
                             error = latest.message;
+                            transientFailure = latest.transientFailure;
                         }
                     } else if ("NOT_FOUND".equals(route.errorCode)) {
                         routeLookupCompleted = true;
                     } else {
                         error = route.message;
+                        transientFailure = route.transientFailure;
                     }
                 } else if (!response.success) {
                     error = response.message;
+                    transientFailure = response.transientFailure;
                 }
             } catch (Exception exception) {
                 error = "Не удалось синхронизировать прогулку с сервером. Проверьте сеть и повторите попытку.";
+                transientFailure = true;
             }
             ApiClient.WalkResult finalResponse = response;
             RouteLifecycleRecovery.HistoryRouteState finalHistoryRouteState =
                     RouteLifecycleRecovery.fromRouteLookup(routeLookupCompleted, routeFound, null);
             String finalError = error;
+            boolean finalTransientFailure = transientFailure;
             runOnUiThread(() -> {
                 walkStateSyncInFlight = false;
                 if (isFinishing() || isDestroyed()
                         || !RouteLifecycleRecovery.isCurrentRouteStateRequest(requestedRouteId,
                         requestedGeneration, routeId, routeLifecycleGeneration)) return;
+                boolean openSnapshot = openSnapshotAfterWalkSyncFailure;
+                openSnapshotAfterWalkSyncFailure = false;
                 if (finalError != null) {
                     walkStateVerified = false;
                     walkStateError = finalError;
                     result.setText(finalError);
                     renderRouteCard(null);
+                    if (openSnapshot && finalTransientFailure) {
+                        openUnconfirmedSnapshotReadOnly();
+                    }
                     return;
                 }
                 if (finalResponse != null && finalResponse.success
@@ -1891,9 +1908,7 @@ public final class MainActivity extends Activity {
             routeCardIcon.setVisibility(View.VISIBLE);
             routeCardIcon.setText("↻");
             routeControlButton.setVisibility(View.GONE);
-            routeCard.setOnClickListener(view -> {
-                if (!openUnconfirmedSnapshotReadOnly()) syncWalkStateFromBackend();
-            });
+            routeCard.setOnClickListener(view -> syncWalkStateFromBackend(true));
             return;
         }
         if (routeFinished) {

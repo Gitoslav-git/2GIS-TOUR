@@ -28,7 +28,7 @@ from .repository import RouteRepository
 from .route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, build_route,
                             rebuild_route_with_points)
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
-                   register_position, start_walk)
+                   register_position, session_at, start_walk)
 from .version import __version__ as APP_VERSION
 
 app = FastAPI(title="Гуляй API", version=APP_VERSION)
@@ -313,7 +313,7 @@ def create_walk(route_id: UUID, payload: StartWalk,
             if active is not None:
                 if (active.session.routeId == route_id
                         and active.session.routeVersion == payload.routeVersion):
-                    return active.session
+                    return session_at(active)
                 return failure("ACTIVE_WALK_EXISTS", "Сначала завершите текущую прогулку", 409,
                                request_id, {"walkId": str(active.session.walkId)})
         try:
@@ -322,7 +322,7 @@ def create_walk(route_id: UUID, payload: StartWalk,
             return failure("VERSION_CONFLICT", "Нельзя начать эту версию маршрута", 409,
                            request_id)
         repository.save_walk(state, x_device_session)
-        return state.session
+        return session_at(state)
 
 
 @app.get("/v1/walks/{walk_id}", response_model=WalkSession)
@@ -335,7 +335,7 @@ def get_walk(walk_id: UUID, x_device_session: UUID | None = Header(default=None)
     state = repository.get_walk(walk_id, x_device_session)
     if state is None:
         return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
-    return state.session
+    return session_at(state)
 
 
 @app.get("/v1/routes/{route_id}/walks/active", response_model=WalkSession)
@@ -351,7 +351,7 @@ def get_active_walk(route_id: UUID,
     state = repository.find_active_walk(x_device_session)
     if state is None or state.session.routeId != route_id:
         return failure("NOT_FOUND", "Активная прогулка не найдена", 404, request_id)
-    return state.session
+    return session_at(state)
 
 
 @app.get("/v1/routes/{route_id}/walks/latest", response_model=WalkSession)
@@ -367,7 +367,7 @@ def get_latest_walk_for_route(route_id: UUID,
     state = repository.latest_walk_for_route(x_device_session, route_id)
     if state is None:
         return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
-    return state.session
+    return session_at(state)
 
 
 @app.post("/v1/walks/{walk_id}/positions", response_model=WalkProgress)
@@ -559,12 +559,18 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
             "routeVersion": replacement.routeVersion,
             "currentPointOrder": current_order,
             "estimatedRemainingMinutes": replacement.totalMinutes,
+            "phase": "MOVING",
+            "visitStartedAt": None,
+            "visitElapsedSeconds": 0,
             "finalPointVisitStartedAt": None,
         })
         rebased_walk = active_walk.model_copy(update={
             "session": rebased_session,
             "proximityStartedAt": None,
             "proximityPointOrder": None,
+            "exitStartedAt": None,
+            "exitPointOrder": None,
+            "visitPausedSeconds": 0,
             "finalPointPausedSeconds": 0,
         })
         repository.replace_walk(rebased_walk, x_device_session)

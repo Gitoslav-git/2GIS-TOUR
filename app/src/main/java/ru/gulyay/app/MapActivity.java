@@ -80,6 +80,7 @@ public final class MapActivity extends ComponentActivity {
     private static final String MEMORY_LOG = "GulyayMapMemory";
     private static final String GEO_LOG = "GulyayGeoWalk";
     private static final int ARRIVAL_RADIUS_METERS = 75;
+    private static final int EXIT_RADIUS_METERS = 115;
     static final String EXTRA_ROUTE_ID = "routeId";
     static final String EXTRA_CITY_ID = "cityId";
     static final String EXTRA_SESSION_ID = "sessionId";
@@ -162,6 +163,9 @@ public final class MapActivity extends ComponentActivity {
     private double latestUserLat = Double.NaN;
     private double latestUserLon = Double.NaN;
     private float latestUserAccuracy = Float.NaN;
+    private int visitTimerBaseSeconds;
+    private long visitTimerSyncedAtElapsedMillis;
+    private Runnable visitTimerTick;
     private final Runnable cameraBoundsGuard = this::enforceRouteCameraBounds;
 
     @Override public void onCreate(Bundle savedInstanceState) {
@@ -1368,13 +1372,9 @@ public final class MapActivity extends ComponentActivity {
         }
         screenTitle.setText("Прогулка по " + cityName() + "\nМаршрут запущен");
         routeSummary.setText(pointName);
-        if (walk.finalPointVisitInProgress) {
-            status.setText("PAUSED".equals(walk.status)
-                    ? "Последняя точка на паузе. До завершения останется ≈"
-                            + walk.remainingMinutes + " мин после продолжения."
-                    : "Вы на последней точке. Прогулка завершится через ≈"
-                            + walk.remainingMinutes + " мин.");
-        } else {
+        boolean visiting = "VISITING".equals(walk.phase) && walk.currentPointOrder > 0;
+        if (!visiting) {
+            stopVisitStopwatch();
             status.setText("◷  Осталось ≈" + walk.remainingMinutes + " мин"
                     + "              ●  Точка " + walk.currentPointOrder + " из "
                     + (route == null ? walk.currentPointOrder : route.points.size()));
@@ -1384,6 +1384,8 @@ public final class MapActivity extends ComponentActivity {
             mapRouteSummary.setVisibility(View.VISIBLE);
             mapRouteSummary.setText("COMPLETED".equals(walk.status)
                     ? "Маршрут завершён" : "Прогулка остановлена");
+        } else if (visiting) {
+            startVisitStopwatch(pointName);
         } else if ("PAUSED".equals(walk.status)) {
             guidanceTitle.setText("Прогулка на паузе");
             guidanceSubtitle.setText("Продолжите, когда будете готовы");
@@ -1411,6 +1413,54 @@ public final class MapActivity extends ComponentActivity {
         if ("COMPLETED".equals(walk.status) || "STOPPED".equals(walk.status)) {
             persistFinishedRoute();
             clearActiveWalk();
+        }
+    }
+
+    private void startVisitStopwatch(String pointName) {
+        stopVisitStopwatch();
+        visitTimerBaseSeconds = Math.max(0, walk.visitElapsedSeconds);
+        visitTimerSyncedAtElapsedMillis = SystemClock.elapsedRealtime();
+        renderVisitStopwatch(pointName);
+        if (!"ACTIVE".equals(walk.status)) return;
+        final String expectedWalkId = walk.walkId;
+        final int expectedPointOrder = walk.currentPointOrder;
+        visitTimerTick = new Runnable() {
+            @Override public void run() {
+                if (walk == null || !expectedWalkId.equals(walk.walkId)
+                        || expectedPointOrder != walk.currentPointOrder
+                        || !"VISITING".equals(walk.phase)
+                        || !"ACTIVE".equals(walk.status)) {
+                    visitTimerTick = null;
+                    return;
+                }
+                renderVisitStopwatch(pointName);
+                uiHandler.postDelayed(this, 1_000L);
+            }
+        };
+        uiHandler.postDelayed(visitTimerTick, 1_000L);
+    }
+
+    private void renderVisitStopwatch(String pointName) {
+        if (walk == null || !"VISITING".equals(walk.phase)) return;
+        boolean running = "ACTIVE".equals(walk.status);
+        int elapsed = VisitStopwatch.elapsedSeconds(visitTimerBaseSeconds,
+                visitTimerSyncedAtElapsedMillis, SystemClock.elapsedRealtime(), running);
+        String stopwatch = VisitStopwatch.format(elapsed);
+        status.setText((running ? "Посещение" : "Посещение на паузе") + " • " + stopwatch
+                + "              ●  Точка " + walk.currentPointOrder + " из "
+                + (route == null ? walk.currentPointOrder : route.points.size()));
+        guidanceTitle.setText(pointName);
+        guidanceSubtitle.setText((running ? "На локации " : "Секундомер остановлен на ")
+                + stopwatch + (running ? " · выход подтверждается за 115 м" : ""));
+        guidanceTurnIcon.setText("◷");
+        mapRouteSummary.setVisibility(View.GONE);
+        guidancePanel.setVisibility(View.VISIBLE);
+    }
+
+    private void stopVisitStopwatch() {
+        if (visitTimerTick != null) {
+            uiHandler.removeCallbacks(visitTimerTick);
+            visitTimerTick = null;
         }
     }
 
@@ -1504,7 +1554,7 @@ public final class MapActivity extends ComponentActivity {
         double accuracy = location.hasAccuracy() ? location.getAccuracy() : 100.0;
         if (accuracy > PositionSubmissionPolicy.MAX_ACCURACY_METERS) {
             debugLocation("skip", location, distance, "accuracy");
-            if (distance >= 0 && distance <= ARRIVAL_RADIUS_METERS) {
+            if (needsBoundaryConfirmation(distance)) {
                 showGpsWaiting("Точность GPS недостаточна (±"
                         + Math.round(accuracy) + " м)");
             }
@@ -1519,7 +1569,7 @@ public final class MapActivity extends ComponentActivity {
         }
         if (positionInFlight) {
             debugLocation("skip", location, distance, "request-in-flight");
-            if (distance >= 0 && distance <= ARRIVAL_RADIUS_METERS) {
+            if (needsBoundaryConfirmation(distance)) {
                 scheduleFreshConfirmation(PositionSubmissionPolicy.MIN_INTERVAL_MILLIS,
                         "ожидается завершение проверки");
             }
@@ -1529,7 +1579,7 @@ public final class MapActivity extends ComponentActivity {
                 routeViewModel.previousPositionSentAt, routeViewModel.latestPositionSentAt);
         if (delay > 0) {
             debugLocation("skip", location, distance, "local-rate-limit-" + delay);
-            if (distance >= 0 && distance <= ARRIVAL_RADIUS_METERS) {
+            if (needsBoundaryConfirmation(distance)) {
                 scheduleFreshConfirmation(delay, "повторная проверка доступна через "
                         + Math.max(1, (int) Math.ceil(delay / 1000.0)) + " сек");
             }
@@ -1564,7 +1614,7 @@ public final class MapActivity extends ComponentActivity {
                     if ("RATE_LIMITED".equals(finalResponse.errorCode)
                             && walk != null && walkId.equals(walk.walkId)
                             && "ACTIVE".equals(walk.status)
-                            && distance >= 0 && distance <= ARRIVAL_RADIUS_METERS) {
+                            && needsBoundaryConfirmation(distance)) {
                         scheduleFreshConfirmation(
                                 Math.max(1, finalResponse.retryAfterSeconds) * 1_000L,
                                 "backend временно ограничил проверку");
@@ -1578,9 +1628,9 @@ public final class MapActivity extends ComponentActivity {
                 debugPositionResponse(finalResponse);
                 showWalkStatus();
                 syncLocationTracking();
-                if (!walk.pointReached && walk.currentPointOrder == requestedPointOrder
-                        && walk.distanceMeters >= 0
-                        && walk.distanceMeters <= ARRIVAL_RADIUS_METERS) {
+                if (!walk.pointReached && !walk.pointExited
+                        && walk.currentPointOrder == requestedPointOrder
+                        && needsBoundaryConfirmation(walk.distanceMeters)) {
                     long retryDelay = PositionSubmissionPolicy.delayUntilSlot(
                             SystemClock.elapsedRealtime(), routeViewModel.previousPositionSentAt,
                             routeViewModel.latestPositionSentAt);
@@ -1590,6 +1640,12 @@ public final class MapActivity extends ComponentActivity {
                 }
             });
         });
+    }
+
+    private boolean needsBoundaryConfirmation(int distance) {
+        if (walk == null || distance < 0) return false;
+        if ("VISITING".equals(walk.phase)) return distance > EXIT_RADIUS_METERS;
+        return distance <= ARRIVAL_RADIUS_METERS;
     }
 
     private void claimPositionSubmission(long now) {
@@ -1677,7 +1733,8 @@ public final class MapActivity extends ComponentActivity {
 
     private void showGpsWaiting(String reason) {
         if (guidancePanel == null || walk == null || !"ACTIVE".equals(walk.status)) return;
-        guidanceTitle.setText("Точка маршрута рядом");
+        guidanceTitle.setText("VISITING".equals(walk.phase)
+                ? "Подтверждаем выход с локации" : "Точка маршрута рядом");
         guidanceSubtitle.setText(reason);
         guidanceTurnIcon.setText("●");
         mapRouteSummary.setVisibility(View.GONE);
@@ -1703,6 +1760,9 @@ public final class MapActivity extends ComponentActivity {
                 + " currentPointOrder=" + response.currentPointOrder
                 + " distance=" + response.distanceMeters
                 + " status=" + response.status
+                + " phase=" + response.phase
+                + " visitElapsed=" + response.visitElapsedSeconds
+                + " pointExited=" + response.pointExited
                 + " error=" + response.errorCode
                 + " retryAfter=" + response.retryAfterSeconds);
     }
@@ -1887,7 +1947,10 @@ public final class MapActivity extends ComponentActivity {
 
     @Override protected void onStart() {
         super.onStart();
-        if (walk != null && walk.success) syncLocationTracking();
+        if (walk != null && walk.success) {
+            showWalkStatus();
+            syncLocationTracking();
+        }
     }
 
     @Override public void onTrimMemory(int level) {
@@ -1898,6 +1961,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     @Override protected void onStop() {
+        stopVisitStopwatch();
         stopLocationTracking();
         super.onStop();
     }
@@ -2186,6 +2250,10 @@ public final class MapActivity extends ComponentActivity {
         if (walk == null || !walk.success || route == null || !route.success
                 || route.path.size() < 2 || walk.currentPointOrder < 1
                 || walk.currentPointOrder > route.points.size()) return;
+        if ("VISITING".equals(walk.phase)) {
+            renderVisitStopwatch(route.points.get(walk.currentPointOrder - 1).name);
+            return;
+        }
         if (!Double.isFinite(lat) || !Double.isFinite(lon)) {
             lat = routeStartLat();
             lon = routeStartLon();

@@ -385,6 +385,8 @@ class WalkAction(StrictModel):
 class Visit(StrictModel):
     pointOrder: int = Field(ge=1, le=8)
     reachedAt: datetime
+    leftAt: datetime | None = None
+    durationSeconds: int | None = Field(default=None, ge=0)
 
 
 class WalkSession(StrictModel):
@@ -397,12 +399,17 @@ class WalkSession(StrictModel):
     endedAt: datetime | None = None
     estimatedRemainingMinutes: int = Field(ge=0)
     visits: list[Visit] = Field(default_factory=list)
+    phase: Literal["MOVING", "VISITING"] = "MOVING"
+    visitStartedAt: datetime | None = None
+    visitElapsedSeconds: int = Field(default=0, ge=0)
+    # Kept only so walk JSON written by releases <= 0.7.4 remains readable.
     finalPointVisitStartedAt: datetime | None = None
 
 
 class WalkProgress(StrictModel):
     walk: WalkSession
     pointReached: bool
+    pointExited: bool = False
     distanceMeters: int | None = Field(default=None, ge=0)
 
 
@@ -411,6 +418,10 @@ class WalkState(StrictModel):
     lastMeasuredAt: datetime | None = None
     proximityStartedAt: datetime | None = None
     proximityPointOrder: int | None = Field(default=None, ge=1, le=8)
+    exitStartedAt: datetime | None = None
+    exitPointOrder: int | None = Field(default=None, ge=1, le=8)
     pausedAt: datetime | None = None
     pausedSeconds: int = Field(default=0, ge=0)
+    visitPausedSeconds: int = Field(default=0, ge=0)
+    # Legacy equivalent of visitPausedSeconds for final-point-only timers.
     finalPointPausedSeconds: int = Field(default=0, ge=0)

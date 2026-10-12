@@ -380,7 +380,11 @@ def test_walk_start_arrival_pause_resume_and_stop():
     assert first.json()["pointReached"] is False
     assert second.json()["pointReached"] is True
     assert second.json()["walk"]["status"] == "ACTIVE"
-    assert second.json()["walk"]["finalPointVisitStartedAt"] is not None
+    assert second.json()["walk"]["phase"] == "VISITING"
+    assert second.json()["walk"]["currentPointOrder"] == 1
+    assert second.json()["walk"]["visitStartedAt"] is not None
+    assert second.json()["walk"]["visitElapsedSeconds"] == 0
+    assert second.json()["walk"]["finalPointVisitStartedAt"] is None
     assert len(second.json()["walk"]["visits"]) == 1
     limited = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
         "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,
@@ -388,6 +392,54 @@ def test_walk_start_arrival_pause_resume_and_stop():
     })
     assert limited.status_code == 429
     assert limited.json()["error"]["details"]["dependency"] == "geolocation"
+
+
+def test_walk_api_last_point_visiting_then_completes_only_after_confirmed_exit():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "Одно место в центре на два часа",
+        "deviceSessionId": session,
+    })
+    assert created.status_code == 200
+    point = created.json()["points"][0]
+    started = client.post(f"/v1/routes/{created.json()['routeId']}/walks", headers=headers,
+                          json={"routeVersion": 1})
+    walk_id = started.json()["walkId"]
+    measured_at = datetime.now(timezone.utc)
+
+    for offset in (0, 5):
+        arrival = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
+            "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,
+            "measuredAt": (measured_at + timedelta(seconds=offset)).isoformat(),
+        })
+        assert arrival.status_code == 200
+
+    visiting = arrival.json()["walk"]
+    assert visiting["status"] == "ACTIVE"
+    assert visiting["phase"] == "VISITING"
+    assert visiting["currentPointOrder"] == 1
+    assert visiting["visits"][0]["leftAt"] is None
+
+    # The production limiter allows only two positions per minute. Advancing its
+    # window here isolates the transition contract from the separately tested limiter.
+    POSITION_REQUESTS.clear()
+    for offset in (65, 70):
+        leaving = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
+            "lat": point["lat"] + 0.002, "lon": point["lon"], "accuracyMeters": 10,
+            "measuredAt": (measured_at + timedelta(seconds=offset)).isoformat(),
+        })
+        assert leaving.status_code == 200
+
+    completed = leaving.json()["walk"]
+    assert leaving.json()["pointExited"] is True
+    assert completed["status"] == "COMPLETED"
+    assert completed["phase"] == "MOVING"
+    assert completed["currentPointOrder"] is None
+    assert completed["visits"][0]["leftAt"] is not None
+    assert completed["visits"][0]["durationSeconds"] == 65
 
 
 def test_walk_actions_require_valid_state_and_active_walk_is_unique():

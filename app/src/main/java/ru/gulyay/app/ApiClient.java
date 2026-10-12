@@ -75,6 +75,7 @@ final class ApiClient {
         final List<PlaceOption> points;
         final List<GeoCoordinate> path;
         List<RouteLegGeometry> legGeometries;
+        boolean transientFailure;
         int totalMinutes;
         int requestedMinutes;
         int projectedMinutes;
@@ -114,6 +115,7 @@ final class ApiClient {
             this.points = points;
             this.path = path;
             this.legGeometries = Collections.emptyList();
+            this.transientFailure = false;
             this.totalMinutes = -1;
             this.requestedMinutes = -1;
             this.projectedMinutes = -1;
@@ -233,27 +235,33 @@ final class ApiClient {
         final boolean pointReached;
         final int distanceMeters;
         final String errorCode;
-        final boolean finalPointVisitInProgress;
         final int retryAfterSeconds;
+        final String phase;
+        final int visitElapsedSeconds;
+        final boolean pointExited;
+        boolean transientFailure;
 
         WalkResult(boolean success, String message, String walkId, String status,
                    int currentPointOrder, int remainingMinutes, boolean pointReached,
                    int distanceMeters, String errorCode) {
             this(success, message, walkId, status, currentPointOrder, remainingMinutes,
-                    pointReached, distanceMeters, errorCode, false, 0);
+                    pointReached, distanceMeters, errorCode, 0,
+                    "MOVING", 0, false);
         }
 
         WalkResult(boolean success, String message, String walkId, String status,
                    int currentPointOrder, int remainingMinutes, boolean pointReached,
-                   int distanceMeters, String errorCode, boolean finalPointVisitInProgress) {
+                   int distanceMeters, String errorCode, int retryAfterSeconds) {
             this(success, message, walkId, status, currentPointOrder, remainingMinutes,
-                    pointReached, distanceMeters, errorCode, finalPointVisitInProgress, 0);
+                    pointReached, distanceMeters, errorCode, retryAfterSeconds,
+                    "MOVING", 0, false);
         }
 
         WalkResult(boolean success, String message, String walkId, String status,
                    int currentPointOrder, int remainingMinutes, boolean pointReached,
-                   int distanceMeters, String errorCode, boolean finalPointVisitInProgress,
-                   int retryAfterSeconds) {
+                   int distanceMeters, String errorCode, int retryAfterSeconds,
+                   String phase, int visitElapsedSeconds,
+                   boolean pointExited) {
             this.success = success;
             this.message = message;
             this.walkId = walkId;
@@ -263,8 +271,11 @@ final class ApiClient {
             this.pointReached = pointReached;
             this.distanceMeters = distanceMeters;
             this.errorCode = errorCode;
-            this.finalPointVisitInProgress = finalPointVisitInProgress;
             this.retryAfterSeconds = retryAfterSeconds;
+            this.phase = phase;
+            this.visitElapsedSeconds = visitElapsedSeconds;
+            this.pointExited = pointExited;
+            this.transientFailure = false;
         }
     }
 
@@ -369,7 +380,10 @@ final class ApiClient {
     }
 
     static Result getRoute(String routeId, String cityId, String sessionId) throws Exception {
-        return getRouteResponse("/v1/routes/" + routeId, sessionId, cityId);
+        String path = "/v1/routes/" + routeId;
+        return RouteLoadRetryPolicy.execute(
+                () -> getRouteResponse(path, sessionId, cityId),
+                result -> result.transientFailure);
     }
 
     static List<GuestHistoryItem> getGuestHistory(String sessionId) throws Exception {
@@ -568,10 +582,13 @@ final class ApiClient {
             JSONObject response = readJson(connection, status);
             if (status >= 400) {
                 Result error = routeError(response, status);
-                return new WalkResult(false, error.message, null, null, 0, 0,
-                        false, -1, error.errorCode, false, error.retryAfterSeconds);
+                WalkResult failed = new WalkResult(false, error.message, null, null, 0, 0,
+                        false, -1, error.errorCode, error.retryAfterSeconds);
+                failed.transientFailure = status == 408 || status == 429 || status >= 500;
+                return failed;
             }
             boolean pointReached = response.optBoolean("pointReached", false);
+            boolean pointExited = response.optBoolean("pointExited", false);
             int distance = response.has("distanceMeters") && !response.isNull("distanceMeters")
                     ? response.getInt("distanceMeters") : -1;
             JSONObject walk = response.optJSONObject("walk");
@@ -580,11 +597,13 @@ final class ApiClient {
             int order = walk.has("currentPointOrder") && !walk.isNull("currentPointOrder")
                     ? walk.getInt("currentPointOrder") : 0;
             int remaining = walk.optInt("estimatedRemainingMinutes", 0);
-            String message = walkMessage(walkStatus, order, remaining, pointReached, distance);
+            String phase = walk.optString("phase", "MOVING");
+            int visitElapsed = walk.optInt("visitElapsedSeconds", 0);
+            String message = walkMessage(walkStatus, order, remaining, pointReached,
+                    pointExited, phase, visitElapsed, distance);
             return new WalkResult(true, message, walk.getString("walkId"), walkStatus,
-                    order, remaining, pointReached, distance, null,
-                    walk.has("finalPointVisitStartedAt")
-                            && !walk.isNull("finalPointVisitStartedAt"), 0);
+                    order, remaining, pointReached, distance, null, 0,
+                    phase, visitElapsed, pointExited);
         } catch (Exception error) {
             BackendConfig.logFailure(method, path, startedAt, error);
             throw error;
@@ -594,11 +613,16 @@ final class ApiClient {
     }
 
     private static String walkMessage(String status, int order, int remaining,
-                                      boolean reached, int distance) {
+                                      boolean reached, boolean exited, String phase,
+                                      int visitElapsed, int distance) {
         if (status.equals("COMPLETED")) return "Прогулка завершена — все точки пройдены.";
         if (status.equals("STOPPED")) return "Прогулка остановлена.";
         if (status.equals("PAUSED")) return "Прогулка на паузе. Осталось примерно " +
                 remaining + " мин.";
+        if ("VISITING".equals(phase)) {
+            return "Посещение точки " + order + " · " + formatStopwatch(visitElapsed);
+        }
+        if (exited) return "Посещение завершено. Следующая точка: " + order;
         String prefix = reached ? "Точка достигнута. " : "";
         String distanceText = distance >= 0 ? " · до точки ≈" + distance + " м" : "";
         return prefix + "Следующая точка: " + order + distanceText +
@@ -617,7 +641,11 @@ final class ApiClient {
             int status = connection.getResponseCode();
             BackendConfig.logResponse(method, path, status, startedAt);
             JSONObject response = readJson(connection, status);
-            if (status >= 400) return routeError(response, status);
+            if (status >= 400) {
+                Result error = routeError(response, status);
+                error.transientFailure = status == 408 || status == 429 || status >= 500;
+                return error;
+            }
             Result result = new Result(true, routeSummary(response, cityId), response.getString("routeId"),
                     response.getInt("routeVersion"), 0, null, routePoints(response),
                     routePath(response));
@@ -629,6 +657,16 @@ final class ApiClient {
         } finally {
             if (connection != null) connection.disconnect();
         }
+    }
+
+    private static String formatStopwatch(int seconds) {
+        int safe = Math.max(0, seconds);
+        int hours = safe / 3600;
+        int minutes = (safe % 3600) / 60;
+        int remainder = safe % 60;
+        if (hours > 0) return String.format(Locale.US, "%d:%02d:%02d",
+                hours, minutes, remainder);
+        return String.format(Locale.US, "%02d:%02d", minutes, remainder);
     }
 
     private static HttpURLConnection open(String path, String method, String sessionId)

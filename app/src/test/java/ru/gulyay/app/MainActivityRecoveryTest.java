@@ -6,6 +6,9 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.io.EOFException;
+import java.net.SocketTimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Arrays;
 import java.util.List;
 
@@ -84,10 +87,17 @@ public class MainActivityRecoveryTest {
                 "route-a", 2, savedAt - 1));
     }
 
-    @Test public void unconfirmedRouteCardOpensOnlyAValidSnapshotReadOnly() {
-        assertTrue(RouteLifecycleRecovery.canOpenUnconfirmedSnapshot(false, true));
-        assertFalse(RouteLifecycleRecovery.canOpenUnconfirmedSnapshot(false, false));
-        assertFalse(RouteLifecycleRecovery.canOpenUnconfirmedSnapshot(true, true));
+    @Test public void unconfirmedRouteCardOpensSnapshotOnlyAfterFailedSync() {
+        assertTrue(RouteLifecycleRecovery.canOpenUnconfirmedSnapshotAfterSyncFailure(
+                false, true, true, true));
+        assertFalse(RouteLifecycleRecovery.canOpenUnconfirmedSnapshotAfterSyncFailure(
+                false, true, false, true));
+        assertFalse(RouteLifecycleRecovery.canOpenUnconfirmedSnapshotAfterSyncFailure(
+                false, true, true, false));
+        assertFalse(RouteLifecycleRecovery.canOpenUnconfirmedSnapshotAfterSyncFailure(
+                false, false, true, true));
+        assertFalse(RouteLifecycleRecovery.canOpenUnconfirmedSnapshotAfterSyncFailure(
+                true, true, true, true));
     }
 
     @Test public void releasedMapViewCallbackCannotChangeCurrentMap() {
@@ -146,5 +156,34 @@ public class MainActivityRecoveryTest {
                 PositionSubmissionPolicy.delayUntilSlot(15_000L, 10_000L, 15_000L));
         assertEquals(0L,
                 PositionSubmissionPolicy.delayUntilSlot(70_000L, 10_000L, 15_000L));
+    }
+
+    @Test public void visitStopwatchCountsUpAndFreezesWhilePaused() {
+        assertEquals(0, VisitStopwatch.elapsedSeconds(0, 10_000L, 10_999L, true));
+        assertEquals(5, VisitStopwatch.elapsedSeconds(0, 10_000L, 15_000L, true));
+        assertEquals(65, VisitStopwatch.elapsedSeconds(60, 10_000L, 15_000L, true));
+        assertEquals(60, VisitStopwatch.elapsedSeconds(60, 10_000L, 25_000L, false));
+        assertEquals("00:00", VisitStopwatch.format(0));
+        assertEquals("01:05", VisitStopwatch.format(65));
+        assertEquals("1:01:01", VisitStopwatch.format(3661));
+    }
+
+    @Test public void routeReadRetriesOneTransientTransportFailureOnly() {
+        assertTrue(RouteLoadRetryPolicy.shouldRetry(new EOFException(), 0));
+        assertTrue(RouteLoadRetryPolicy.shouldRetry(new SocketTimeoutException(), 0));
+        assertFalse(RouteLoadRetryPolicy.shouldRetry(new EOFException(), 1));
+        assertFalse(RouteLoadRetryPolicy.shouldRetry(new IllegalStateException(), 0));
+        assertTrue(RouteLoadRetryPolicy.shouldRetryHttp(0));
+        assertFalse(RouteLoadRetryPolicy.shouldRetryHttp(1));
+    }
+
+    @Test public void routeReadActuallyRetriesAfterEof() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        String result = RouteLoadRetryPolicy.execute(() -> {
+            if (calls.getAndIncrement() == 0) throw new EOFException();
+            return "route";
+        }, value -> false);
+        assertEquals("route", result);
+        assertEquals(2, calls.get());
     }
 }

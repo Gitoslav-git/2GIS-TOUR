@@ -32,9 +32,11 @@ final class RouteLifecycleRecovery {
         return !"ACTIVE".equals(walkStatus) && !"PAUSED".equals(walkStatus);
     }
 
-    static boolean canOpenUnconfirmedSnapshot(boolean walkStateVerified,
-                                              boolean snapshotValid) {
-        return !walkStateVerified && snapshotValid;
+    static boolean canOpenUnconfirmedSnapshotAfterSyncFailure(boolean walkStateVerified,
+                                                              boolean snapshotValid,
+                                                              boolean syncAttempted,
+                                                              boolean networkFailed) {
+        return !walkStateVerified && snapshotValid && syncAttempted && networkFailed;
     }
 
     static String historyStatusLabel(String status) {

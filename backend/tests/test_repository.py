@@ -1,9 +1,11 @@
+import json
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from gulyay.models import (CreateRoute, Filters, Route, RouteLeg, RoutePoint,
-                           SearchArea, StartWalk)
+                           SearchArea, StartWalk, WalkPosition)
 from gulyay.repository import RouteRepository
-from gulyay.walk import start_walk
+from gulyay.walk import register_position, session_at, start_walk
 
 
 def route(route_id, version=1):
@@ -138,6 +140,67 @@ def test_walk_recovery_survives_repository_reopen(tmp_path):
     assert restored is not None
     assert restored.session.status == "ACTIVE"
     assert reopened.find_active_walk(owner).session.walkId == walk.session.walkId
+    reopened.close()
+
+
+def test_visiting_stopwatch_survives_sqlite_reopen(tmp_path):
+    path = tmp_path / "visiting-walk-recovery.sqlite3"
+    owner, route_id = uuid4(), uuid4()
+    itinerary = route(route_id)
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+    start = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+    walk = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    point = itinerary.points[0]
+    first = WalkPosition(lat=point.lat, lon=point.lon, accuracyMeters=10, measuredAt=start)
+    walk, _ = register_position(walk, itinerary, first, start)
+    second = first.model_copy(update={"measuredAt": start + timedelta(seconds=5)})
+    walk, _ = register_position(walk, itinerary, second, second.measuredAt)
+
+    repository = RouteRepository(path)
+    repository.save_new(itinerary, owner, payload)
+    repository.save_walk(walk, owner)
+    repository.close()
+
+    reopened = RouteRepository(path)
+    restored = reopened.get_walk(walk.session.walkId, owner)
+    assert restored is not None
+    assert restored.session.phase == "VISITING"
+    assert session_at(restored, start + timedelta(minutes=2)).visitElapsedSeconds == 115
+    reopened.close()
+
+
+def test_legacy_walk_json_in_sqlite_remains_readable(tmp_path):
+    path = tmp_path / "legacy-walk.sqlite3"
+    owner, route_id = uuid4(), uuid4()
+    itinerary = route(route_id)
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+    started = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+    walk = start_walk(itinerary, StartWalk(routeVersion=1), started)
+    legacy = walk.model_dump(mode="json")
+    for field in ("phase", "visitStartedAt", "visitElapsedSeconds"):
+        legacy["session"].pop(field)
+    for field in ("exitStartedAt", "exitPointOrder", "visitPausedSeconds"):
+        legacy.pop(field)
+    legacy["session"]["finalPointVisitStartedAt"] = (
+        started + timedelta(minutes=1)
+    ).isoformat()
+
+    repository = RouteRepository(path)
+    repository.save_new(itinerary, owner, payload)
+    repository.save_walk(walk, owner)
+    with repository._connection:
+        repository._connection.execute(
+            "UPDATE walks SET walk_json = ? WHERE walk_id = ?",
+            (json.dumps(legacy), str(walk.session.walkId)),
+        )
+    repository.close()
+
+    reopened = RouteRepository(path)
+    restored = reopened.get_walk(walk.session.walkId, owner)
+    assert restored is not None
+    snapshot = session_at(restored, started + timedelta(minutes=3))
+    assert snapshot.phase == "VISITING"
+    assert snapshot.visitElapsedSeconds == 120
     reopened.close()
 
 

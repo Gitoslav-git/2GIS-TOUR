@@ -6,9 +6,9 @@ final class RouteLifecycleRecovery {
 
     private RouteLifecycleRecovery() { }
 
-    static HistoryRouteState fromHistory(boolean historyLoaded, boolean routeFound,
-                                         String walkStatus) {
-        if (!historyLoaded) return HistoryRouteState.UNCONFIRMED;
+    static HistoryRouteState fromRouteLookup(boolean routeLookupCompleted, boolean routeFound,
+                                             String walkStatus) {
+        if (!routeLookupCompleted) return HistoryRouteState.UNCONFIRMED;
         if (!routeFound) return HistoryRouteState.REMOVED;
         return isTerminal(walkStatus) ? HistoryRouteState.TERMINAL : HistoryRouteState.READY;
     }
@@ -26,6 +26,10 @@ final class RouteLifecycleRecovery {
                                               String currentRouteId, int currentGeneration) {
         return requestedRouteId != null && requestedRouteId.equals(currentRouteId)
                 && requestedGeneration == currentGeneration;
+    }
+
+    static boolean canDeleteHistoryRoute(String walkStatus) {
+        return !"ACTIVE".equals(walkStatus) && !"PAUSED".equals(walkStatus);
     }
 
     static String historyStatusLabel(String status) {

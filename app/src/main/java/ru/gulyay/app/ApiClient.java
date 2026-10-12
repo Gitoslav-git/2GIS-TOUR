@@ -1,5 +1,6 @@
 package ru.gulyay.app;
 
+import android.os.SystemClock;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
@@ -146,13 +147,17 @@ final class ApiClient {
     static String routeSnapshot(Result route) {
         if (route == null || !route.success) return null;
         try {
+            long savedAtElapsedMillis = SystemClock.elapsedRealtime();
             JSONObject json = new JSONObject();
             json.put("routeId", route.routeId).put("routeVersion", route.routeVersion)
                     .put("message", route.message).put("totalMinutes", route.totalMinutes)
                     .put("requestedMinutes", route.requestedMinutes)
                     .put("totalDistanceMeters", route.totalDistanceMeters)
                     .put("startLat", route.startLat).put("startLon", route.startLon)
-                    .put("startSource", route.startSource);
+                    .put("startSource", route.startSource)
+                    .put("offlineSnapshotSavedAtElapsedMs", savedAtElapsedMillis)
+                    .put("offlineSnapshotExpiresAtElapsedMs",
+                            savedAtElapsedMillis + RouteSnapshotPolicy.OFFLINE_VIEW_WINDOW_MILLIS);
             JSONArray points = new JSONArray();
             for (PlaceOption point : route.points) points.put(new JSONObject()
                     .put("id", point.placeId).put("name", point.name).put("food", point.food)
@@ -190,6 +195,20 @@ final class ApiClient {
             result.startSource = json.optString("startSource", "LEGACY");
             return result;
         } catch (Exception ignored) { return null; }
+    }
+
+    static boolean isSnapshotValidForOfflineView(String raw, String expectedRouteId,
+                                                  int expectedVersion, long nowElapsedMillis) {
+        try {
+            JSONObject json = new JSONObject(raw);
+            return RouteSnapshotPolicy.isValidForOfflineView(
+                    json.getString("routeId"), json.getInt("routeVersion"),
+                    json.optLong("offlineSnapshotSavedAtElapsedMs", -1L),
+                    json.optLong("offlineSnapshotExpiresAtElapsedMs", -1L),
+                    expectedRouteId, expectedVersion, nowElapsedMillis);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     static final class WalkResult {
@@ -403,6 +422,11 @@ final class ApiClient {
 
     static WalkResult getActiveWalk(String routeId, String sessionId) throws Exception {
         return sendWalk("/v1/routes/" + routeId + "/walks/active",
+                "GET", null, sessionId);
+    }
+
+    static WalkResult getLatestWalkForRoute(String routeId, String sessionId) throws Exception {
+        return sendWalk("/v1/routes/" + routeId + "/walks/latest",
                 "GET", null, sessionId);
     }
 

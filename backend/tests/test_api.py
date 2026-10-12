@@ -158,6 +158,59 @@ def test_guest_history_keeps_only_three_newest_routes_for_its_owner():
     items = history.json()["items"]
     assert len(items) == 3
     assert {item["routeId"] for item in items} == set(created_ids[-3:])
+    # History is intentionally capped and must not be used as a route-existence check.
+    assert client.get(f"/v1/routes/{created_ids[0]}", headers=headers).status_code == 200
+    assert client.get(f"/v1/routes/{created_ids[0]}/walks/latest",
+                      headers=headers).status_code == 404
+
+
+def test_latest_walk_is_available_for_route_outside_three_item_history():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+
+    def create(query: str) -> str:
+        response = client.post("/v1/routes", headers=headers, json={
+            "cityId": "tula", "query": query, "deviceSessionId": session,
+        })
+        assert response.status_code == 200
+        return response.json()["routeId"]
+
+    old_route_id = create("Старая прогулка на два часа")
+    started = client.post(f"/v1/routes/{old_route_id}/walks", headers=headers,
+                          json={"routeVersion": 1})
+    assert started.status_code == 200
+    stopped = client.post(f"/v1/walks/{started.json()['walkId']}/actions", headers=headers,
+                          json={"action": "STOP"})
+    assert stopped.status_code == 200
+    for index in range(3):
+        create(f"Новый маршрут {index} на два часа")
+
+    history = client.get("/v1/routes/history", headers=headers)
+    assert history.status_code == 200
+    assert old_route_id not in {item["routeId"] for item in history.json()["items"]}
+    assert client.get(f"/v1/routes/{old_route_id}", headers=headers).status_code == 200
+    latest = client.get(f"/v1/routes/{old_route_id}/walks/latest", headers=headers)
+    assert latest.status_code == 200
+    assert latest.json()["status"] == "STOPPED"
+
+
+def test_latest_walk_reports_not_found_after_route_is_deleted():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "Удаляемый маршрут на два часа",
+        "deviceSessionId": session,
+    })
+    assert created.status_code == 200
+    route_id = created.json()["routeId"]
+    assert client.delete(f"/v1/routes/{route_id}", headers=headers).status_code == 204
+    deleted = client.get(f"/v1/routes/{route_id}/walks/latest", headers=headers)
+    assert deleted.status_code == 404
+    assert deleted.json()["error"]["code"] == "NOT_FOUND"
 
 
 def test_client_is_limited_to_five_expensive_requests_per_minute():
@@ -271,6 +324,30 @@ def test_delete_route_removes_state_and_invalidates_recent_cache():
     recreated = client.post("/v1/routes", headers=headers, json=body)
     assert recreated.status_code == 200
     assert recreated.json()["routeId"] != route_id
+
+
+def test_delete_route_rejects_active_or_paused_walk():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "Активная прогулка на два часа",
+        "deviceSessionId": session,
+    })
+    assert created.status_code == 200
+    route_id = created.json()["routeId"]
+    started = client.post(f"/v1/routes/{route_id}/walks", headers=headers,
+                          json={"routeVersion": 1})
+    assert started.status_code == 200
+    blocked = client.delete(f"/v1/routes/{route_id}", headers=headers)
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "WALK_ACTIVE"
+    assert client.get(f"/v1/routes/{route_id}", headers=headers).status_code == 200
+    paused = client.post(f"/v1/walks/{started.json()['walkId']}/actions", headers=headers,
+                         json={"action": "PAUSE"})
+    assert paused.status_code == 200
+    assert client.delete(f"/v1/routes/{route_id}", headers=headers).status_code == 409
 
 
 def test_walk_start_arrival_pause_resume_and_stop():

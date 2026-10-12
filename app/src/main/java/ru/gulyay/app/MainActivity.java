@@ -355,7 +355,7 @@ public final class MainActivity extends Activity {
                 UiKit.dp(this, 4), UiKit.dp(this, 6));
         historyStack.addView(guestHistoryStatus, new LinearLayout.LayoutParams(-1, -2));
         TextView history = UiKit.label(this,
-                "🔒  Полная история будет доступна после входа в профиль", 15, UiKit.MUTED);
+                "Гостевая история: до 3 маршрутов, хранение 24 часа. После появления профилей можно будет сохранять маршруты надолго.", 15, UiKit.MUTED);
         history.setGravity(Gravity.CENTER);
         history.setBackground(UiKit.rounded(UiKit.SOFT, 16, this));
         LinearLayout.LayoutParams historyParams = new LinearLayout.LayoutParams(
@@ -1416,9 +1416,11 @@ public final class MainActivity extends Activity {
         if (routeId == null || routeCityId == null) return;
         Intent intent = new Intent(this, MapActivity.class);
         intent.putExtra(MapActivity.EXTRA_ROUTE_ID, routeId);
+        intent.putExtra(MapActivity.EXTRA_ROUTE_VERSION, routeVersion);
         intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
         intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
         intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT, routeSnapshot);
+        intent.putExtra(MapActivity.EXTRA_WALK_STATUS, currentWalkStatus);
         intent.putExtra(MapActivity.EXTRA_HISTORY_READ_ONLY, false);
         if (startLat != null && startLon != null) {
             intent.putExtra(MapActivity.EXTRA_USER_LAT, startLat);
@@ -1453,9 +1455,11 @@ public final class MainActivity extends Activity {
         if (routeId == null || routeCityId == null) return;
         Intent intent = new Intent(this, MapActivity.class);
         intent.putExtra(MapActivity.EXTRA_ROUTE_ID, routeId);
+        intent.putExtra(MapActivity.EXTRA_ROUTE_VERSION, routeVersion);
         intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
         intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
         intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT, routeSnapshot);
+        intent.putExtra(MapActivity.EXTRA_WALK_STATUS, currentWalkStatus);
         intent.putExtra(MapActivity.EXTRA_HISTORY_READ_ONLY, true);
         startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
     }
@@ -1583,9 +1587,8 @@ public final class MainActivity extends Activity {
         walkStateError = null;
         network.execute(() -> {
             ApiClient.WalkResult response = null;
-            String terminalStatus = null;
-            boolean historyLoaded = false;
-            boolean routeFoundInHistory = false;
+            boolean routeLookupCompleted = false;
+            boolean routeFound = false;
             String error = null;
             try {
                 if (knownWalkId != null) response = ApiClient.getWalk(knownWalkId, owner);
@@ -1594,14 +1597,22 @@ public final class MainActivity extends Activity {
                     response = ApiClient.getActiveWalk(requestedRouteId, owner);
                 }
                 if (!response.success && "NOT_FOUND".equals(response.errorCode)) {
-                    for (ApiClient.GuestHistoryItem item : ApiClient.getGuestHistory(owner)) {
-                        if (requestedRouteId.equals(item.routeId)) {
-                            routeFoundInHistory = true;
-                            terminalStatus = item.walkStatus;
-                            break;
+                    ApiClient.Result route = ApiClient.getRoute(requestedRouteId, routeCityId, owner);
+                    if (route.success) {
+                        routeLookupCompleted = true;
+                        routeFound = true;
+                        ApiClient.WalkResult latest = ApiClient.getLatestWalkForRoute(
+                                requestedRouteId, owner);
+                        if (latest.success) {
+                            response = latest;
+                        } else if (!"NOT_FOUND".equals(latest.errorCode)) {
+                            error = latest.message;
                         }
+                    } else if ("NOT_FOUND".equals(route.errorCode)) {
+                        routeLookupCompleted = true;
+                    } else {
+                        error = route.message;
                     }
-                    historyLoaded = true;
                 } else if (!response.success) {
                     error = response.message;
                 }
@@ -1609,10 +1620,8 @@ public final class MainActivity extends Activity {
                 error = "Не удалось синхронизировать прогулку с сервером. Проверьте сеть и повторите попытку.";
             }
             ApiClient.WalkResult finalResponse = response;
-            String finalTerminalStatus = terminalStatus;
             RouteLifecycleRecovery.HistoryRouteState finalHistoryRouteState =
-                    RouteLifecycleRecovery.fromHistory(historyLoaded, routeFoundInHistory,
-                            terminalStatus);
+                    RouteLifecycleRecovery.fromRouteLookup(routeLookupCompleted, routeFound, null);
             String finalError = error;
             runOnUiThread(() -> {
                 walkStateSyncInFlight = false;
@@ -1639,11 +1648,9 @@ public final class MainActivity extends Activity {
                             .remove(FINISHED_ROUTE_ID).apply();
                     persistRouteState(query.getText().toString().trim());
                     renderRouteCard(finalResponse);
-                } else if ((finalResponse != null && finalResponse.success
-                        && isTerminalWalkStatus(finalResponse.status))
-                        || isTerminalWalkStatus(finalTerminalStatus)) {
-                    markCurrentRouteFinished(finalResponse != null && finalResponse.success
-                            ? finalResponse.status : finalTerminalStatus);
+                } else if (finalResponse != null && finalResponse.success
+                        && isTerminalWalkStatus(finalResponse.status)) {
+                    markCurrentRouteFinished(finalResponse.status);
                     updateQueryEditActions();
                     refreshGuestHistory();
                 } else if (finalHistoryRouteState == RouteLifecycleRecovery.HistoryRouteState.READY) {
@@ -1657,8 +1664,8 @@ public final class MainActivity extends Activity {
                     persistRouteState(query.getText().toString().trim());
                     renderRouteCard(null);
                 } else if (finalHistoryRouteState == RouteLifecycleRecovery.HistoryRouteState.REMOVED) {
-                    // A successful history response proved retention removed
-                    // this route. Do not revive its local snapshot as READY.
+                    // Only a route-scoped 404 proves retention removed this
+                    // route. A three-item history response cannot do that.
                     clearLocalRouteState("Сохранённый маршрут больше недоступен на backend. Создайте новый маршрут.");
                 } else {
                     // An unknown response must never erase the last confirmed
@@ -1751,18 +1758,72 @@ public final class MainActivity extends Activity {
         card.setGravity(Gravity.CENTER_VERTICAL);
         card.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 7), UiKit.dp(this, 14), UiKit.dp(this, 7));
         card.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE4E9E5, 14, this));
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = UiKit.label(this, cityName(item.cityId) + ": " + item.title, 14, UiKit.TEXT);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD); title.setMaxLines(1);
-        title.setEllipsize(android.text.TextUtils.TruncateAt.END); card.addView(title);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
         if ("COMPLETED".equals(item.walkStatus)) title.setText("✓  " + title.getText());
+        TextView delete = UiKit.label(this, "Удалить", 12, UiKit.RED);
+        delete.setPadding(UiKit.dp(this, 8), 0, 0, 0);
+        boolean canDelete = RouteLifecycleRecovery.canDeleteHistoryRoute(item.walkStatus);
+        delete.setAlpha(canDelete ? 1f : 0.45f);
+        delete.setContentDescription(canDelete ? "Удалить маршрут" : "Нельзя удалить активную прогулку");
+        delete.setOnClickListener(view -> {
+            if (canDelete) confirmDeleteGuestHistoryRoute(item);
+            else result.setText("Сначала завершите или остановите прогулку.");
+        });
+        header.addView(delete, new LinearLayout.LayoutParams(-2, -2));
+        card.addView(header, new LinearLayout.LayoutParams(-1, -2));
         TextView subtitle = UiKit.label(this, "Гостевой маршрут • " + item.pointCount + " мест • "
                 + item.totalMinutes + " мин", 12, UiKit.MUTED);
         subtitle.setText(historyStatusLabel(item.walkStatus) + " • " + item.pointCount
                 + " мест • " + item.totalMinutes + " мин");
         subtitle.setMaxLines(1); card.addView(subtitle);
         card.setOnClickListener(view -> openGuestHistoryRoute(item));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 58));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 66));
         params.bottomMargin = UiKit.dp(this, 6); guestHistoryList.addView(card, params);
+    }
+
+    private void confirmDeleteGuestHistoryRoute(ApiClient.GuestHistoryItem item) {
+        if (requestInFlight || !RouteLifecycleRecovery.canDeleteHistoryRoute(item.walkStatus)) return;
+        new AlertDialog.Builder(this)
+                .setTitle("Удалить маршрут?")
+                .setMessage("Маршрут исчезнет из гостевой истории. Это действие нельзя отменить.")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Удалить", (dialog, which) -> deleteGuestHistoryRoute(item))
+                .show();
+    }
+
+    private void deleteGuestHistoryRoute(ApiClient.GuestHistoryItem item) {
+        final String requestedRouteId = item.routeId;
+        final int requestGeneration = ++guestHistoryRequestGeneration;
+        setNetworkBusy(true);
+        network.execute(() -> {
+            ApiClient.Result response;
+            try { response = ApiClient.deleteRoute(requestedRouteId, sessionId()); }
+            catch (Exception exception) {
+                response = new ApiClient.Result(false,
+                        "Не удалось удалить маршрут. Проверьте соединение и повторите.", null, 0);
+            }
+            ApiClient.Result finalResponse = response;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()
+                        || requestGeneration != guestHistoryRequestGeneration) return;
+                finishNetwork(finalResponse.retryAfterSeconds);
+                if (!finalResponse.success) {
+                    result.setText(finalResponse.message);
+                    return;
+                }
+                if (requestedRouteId.equals(routeId)) {
+                    clearLocalRouteState("Маршрут удалён из гостевой истории.");
+                } else {
+                    result.setText("Маршрут удалён из гостевой истории.");
+                }
+                refreshGuestHistory();
+            });
+        });
     }
 
     private static String historyStatusLabel(String status) {
@@ -1782,6 +1843,7 @@ public final class MainActivity extends Activity {
                 if (finalResponse.success) {
                     Intent intent = new Intent(this, MapActivity.class);
                     intent.putExtra(MapActivity.EXTRA_ROUTE_ID, item.routeId);
+                    intent.putExtra(MapActivity.EXTRA_ROUTE_VERSION, item.routeVersion);
                     intent.putExtra(MapActivity.EXTRA_CITY_ID, item.cityId);
                     intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
                     intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT,
@@ -2081,9 +2143,11 @@ public final class MainActivity extends Activity {
     private void openWalkMap(String walkId) {
         Intent intent = new Intent(this, MapActivity.class);
         intent.putExtra(MapActivity.EXTRA_ROUTE_ID, routeId);
+        intent.putExtra(MapActivity.EXTRA_ROUTE_VERSION, routeVersion);
         intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
         intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
         intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT, routeSnapshot);
+        intent.putExtra(MapActivity.EXTRA_WALK_STATUS, currentWalkStatus);
         intent.putExtra(MapActivity.EXTRA_WALK_ID, walkId);
         intent.putExtra(MapActivity.EXTRA_HISTORY_READ_ONLY, false);
         startActivityForResult(intent, ROUTE_SCREEN_REQUEST);

@@ -7,27 +7,32 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class MainActivityRecoveryTest {
-    @Test public void historyErrorKeepsLastConfirmedRouteState() {
+    @Test public void timeoutOrServerErrorKeepsLastConfirmedRouteState() {
         assertEquals(RouteLifecycleRecovery.HistoryRouteState.UNCONFIRMED,
-                RouteLifecycleRecovery.fromHistory(false, false, null));
+                RouteLifecycleRecovery.fromRouteLookup(false, false, null));
         assertFalse(RouteLifecycleRecovery.shouldReplaceHistoryCards(false, 3, 3));
     }
 
-    @Test public void successfulEmptyHistoryMeansRouteWasRemoved() {
+    @Test public void onlyRouteScopedNotFoundMeansRouteWasRemoved() {
         assertEquals(RouteLifecycleRecovery.HistoryRouteState.REMOVED,
-                RouteLifecycleRecovery.fromHistory(true, false, null));
+                RouteLifecycleRecovery.fromRouteLookup(true, false, null));
+    }
+
+    @Test public void routeOutsideThreeItemHistoryRemainsReadyWhenFound() {
+        assertEquals(RouteLifecycleRecovery.HistoryRouteState.READY,
+                RouteLifecycleRecovery.fromRouteLookup(true, true, null));
     }
 
     @Test public void routeWithoutWalkRestoresAsReady() {
         assertEquals(RouteLifecycleRecovery.HistoryRouteState.READY,
-                RouteLifecycleRecovery.fromHistory(true, true, null));
+                RouteLifecycleRecovery.fromRouteLookup(true, true, null));
     }
 
     @Test public void stoppedAndCompletedRoutesNeverRestoreAsReady() {
         assertEquals(RouteLifecycleRecovery.HistoryRouteState.TERMINAL,
-                RouteLifecycleRecovery.fromHistory(true, true, "STOPPED"));
+                RouteLifecycleRecovery.fromRouteLookup(true, true, "STOPPED"));
         assertEquals(RouteLifecycleRecovery.HistoryRouteState.TERMINAL,
-                RouteLifecycleRecovery.fromHistory(true, true, "COMPLETED"));
+                RouteLifecycleRecovery.fromRouteLookup(true, true, "COMPLETED"));
     }
 
     @Test public void staleHistoryResponseIsRejected() {
@@ -51,6 +56,29 @@ public class MainActivityRecoveryTest {
         assertEquals("Прогулка на паузе", RouteLifecycleRecovery.historyStatusLabel("PAUSED"));
         assertEquals("Прогулка остановлена", RouteLifecycleRecovery.historyStatusLabel("STOPPED"));
         assertEquals("Маршрут пройден", RouteLifecycleRecovery.historyStatusLabel("COMPLETED"));
+    }
+
+    @Test public void activeAndPausedHistoryRoutesCannotBeDeleted() {
+        assertFalse(RouteLifecycleRecovery.canDeleteHistoryRoute("ACTIVE"));
+        assertFalse(RouteLifecycleRecovery.canDeleteHistoryRoute("PAUSED"));
+        assertTrue(RouteLifecycleRecovery.canDeleteHistoryRoute(null));
+        assertTrue(RouteLifecycleRecovery.canDeleteHistoryRoute("STOPPED"));
+        assertTrue(RouteLifecycleRecovery.canDeleteHistoryRoute("COMPLETED"));
+    }
+
+    @Test public void offlineSnapshotRequiresMatchingRouteVersionAndCurrentBootWindow() {
+        long savedAt = 1_000L;
+        long expiresAt = savedAt + RouteSnapshotPolicy.OFFLINE_VIEW_WINDOW_MILLIS;
+        assertTrue(RouteSnapshotPolicy.isValidForOfflineView("route-a", 2, savedAt, expiresAt,
+                "route-a", 2, savedAt + 1));
+        assertFalse(RouteSnapshotPolicy.isValidForOfflineView("route-b", 2, savedAt, expiresAt,
+                "route-a", 2, savedAt + 1));
+        assertFalse(RouteSnapshotPolicy.isValidForOfflineView("route-a", 1, savedAt, expiresAt,
+                "route-a", 2, savedAt + 1));
+        assertFalse(RouteSnapshotPolicy.isValidForOfflineView("route-a", 2, savedAt, expiresAt,
+                "route-a", 2, expiresAt + 1));
+        assertFalse(RouteSnapshotPolicy.isValidForOfflineView("route-a", 2, savedAt, expiresAt,
+                "route-a", 2, savedAt - 1));
     }
 
     @Test public void releasedMapViewCallbackCannotChangeCurrentMap() {

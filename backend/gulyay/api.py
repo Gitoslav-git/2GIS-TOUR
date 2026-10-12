@@ -354,6 +354,22 @@ def get_active_walk(route_id: UUID,
     return state.session
 
 
+@app.get("/v1/routes/{route_id}/walks/latest", response_model=WalkSession)
+def get_latest_walk_for_route(route_id: UUID,
+                              x_device_session: UUID | None = Header(default=None),
+                              x_request_id: UUID | None = Header(default=None),
+                              repository: RouteRepository = Depends(
+                                  get_route_repository)) -> WalkSession | JSONResponse:
+    """Return the most recent lifecycle state after the route was confirmed."""
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None or repository.get(route_id, x_device_session) is None:
+        return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
+    state = repository.latest_walk_for_route(x_device_session, route_id)
+    if state is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+    return state.session
+
+
 @app.post("/v1/walks/{walk_id}/positions", response_model=WalkProgress)
 def add_walk_position(walk_id: UUID, payload: WalkPosition,
                       x_device_session: UUID | None = Header(default=None),
@@ -416,9 +432,15 @@ def delete_route(route_id: UUID, x_device_session: UUID | None = Header(default=
                  x_request_id: UUID | None = Header(default=None),
                  repository: RouteRepository = Depends(get_route_repository)) -> Response | JSONResponse:
     request_id = str(x_request_id) if x_request_id else None
-    if x_device_session is None or not repository.delete(route_id, x_device_session):
-        return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
     with STATE_LOCK:
+        if x_device_session is None:
+            return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
+        active = repository.find_active_walk(x_device_session)
+        if active is not None and active.session.routeId == route_id:
+            return failure("WALK_ACTIVE", "Сначала завершите или остановите прогулку", 409,
+                           request_id)
+        if not repository.delete(route_id, x_device_session):
+            return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
         for key, route in list(IDEMPOTENT_ROUTES.items()):
             if key[0] == x_device_session and route.routeId == route_id:
                 IDEMPOTENT_ROUTES.pop(key, None)

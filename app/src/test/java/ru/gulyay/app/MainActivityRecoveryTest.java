@@ -81,6 +81,12 @@ public class MainActivityRecoveryTest {
                 "route-a", 2, savedAt - 1));
     }
 
+    @Test public void unconfirmedRouteCardOpensOnlyAValidSnapshotReadOnly() {
+        assertTrue(RouteLifecycleRecovery.canOpenUnconfirmedSnapshot(false, true));
+        assertFalse(RouteLifecycleRecovery.canOpenUnconfirmedSnapshot(false, false));
+        assertFalse(RouteLifecycleRecovery.canOpenUnconfirmedSnapshot(true, true));
+    }
+
     @Test public void releasedMapViewCallbackCannotChangeCurrentMap() {
         Object oldMapView = new Object();
         Object currentMapView = new Object();

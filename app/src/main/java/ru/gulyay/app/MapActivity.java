@@ -91,6 +91,7 @@ public final class MapActivity extends ComponentActivity {
     static final String EXTRA_ROUTE_SNAPSHOT = "routeSnapshot";
     static final String EXTRA_ROUTE_VERSION = "routeVersion";
     static final String EXTRA_HISTORY_READ_ONLY = "historyReadOnly";
+    static final String EXTRA_WALK_STATUS_UNCONFIRMED = "walkStatusUnconfirmed";
     static final String ACTION_CANCEL_ROUTE = "cancelRoute";
     static final String ACTION_EDIT_QUERY = "editQuery";
     static final String ACTION_EDIT_POINTS = "editPoints";
@@ -417,7 +418,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void openRouteChat() {
-        if (isOfflineView() || route == null || route.routeId == null) return;
+        if (isReadOnlyView() || route == null || route.routeId == null) return;
         Intent chat = new Intent(this, RouteChatActivity.class);
         chat.putExtra(RouteChatActivity.EXTRA_CITY, routeCityId());
         chat.putExtra(RouteChatActivity.EXTRA_SESSION, getIntent().getStringExtra(EXTRA_SESSION_ID));
@@ -656,8 +657,7 @@ public final class MapActivity extends ComponentActivity {
     private void showRouteStatus() {
         if (route == null || !route.success) return;
         if (isOfflineView()) {
-            String lastKnownStatus = RouteLifecycleRecovery.historyStatusLabel(
-                    getIntent().getStringExtra(EXTRA_WALK_STATUS));
+            String lastKnownStatus = lastKnownStatusLabel();
             screenTitle.setText("Сохранённый маршрут");
             routeSummary.setText(route.points.isEmpty() ? "Маршрут" : route.points.get(0).name);
             status.setText("Нет соединения. Открыта сохранённая версия маршрута. "
@@ -673,13 +673,9 @@ public final class MapActivity extends ComponentActivity {
             renderPointList(0);
             return;
         }
-        if (walk != null && walk.success) {
-            showWalkStatus();
-            return;
-        }
         if (getIntent().getBooleanExtra(EXTRA_HISTORY_READ_ONLY, false)) {
             String historyStatus = getIntent().getStringExtra(EXTRA_WALK_STATUS);
-            String statusLabel = RouteLifecycleRecovery.historyStatusLabel(historyStatus);
+            String statusLabel = lastKnownStatusLabel();
             screenTitle.setText("Маршрут из истории");
             routeSummary.setText(route.points.isEmpty() ? "Маршрут" : route.points.get(0).name);
             status.setText("Просмотр истории • " + statusLabel + " • "
@@ -693,6 +689,10 @@ public final class MapActivity extends ComponentActivity {
             pauseResume.setVisibility(View.GONE);
             stopWalk.setVisibility(View.GONE);
             renderPointList(0);
+            return;
+        }
+        if (walk != null && walk.success) {
+            showWalkStatus();
             return;
         }
         screenTitle.setText("Прогулка по " + cityName() + "\nМаршрут построен");
@@ -712,6 +712,14 @@ public final class MapActivity extends ComponentActivity {
         editQuery.setEnabled(true);
         editPoints.setEnabled(true);
         renderPointList(0);
+    }
+
+    private String lastKnownStatusLabel() {
+        if (getIntent().getBooleanExtra(EXTRA_WALK_STATUS_UNCONFIRMED, false)) {
+            return "неизвестен";
+        }
+        return RouteLifecycleRecovery.historyStatusLabel(
+                getIntent().getStringExtra(EXTRA_WALK_STATUS));
     }
 
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
@@ -776,7 +784,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void enterPointEditing() {
-        if (isOfflineView() || route == null || !route.success || applyingPointChanges) return;
+        if (isReadOnlyView() || route == null || !route.success || applyingPointChanges) return;
         if (walk != null && walk.success && "ACTIVE".equals(walk.status)) {
             pauseWalkForPointEditing();
             return;
@@ -786,6 +794,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void pauseWalkForPointEditing() {
+        if (isReadOnlyView()) return;
         applyingPointChanges = true;
         editPoints.setEnabled(false);
         status.setText("Ставим прогулку на паузу для редактирования…");
@@ -1009,6 +1018,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void applyPointChangesInline(boolean allowDurationOverrun) {
+        if (isReadOnlyView()) return;
         if (!pointEditing || applyingPointChanges || route == null || editingPoints.isEmpty()) return;
         applyingPointChanges = true;
         editPoints.setEnabled(false);
@@ -1279,7 +1289,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void startWalk() {
-        if (startingWalk || route == null || !route.success || !routeServerBacked) return;
+        if (isReadOnlyView() || startingWalk || route == null || !route.success || !routeServerBacked) return;
         startingWalk = true;
         primaryAction.setEnabled(false);
         status.setText("Запускаем прогулку…");
@@ -1403,6 +1413,10 @@ public final class MapActivity extends ComponentActivity {
 
     private boolean isOfflineView() {
         return route != null && route.success && !routeServerBacked;
+    }
+
+    private boolean isReadOnlyView() {
+        return isOfflineView() || getIntent().getBooleanExtra(EXTRA_HISTORY_READ_ONLY, false);
     }
 
     private void releaseMapResources() {
@@ -1532,7 +1546,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void sendWalkAction(String action) {
-        if (isOfflineView() || walk == null || !walk.success) return;
+        if (isReadOnlyView() || walk == null || !walk.success) return;
         stopWalk.setEnabled(false);
         String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
         network.execute(() -> {
@@ -1571,7 +1585,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void confirmStopWalk() {
-        if (isOfflineView() || walk == null || !("ACTIVE".equals(walk.status) || "PAUSED".equals(walk.status))) {
+        if (isReadOnlyView() || walk == null || !("ACTIVE".equals(walk.status) || "PAUSED".equals(walk.status))) {
             return;
         }
         new AlertDialog.Builder(this)
@@ -1583,7 +1597,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void showWalkMenu() {
-        if (isOfflineView() || walk == null || !walk.success
+        if (isReadOnlyView() || walk == null || !walk.success
                 || !("ACTIVE".equals(walk.status) || "PAUSED".equals(walk.status))) {
             return;
         }
@@ -1627,7 +1641,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void confirmCancelRoute() {
-        if (isOfflineView() || startingWalk) return;
+        if (isReadOnlyView() || startingWalk) return;
         new AlertDialog.Builder(this)
                 .setTitle("Отменить маршрут?")
                 .setMessage("Текущий маршрут будет полностью сброшен.")
@@ -1637,7 +1651,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void cancelRoute() {
-        if (isOfflineView()) return;
+        if (isReadOnlyView()) return;
         startingWalk = true;
         primaryAction.setEnabled(false);
         editQuery.setEnabled(false);

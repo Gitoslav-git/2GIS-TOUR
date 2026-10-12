@@ -12,6 +12,7 @@ import android.location.LocationManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.graphics.Typeface;
 import android.text.SpannableString;
 import android.text.Spanned;
@@ -1467,6 +1468,7 @@ public final class MainActivity extends Activity {
     private void returnToCurrentRoute() {
         if (routeId == null || routeCityId == null || requestInFlight) return;
         if (!walkStateVerified) {
+            if (openUnconfirmedSnapshotReadOnly()) return;
             syncWalkStateFromBackend();
             return;
         }
@@ -1482,6 +1484,25 @@ public final class MainActivity extends Activity {
         } else {
             recoverActiveWalkOrOpenRoute();
         }
+    }
+
+    private boolean openUnconfirmedSnapshotReadOnly() {
+        boolean snapshotValid = ApiClient.isSnapshotValidForOfflineView(routeSnapshot, routeId,
+                routeVersion, SystemClock.elapsedRealtime());
+        if (!RouteLifecycleRecovery.canOpenUnconfirmedSnapshot(walkStateVerified, snapshotValid)) {
+            return false;
+        }
+        Intent intent = new Intent(this, MapActivity.class);
+        intent.putExtra(MapActivity.EXTRA_ROUTE_ID, routeId);
+        intent.putExtra(MapActivity.EXTRA_ROUTE_VERSION, routeVersion);
+        intent.putExtra(MapActivity.EXTRA_CITY_ID, routeCityId);
+        intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
+        intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT, routeSnapshot);
+        intent.putExtra(MapActivity.EXTRA_WALK_STATUS, currentWalkStatus);
+        intent.putExtra(MapActivity.EXTRA_WALK_STATUS_UNCONFIRMED, true);
+        intent.putExtra(MapActivity.EXTRA_HISTORY_READ_ONLY, true);
+        startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
+        return true;
     }
 
     private void recoverActiveWalkOrOpenRoute() {
@@ -1870,7 +1891,9 @@ public final class MainActivity extends Activity {
             routeCardIcon.setVisibility(View.VISIBLE);
             routeCardIcon.setText("↻");
             routeControlButton.setVisibility(View.GONE);
-            routeCard.setOnClickListener(view -> syncWalkStateFromBackend());
+            routeCard.setOnClickListener(view -> {
+                if (!openUnconfirmedSnapshotReadOnly()) syncWalkStateFromBackend();
+            });
             return;
         }
         if (routeFinished) {

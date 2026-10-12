@@ -32,6 +32,11 @@ final class RouteLifecycleRecovery {
         return !"ACTIVE".equals(walkStatus) && !"PAUSED".equals(walkStatus);
     }
 
+    static boolean canOpenUnconfirmedSnapshot(boolean walkStateVerified,
+                                              boolean snapshotValid) {
+        return !walkStateVerified && snapshotValid;
+    }
+
     static String historyStatusLabel(String status) {
         if ("ACTIVE".equals(status)) return "Прогулка идёт";
         if ("PAUSED".equals(status)) return "Прогулка на паузе";

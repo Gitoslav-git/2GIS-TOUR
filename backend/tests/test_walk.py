@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import pytest
+
 from gulyay.models import (Filters, Route, RouteLeg, RoutePoint, SearchArea,
                            StartWalk, WalkAction, WalkPosition)
-from gulyay.walk import (WalkInvalidState, apply_action, register_position,
-                         start_walk)
+from gulyay.walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
+                         register_position, start_walk)
 
 
 def route(points=2, total_minutes=120):
@@ -50,6 +52,69 @@ def test_two_accurate_measurements_five_seconds_apart_reach_point():
     assert state.session.currentPointOrder == 2
     assert state.session.visits[0].pointOrder == 1
     assert state.session.estimatedRemainingMinutes == 110
+
+
+def test_one_measurement_at_exact_point_does_not_confirm_arrival():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route()
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, progress = register_position(
+        state, itinerary, position(itinerary.points[0], start + timedelta(seconds=5)),
+        start + timedelta(seconds=5),
+    )
+    assert progress.distanceMeters == 0
+    assert progress.pointReached is False
+    assert state.session.currentPointOrder == 1
+
+
+def test_duplicate_measurement_timestamp_is_not_a_second_confirmation():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route()
+    measured = start + timedelta(seconds=5)
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, _ = register_position(state, itinerary, position(itinerary.points[0], measured), measured)
+    state, duplicate = register_position(
+        state, itinerary, position(itinerary.points[0], measured), measured + timedelta(seconds=5),
+    )
+    assert duplicate.pointReached is False
+    assert state.session.currentPointOrder == 1
+
+
+def test_position_outside_arrival_radius_does_not_confirm():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route()
+    point = itinerary.points[0]
+    far = WalkPosition(lat=point.lat + 0.001, lon=point.lon, accuracyMeters=10,
+                       measuredAt=start + timedelta(seconds=5))
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, first = register_position(state, itinerary, far, far.measuredAt)
+    far_second = far.model_copy(update={"measuredAt": start + timedelta(seconds=10)})
+    state, second = register_position(state, itinerary, far_second, far_second.measuredAt)
+    assert first.distanceMeters > 75
+    assert second.pointReached is False
+    assert state.session.currentPointOrder == 1
+
+
+def test_position_measured_before_walk_is_rejected_as_stale():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route()
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    stale = position(itinerary.points[0], start - timedelta(minutes=1))
+    with pytest.raises(WalkInvalidPosition):
+        register_position(state, itinerary, stale, start)
+
+
+def test_paused_walk_does_not_accept_arrival_measurements():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route()
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state = apply_action(state, itinerary, WalkAction(action="PAUSE"),
+                         start + timedelta(seconds=1))
+    with pytest.raises(WalkInvalidState):
+        register_position(
+            state, itinerary, position(itinerary.points[0], start + timedelta(seconds=5)),
+            start + timedelta(seconds=5),
+        )
 
 
 def test_poor_accuracy_breaks_arrival_confirmation_sequence():

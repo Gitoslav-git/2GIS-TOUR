@@ -55,6 +55,16 @@ final class ApiClient {
         }
     }
 
+    static final class RouteLegGeometry {
+        final int toOrder;
+        final List<GeoCoordinate> path;
+
+        RouteLegGeometry(int toOrder, List<GeoCoordinate> path) {
+            this.toOrder = toOrder;
+            this.path = path;
+        }
+    }
+
     static final class Result {
         final boolean success;
         final String message;
@@ -64,6 +74,7 @@ final class ApiClient {
         final String errorCode;
         final List<PlaceOption> points;
         final List<GeoCoordinate> path;
+        List<RouteLegGeometry> legGeometries;
         int totalMinutes;
         int requestedMinutes;
         int projectedMinutes;
@@ -102,6 +113,7 @@ final class ApiClient {
             this.errorCode = errorCode;
             this.points = points;
             this.path = path;
+            this.legGeometries = Collections.emptyList();
             this.totalMinutes = -1;
             this.requestedMinutes = -1;
             this.projectedMinutes = -1;
@@ -222,17 +234,26 @@ final class ApiClient {
         final int distanceMeters;
         final String errorCode;
         final boolean finalPointVisitInProgress;
+        final int retryAfterSeconds;
 
         WalkResult(boolean success, String message, String walkId, String status,
                    int currentPointOrder, int remainingMinutes, boolean pointReached,
                    int distanceMeters, String errorCode) {
             this(success, message, walkId, status, currentPointOrder, remainingMinutes,
-                    pointReached, distanceMeters, errorCode, false);
+                    pointReached, distanceMeters, errorCode, false, 0);
         }
 
         WalkResult(boolean success, String message, String walkId, String status,
                    int currentPointOrder, int remainingMinutes, boolean pointReached,
                    int distanceMeters, String errorCode, boolean finalPointVisitInProgress) {
+            this(success, message, walkId, status, currentPointOrder, remainingMinutes,
+                    pointReached, distanceMeters, errorCode, finalPointVisitInProgress, 0);
+        }
+
+        WalkResult(boolean success, String message, String walkId, String status,
+                   int currentPointOrder, int remainingMinutes, boolean pointReached,
+                   int distanceMeters, String errorCode, boolean finalPointVisitInProgress,
+                   int retryAfterSeconds) {
             this.success = success;
             this.message = message;
             this.walkId = walkId;
@@ -243,6 +264,7 @@ final class ApiClient {
             this.distanceMeters = distanceMeters;
             this.errorCode = errorCode;
             this.finalPointVisitInProgress = finalPointVisitInProgress;
+            this.retryAfterSeconds = retryAfterSeconds;
         }
     }
 
@@ -547,7 +569,7 @@ final class ApiClient {
             if (status >= 400) {
                 Result error = routeError(response, status);
                 return new WalkResult(false, error.message, null, null, 0, 0,
-                        false, -1, error.errorCode);
+                        false, -1, error.errorCode, false, error.retryAfterSeconds);
             }
             boolean pointReached = response.optBoolean("pointReached", false);
             int distance = response.has("distanceMeters") && !response.isNull("distanceMeters")
@@ -562,7 +584,7 @@ final class ApiClient {
             return new WalkResult(true, message, walk.getString("walkId"), walkStatus,
                     order, remaining, pointReached, distance, null,
                     walk.has("finalPointVisitStartedAt")
-                            && !walk.isNull("finalPointVisitStartedAt"));
+                            && !walk.isNull("finalPointVisitStartedAt"), 0);
         } catch (Exception error) {
             BackendConfig.logFailure(method, path, startedAt, error);
             throw error;
@@ -688,10 +710,30 @@ final class ApiClient {
         JSONArray legs = response.optJSONArray("legs");
         if (legs == null) return;
         int distance = 0;
+        List<RouteLegGeometry> legGeometries = new ArrayList<>();
         for (int i = 0; i < legs.length(); i++) {
-            distance += legs.getJSONObject(i).optInt("distanceMeters", 0);
+            JSONObject leg = legs.getJSONObject(i);
+            distance += leg.optInt("distanceMeters", 0);
+            JSONArray geometry = leg.optJSONArray("geometry");
+            List<GeoCoordinate> legPath = new ArrayList<>();
+            if (geometry != null) for (int pointIndex = 0;
+                    pointIndex < geometry.length(); pointIndex++) {
+                JSONArray coordinate = geometry.getJSONArray(pointIndex);
+                GeoCoordinate next = new GeoCoordinate(coordinate.getDouble(1),
+                        coordinate.getDouble(0));
+                if (legPath.isEmpty()) legPath.add(next);
+                else {
+                    GeoCoordinate previous = legPath.get(legPath.size() - 1);
+                    if (previous.lat != next.lat || previous.lon != next.lon) {
+                        legPath.add(next);
+                    }
+                }
+            }
+            legGeometries.add(new RouteLegGeometry(leg.optInt("toOrder", i + 1),
+                    compactPath(legPath, 240)));
         }
         result.totalDistanceMeters = distance;
+        result.legGeometries = legGeometries;
     }
 
     private static List<GeoCoordinate> routePath(JSONObject response) throws Exception {

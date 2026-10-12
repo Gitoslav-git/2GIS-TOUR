@@ -6,6 +6,9 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.util.Arrays;
+import java.util.List;
+
 public class MainActivityRecoveryTest {
     @Test public void timeoutOrServerErrorKeepsLastConfirmedRouteState() {
         assertEquals(RouteLifecycleRecovery.HistoryRouteState.UNCONFIRMED,
@@ -98,5 +101,50 @@ public class MainActivityRecoveryTest {
                 true, false));
         assertTrue(MapLifecycleGuard.shouldApplyMapCallback(currentMapView, currentMapView,
                 true, true));
+    }
+
+    @Test public void etaAtTargetDoesNotJumpToEndOfRoute() {
+        List<WalkGuidanceMath.Point> leg = Arrays.asList(
+                new WalkGuidanceMath.Point(55.7600, 37.6100),
+                new WalkGuidanceMath.Point(55.7605, 37.6150),
+                new WalkGuidanceMath.Point(55.7608, 37.6180));
+        WalkGuidanceMath.Result result = WalkGuidanceMath.remainingOnLeg(
+                leg, 55.7608, 37.6180, 0);
+        assertEquals(2, result.nearestIndex);
+        assertTrue(result.distanceMeters <= 1);
+    }
+
+    @Test public void loopIntersectionUsesCurrentProgressFloor() {
+        List<WalkGuidanceMath.Point> leg = Arrays.asList(
+                new WalkGuidanceMath.Point(55.0, 37.0),
+                new WalkGuidanceMath.Point(55.0, 37.001),
+                new WalkGuidanceMath.Point(55.001, 37.001),
+                new WalkGuidanceMath.Point(55.001, 37.0),
+                new WalkGuidanceMath.Point(55.0, 37.001),
+                new WalkGuidanceMath.Point(55.0, 37.002));
+        WalkGuidanceMath.Result beforeLoop = WalkGuidanceMath.remainingOnLeg(
+                leg, 55.0, 37.001, 0);
+        WalkGuidanceMath.Result afterLoop = WalkGuidanceMath.remainingOnLeg(
+                leg, 55.0, 37.001, 3);
+        assertEquals(1, beforeLoop.nearestIndex);
+        assertEquals(4, afterLoop.nearestIndex);
+        assertTrue(beforeLoop.distanceMeters > afterLoop.distanceMeters);
+    }
+
+    @Test public void stationaryFreshMeasurementsRemainEligibleWithoutMovement() {
+        assertTrue(PositionSubmissionPolicy.isFresh(10_000L, 10_000L, 0L));
+        assertTrue(PositionSubmissionPolicy.isFresh(15_000L, 15_000L, 10_000L));
+        assertFalse(PositionSubmissionPolicy.isFresh(10_000L, 15_000L, 10_000L));
+        assertFalse(PositionSubmissionPolicy.isFresh(10_000L, 45_001L, 0L));
+    }
+
+    @Test public void positionPolicyAllowsTwoThenWaitsForRollingWindow() {
+        assertEquals(0L, PositionSubmissionPolicy.delayUntilSlot(10_000L, 0L, 0L));
+        assertEquals(5_000L,
+                PositionSubmissionPolicy.delayUntilSlot(10_000L, 0L, 10_000L));
+        assertEquals(55_000L,
+                PositionSubmissionPolicy.delayUntilSlot(15_000L, 10_000L, 15_000L));
+        assertEquals(0L,
+                PositionSubmissionPolicy.delayUntilSlot(70_000L, 10_000L, 15_000L));
     }
 }

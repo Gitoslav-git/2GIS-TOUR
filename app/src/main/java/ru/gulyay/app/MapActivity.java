@@ -78,8 +78,8 @@ import ru.dgis.sdk.map.Zoom;
 public final class MapActivity extends ComponentActivity {
     private static final int ROUTE_CHAT_REQUEST = 207;
     private static final String MEMORY_LOG = "GulyayMapMemory";
-    private static final long POSITION_WINDOW_MILLIS = 60_000L;
-    private static final long MIN_POSITION_INTERVAL_MILLIS = 5_000L;
+    private static final String GEO_LOG = "GulyayGeoWalk";
+    private static final int ARRIVAL_RADIUS_METERS = 75;
     static final String EXTRA_ROUTE_ID = "routeId";
     static final String EXTRA_CITY_ID = "cityId";
     static final String EXTRA_SESSION_ID = "sessionId";
@@ -143,6 +143,8 @@ public final class MapActivity extends ComponentActivity {
     private boolean startingWalk;
     private LocationManager locationManager;
     private LocationListener locationListener;
+    private LocationListener confirmationLocationListener;
+    private Runnable pendingConfirmationRequest;
     private boolean positionInFlight;
     private LinearLayout zoomControls;
     private boolean routeCameraReady;
@@ -159,6 +161,7 @@ public final class MapActivity extends ComponentActivity {
     private int renderedRouteVersion = -1;
     private double latestUserLat = Double.NaN;
     private double latestUserLon = Double.NaN;
+    private float latestUserAccuracy = Float.NaN;
     private final Runnable cameraBoundsGuard = this::enforceRouteCameraBounds;
 
     @Override public void onCreate(Bundle savedInstanceState) {
@@ -1456,11 +1459,7 @@ public final class MapActivity extends ComponentActivity {
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         locationListener = new LocationListener() {
             @Override public void onLocationChanged(Location location) {
-                latestUserLat = location.getLatitude();
-                latestUserLon = location.getLongitude();
-                updateUserMarker(latestUserLat, latestUserLon);
-                updateGuidance(latestUserLat, latestUserLon);
-                sendPosition(location);
+                handleWalkLocation(location, "continuous");
             }
             @Override public void onProviderDisabled(String provider) { }
             @Override public void onProviderEnabled(String provider) { }
@@ -1470,12 +1469,12 @@ public final class MapActivity extends ComponentActivity {
             boolean requested = false;
             if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER,
-                        30_000L, 5f, locationListener, Looper.getMainLooper());
+                        30_000L, 0f, locationListener, Looper.getMainLooper());
                 requested = true;
             }
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER,
-                        30_000L, 5f, locationListener, Looper.getMainLooper());
+                        30_000L, 0f, locationListener, Looper.getMainLooper());
                 requested = true;
             }
             if (!requested) {
@@ -1488,19 +1487,67 @@ public final class MapActivity extends ComponentActivity {
         }
     }
 
+    private void handleWalkLocation(Location location, String source) {
+        if (location == null) return;
+        latestUserLat = location.getLatitude();
+        latestUserLon = location.getLongitude();
+        latestUserAccuracy = location.hasAccuracy() ? location.getAccuracy() : Float.NaN;
+        updateUserMarker(latestUserLat, latestUserLon);
+        updateGuidance(latestUserLat, latestUserLon);
+        debugLocation(source, location, distanceToCurrentPoint(location), "received");
+        sendPosition(location);
+    }
+
     private void sendPosition(Location location) {
-        if (positionInFlight || walk == null || !"ACTIVE".equals(walk.status)) return;
-        if (!claimPositionSubmission()) return;
+        if (walk == null || !"ACTIVE".equals(walk.status)) return;
+        int distance = distanceToCurrentPoint(location);
+        double accuracy = location.hasAccuracy() ? location.getAccuracy() : 100.0;
+        if (accuracy > PositionSubmissionPolicy.MAX_ACCURACY_METERS) {
+            debugLocation("skip", location, distance, "accuracy");
+            if (distance >= 0 && distance <= ARRIVAL_RADIUS_METERS) {
+                showGpsWaiting("Точность GPS недостаточна (±"
+                        + Math.round(accuracy) + " м)");
+            }
+            return;
+        }
+        long nowElapsed = SystemClock.elapsedRealtime();
+        long measuredElapsed = location.getElapsedRealtimeNanos() / 1_000_000L;
+        if (!PositionSubmissionPolicy.isFresh(measuredElapsed, nowElapsed,
+                routeViewModel.lastPositionMeasurementElapsedMillis)) {
+            debugLocation("skip", location, distance, "stale-or-duplicate");
+            return;
+        }
+        if (positionInFlight) {
+            debugLocation("skip", location, distance, "request-in-flight");
+            if (distance >= 0 && distance <= ARRIVAL_RADIUS_METERS) {
+                scheduleFreshConfirmation(PositionSubmissionPolicy.MIN_INTERVAL_MILLIS,
+                        "ожидается завершение проверки");
+            }
+            return;
+        }
+        long delay = PositionSubmissionPolicy.delayUntilSlot(nowElapsed,
+                routeViewModel.previousPositionSentAt, routeViewModel.latestPositionSentAt);
+        if (delay > 0) {
+            debugLocation("skip", location, distance, "local-rate-limit-" + delay);
+            if (distance >= 0 && distance <= ARRIVAL_RADIUS_METERS) {
+                scheduleFreshConfirmation(delay, "повторная проверка доступна через "
+                        + Math.max(1, (int) Math.ceil(delay / 1000.0)) + " сек");
+            }
+            return;
+        }
+        claimPositionSubmission(nowElapsed);
+        routeViewModel.lastPositionMeasurementElapsedMillis = measuredElapsed;
         positionInFlight = true;
         String walkId = walk.walkId;
         String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
-        double accuracy = location.hasAccuracy() ? location.getAccuracy() : 100.0;
+        int requestedPointOrder = walk.currentPointOrder;
+        debugLocation("send", location, distance, "accepted");
         network.execute(() -> {
             ApiClient.WalkResult response;
             try {
                 response = ApiClient.sendWalkPosition(
                         walkId, sessionId, location.getLatitude(), location.getLongitude(),
-                        accuracy, System.currentTimeMillis());
+                        accuracy, location.getTime());
             } catch (Exception error) {
                 response = new ApiClient.WalkResult(false,
                         "Не удалось передать геопозицию. Проверьте backend.", walkId,
@@ -1512,37 +1559,152 @@ public final class MapActivity extends ComponentActivity {
                 positionInFlight = false;
                 if (isFinishing() || isDestroyed()) return;
                 if (!finalResponse.success) {
+                    debugPositionResponse(finalResponse);
                     status.setText(finalResponse.message);
+                    if ("RATE_LIMITED".equals(finalResponse.errorCode)
+                            && walk != null && walkId.equals(walk.walkId)
+                            && "ACTIVE".equals(walk.status)
+                            && distance >= 0 && distance <= ARRIVAL_RADIUS_METERS) {
+                        scheduleFreshConfirmation(
+                                Math.max(1, finalResponse.retryAfterSeconds) * 1_000L,
+                                "backend временно ограничил проверку");
+                    }
                     return;
                 }
+                if (walk == null || !walkId.equals(walk.walkId)
+                        || !"ACTIVE".equals(walk.status)) return;
                 walk = finalResponse;
                 routeViewModel.walk = walk;
+                debugPositionResponse(finalResponse);
                 showWalkStatus();
                 syncLocationTracking();
+                if (!walk.pointReached && walk.currentPointOrder == requestedPointOrder
+                        && walk.distanceMeters >= 0
+                        && walk.distanceMeters <= ARRIVAL_RADIUS_METERS) {
+                    long retryDelay = PositionSubmissionPolicy.delayUntilSlot(
+                            SystemClock.elapsedRealtime(), routeViewModel.previousPositionSentAt,
+                            routeViewModel.latestPositionSentAt);
+                    scheduleFreshConfirmation(Math.max(
+                            PositionSubmissionPolicy.MIN_INTERVAL_MILLIS, retryDelay),
+                            "ожидается повторное GPS-измерение");
+                }
             });
         });
     }
 
-    private boolean claimPositionSubmission() {
-        long now = System.currentTimeMillis();
-        long cutoff = now - POSITION_WINDOW_MILLIS;
+    private void claimPositionSubmission(long now) {
         if (routeViewModel.previousPositionSentAt > now
                 || routeViewModel.latestPositionSentAt > now) {
             routeViewModel.previousPositionSentAt = 0L;
             routeViewModel.latestPositionSentAt = 0L;
         }
-        if (routeViewModel.previousPositionSentAt > cutoff) return false;
-        if (routeViewModel.latestPositionSentAt > now - MIN_POSITION_INTERVAL_MILLIS) {
-            return false;
-        }
-        if (routeViewModel.latestPositionSentAt > cutoff) {
+        if (routeViewModel.latestPositionSentAt > now - PositionSubmissionPolicy.WINDOW_MILLIS) {
             routeViewModel.previousPositionSentAt = routeViewModel.latestPositionSentAt;
             routeViewModel.latestPositionSentAt = now;
         } else {
             routeViewModel.previousPositionSentAt = 0L;
             routeViewModel.latestPositionSentAt = now;
         }
-        return true;
+    }
+
+    private void scheduleFreshConfirmation(long delayMillis, String reason) {
+        if (walk == null || !"ACTIVE".equals(walk.status) || isReadOnlyView()) return;
+        if (pendingConfirmationRequest != null) {
+            uiHandler.removeCallbacks(pendingConfirmationRequest);
+        }
+        final String expectedWalkId = walk.walkId;
+        final int expectedPointOrder = walk.currentPointOrder;
+        long safeDelay = Math.max(PositionSubmissionPolicy.MIN_INTERVAL_MILLIS, delayMillis);
+        showGpsWaiting(reason);
+        pendingConfirmationRequest = () -> {
+            pendingConfirmationRequest = null;
+            if (isFinishing() || isDestroyed() || walk == null
+                    || !expectedWalkId.equals(walk.walkId)
+                    || expectedPointOrder != walk.currentPointOrder
+                    || !"ACTIVE".equals(walk.status)) return;
+            requestFreshConfirmationLocation();
+        };
+        uiHandler.postDelayed(pendingConfirmationRequest, safeDelay);
+        if (BuildConfig.DEBUG) Log.d(GEO_LOG, "confirmation scheduled: delayMs="
+                + safeDelay + " pointOrder=" + expectedPointOrder + " reason=" + reason);
+    }
+
+    private void requestFreshConfirmationLocation() {
+        if (locationManager == null || confirmationLocationListener != null) return;
+        String provider = null;
+        if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            provider = LocationManager.GPS_PROVIDER;
+        } else if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            provider = LocationManager.NETWORK_PROVIDER;
+        }
+        if (provider == null) {
+            showGpsWaiting("геопозиция выключена");
+            return;
+        }
+        confirmationLocationListener = new LocationListener() {
+            @Override public void onLocationChanged(Location location) {
+                LocationListener completed = confirmationLocationListener;
+                confirmationLocationListener = null;
+                if (locationManager != null && completed != null) {
+                    try { locationManager.removeUpdates(completed); }
+                    catch (SecurityException ignored) { }
+                }
+                handleWalkLocation(location, "confirmation");
+            }
+            @Override public void onProviderDisabled(String name) { }
+            @Override public void onProviderEnabled(String name) { }
+            @Override public void onStatusChanged(String name, int value, Bundle extras) { }
+        };
+        try {
+            locationManager.requestSingleUpdate(provider, confirmationLocationListener,
+                    Looper.getMainLooper());
+            showGpsWaiting("получаем повторное GPS-измерение");
+            if (BuildConfig.DEBUG) Log.d(GEO_LOG,
+                    "fresh confirmation requested: provider=" + provider);
+        } catch (SecurityException error) {
+            confirmationLocationListener = null;
+            showGpsWaiting("нет разрешения на геопозицию");
+        }
+    }
+
+    private int distanceToCurrentPoint(Location location) {
+        if (location == null || walk == null || route == null || walk.currentPointOrder < 1
+                || walk.currentPointOrder > route.points.size()) return -1;
+        ApiClient.PlaceOption point = route.points.get(walk.currentPointOrder - 1);
+        return (int) Math.round(meters(location.getLatitude(), location.getLongitude(),
+                point.lat, point.lon));
+    }
+
+    private void showGpsWaiting(String reason) {
+        if (guidancePanel == null || walk == null || !"ACTIVE".equals(walk.status)) return;
+        guidanceTitle.setText("Точка маршрута рядом");
+        guidanceSubtitle.setText(reason);
+        guidanceTurnIcon.setText("●");
+        mapRouteSummary.setVisibility(View.GONE);
+        guidancePanel.setVisibility(View.VISIBLE);
+    }
+
+    private void debugLocation(String action, Location location, int distance, String reason) {
+        if (!BuildConfig.DEBUG || location == null) return;
+        long age = Math.max(0L, SystemClock.elapsedRealtime()
+                - location.getElapsedRealtimeNanos() / 1_000_000L);
+        int pointOrder = walk == null ? 0 : walk.currentPointOrder;
+        Log.d(GEO_LOG, String.format(java.util.Locale.US,
+                "%s provider=%s lat=%.6f lon=%.6f ageMs=%d accuracy=%.1f pointOrder=%d distance=%d reason=%s",
+                action, location.getProvider(), location.getLatitude(), location.getLongitude(),
+                age, location.hasAccuracy() ? location.getAccuracy() : -1f,
+                pointOrder, distance, reason));
+    }
+
+    private void debugPositionResponse(ApiClient.WalkResult response) {
+        if (!BuildConfig.DEBUG || response == null) return;
+        Log.d(GEO_LOG, "backend success=" + response.success
+                + " pointReached=" + response.pointReached
+                + " currentPointOrder=" + response.currentPointOrder
+                + " distance=" + response.distanceMeters
+                + " status=" + response.status
+                + " error=" + response.errorCode
+                + " retryAfter=" + response.retryAfterSeconds);
     }
 
     private void sendWalkAction(String action) {
@@ -1707,11 +1869,20 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void stopLocationTracking() {
+        if (pendingConfirmationRequest != null) {
+            uiHandler.removeCallbacks(pendingConfirmationRequest);
+            pendingConfirmationRequest = null;
+        }
         if (locationManager != null && locationListener != null) {
             try { locationManager.removeUpdates(locationListener); }
             catch (SecurityException ignored) { }
         }
+        if (locationManager != null && confirmationLocationListener != null) {
+            try { locationManager.removeUpdates(confirmationLocationListener); }
+            catch (SecurityException ignored) { }
+        }
         locationListener = null;
+        confirmationLocationListener = null;
     }
 
     @Override protected void onStart() {
@@ -2033,18 +2204,45 @@ public final class MapActivity extends ComponentActivity {
             return new GuidanceInfo("Следуйте по линии маршрута",
                     "До " + target.name, "↑");
         }
-        int nearest = nearestPathIndex(lat, lon, 0);
-        int targetIndex = nearestPathIndex(target.lat, target.lon, nearest);
-        if (targetIndex <= nearest) targetIndex = route.path.size() - 1;
-        int targetMeters = (int) Math.round(pathDistance(nearest, targetIndex)
-                + meters(lat, lon, route.path.get(nearest).lat, route.path.get(nearest).lon));
-        int walkingMinutes = Math.max(1, (int) Math.ceil(targetMeters / 80.0));
-        String subtitle = "До " + target.name + " — ≈" + walkingMinutes + " мин";
-        if (targetMeters <= 35) {
-            return new GuidanceInfo("Точка маршрута рядом", subtitle, "●");
+        int directMeters = (int) Math.round(meters(lat, lon, target.lat, target.lon));
+        if (directMeters <= ARRIVAL_RADIUS_METERS) {
+            String title = directMeters <= 35 ? "Вы у точки" : "Точка маршрута рядом";
+            String subtitle;
+            if (Float.isFinite(latestUserAccuracy)
+                    && latestUserAccuracy > PositionSubmissionPolicy.MAX_ACCURACY_METERS) {
+                subtitle = "Точность GPS недостаточна (±"
+                        + Math.round(latestUserAccuracy) + " м)";
+            } else if (walk != null && !walk.pointReached) {
+                subtitle = "Ожидаем повторное GPS-измерение для подтверждения";
+            } else {
+                subtitle = "До " + target.name + " — " + directMeters + " м";
+            }
+            return new GuidanceInfo(title, subtitle, "●");
         }
 
-        TurnHint turn = nextTurn(nearest, targetIndex);
+        List<ApiClient.GeoCoordinate> leg = currentLegPath();
+        if (leg.size() < 2) {
+            return new GuidanceInfo("Следуйте по линии маршрута",
+                    "До " + target.name, "↑");
+        }
+        if (routeViewModel.guidancePointOrder != walk.currentPointOrder) {
+            routeViewModel.guidancePointOrder = walk.currentPointOrder;
+            routeViewModel.guidancePathIndex = 0;
+        }
+        List<WalkGuidanceMath.Point> path = new ArrayList<>(leg.size());
+        for (ApiClient.GeoCoordinate point : leg) {
+            path.add(new WalkGuidanceMath.Point(point.lat, point.lon));
+        }
+        WalkGuidanceMath.Result remaining = WalkGuidanceMath.remainingOnLeg(path, lat, lon,
+                routeViewModel.guidancePathIndex);
+        routeViewModel.guidancePathIndex = remaining.nearestIndex;
+        int nearest = remaining.nearestIndex;
+        int targetIndex = leg.size() - 1;
+        int targetMeters = remaining.distanceMeters;
+        int walkingMinutes = Math.max(1, (int) Math.ceil(targetMeters / 80.0));
+        String subtitle = "До " + target.name + " — ≈" + walkingMinutes + " мин";
+
+        TurnHint turn = nextTurn(leg, nearest, targetIndex);
         if (turn != null) {
             String arrow = "направо".equals(turn.direction) ? "↱" : "↰";
             if (turn.distanceMeters <= 40) {
@@ -2057,13 +2255,23 @@ public final class MapActivity extends ComponentActivity {
                 subtitle, "↑");
     }
 
-    private TurnHint nextTurn(int start, int end) {
+    private List<ApiClient.GeoCoordinate> currentLegPath() {
+        if (route == null || walk == null || route.legGeometries == null) {
+            return Collections.emptyList();
+        }
+        for (ApiClient.RouteLegGeometry leg : route.legGeometries) {
+            if (leg.toOrder == walk.currentPointOrder) return leg.path;
+        }
+        return Collections.emptyList();
+    }
+
+    private TurnHint nextTurn(List<ApiClient.GeoCoordinate> path, int start, int end) {
         if (end - start < 2) return null;
         double previousBearing = Double.NaN;
         double accumulated = 0;
         for (int i = start; i < end; i++) {
-            ApiClient.GeoCoordinate from = route.path.get(i);
-            ApiClient.GeoCoordinate to = route.path.get(i + 1);
+            ApiClient.GeoCoordinate from = path.get(i);
+            ApiClient.GeoCoordinate to = path.get(i + 1);
             double segment = meters(from.lat, from.lon, to.lat, to.lon);
             if (segment < 3) continue;
             double currentBearing = bearing(from.lat, from.lon, to.lat, to.lon);
@@ -2081,30 +2289,6 @@ public final class MapActivity extends ComponentActivity {
         return null;
     }
 
-    private int nearestPathIndex(double lat, double lon, int fromIndex) {
-        int best = Math.max(0, Math.min(fromIndex, route.path.size() - 1));
-        double bestDistance = Double.MAX_VALUE;
-        for (int i = best; i < route.path.size(); i++) {
-            ApiClient.GeoCoordinate point = route.path.get(i);
-            double distance = meters(lat, lon, point.lat, point.lon);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                best = i;
-            }
-        }
-        return best;
-    }
-
-    private double pathDistance(int start, int end) {
-        double distance = 0;
-        for (int i = Math.max(0, start); i < end && i + 1 < route.path.size(); i++) {
-            ApiClient.GeoCoordinate from = route.path.get(i);
-            ApiClient.GeoCoordinate to = route.path.get(i + 1);
-            distance += meters(from.lat, from.lon, to.lat, to.lon);
-        }
-        return distance;
-    }
-
     private static String roundedMeters(int meters) {
         if (meters < 100) return Math.max(10, (int) Math.round(meters / 10.0) * 10) + " м";
         if (meters < 1000) return ((int) Math.round(meters / 50.0) * 50) + " м";
@@ -2112,12 +2296,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private static double meters(double lat1, double lon1, double lat2, double lon2) {
-        double lat = Math.toRadians(lat2 - lat1);
-        double lon = Math.toRadians(lon2 - lon1);
-        double value = Math.sin(lat / 2) * Math.sin(lat / 2)
-                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
-                * Math.sin(lon / 2) * Math.sin(lon / 2);
-        return 6_371_000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+        return WalkGuidanceMath.meters(lat1, lon1, lat2, lon2);
     }
 
     private static double bearing(double lat1, double lon1, double lat2, double lon2) {
@@ -2249,5 +2428,8 @@ public final class MapActivity extends ComponentActivity {
         ApiClient.WalkResult walk;
         long previousPositionSentAt;
         long latestPositionSentAt;
+        long lastPositionMeasurementElapsedMillis;
+        int guidancePointOrder;
+        int guidancePathIndex;
     }
 }

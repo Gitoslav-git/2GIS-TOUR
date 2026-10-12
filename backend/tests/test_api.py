@@ -132,6 +132,14 @@ def test_pilot_cities_are_explicit():
     ]}
 
 
+def test_guest_history_returns_successful_empty_list_for_new_guest():
+    response = client.get("/v1/routes/history", headers={
+        "X-Device-Session": str(uuid4()),
+    })
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
 def test_guest_history_keeps_only_three_newest_routes_for_its_owner():
     app.dependency_overrides[get_intent_provider] = FakeIntent
     app.dependency_overrides[get_geo_provider] = FakeGeo
@@ -383,6 +391,43 @@ def test_walk_recovery_keeps_server_state_and_stop_unblocks_a_new_route():
     assert next_walk.status_code == 200
 
 
+def test_abandoned_walk_is_stopped_before_starting_next_route():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+
+    def create(query):
+        response = client.post("/v1/routes", headers=headers, json={
+            "cityId": "tula", "query": query, "deviceSessionId": session,
+        })
+        assert response.status_code == 200
+        return response.json()["routeId"]
+
+    old_route_id = create("Первая прогулка на два часа")
+    old_started = client.post(f"/v1/routes/{old_route_id}/walks", headers=headers,
+                              json={"routeVersion": 1})
+    assert old_started.status_code == 200
+    old_walk_id = old_started.json()["walkId"]
+    with repository._connection:
+        repository._connection.execute(
+            "UPDATE walks SET updated_at = datetime('now', '-8 days') WHERE walk_id = ?",
+            (old_walk_id,),
+        )
+
+    new_route_id = create("Вторая прогулка на два часа")
+    new_started = client.post(f"/v1/routes/{new_route_id}/walks", headers=headers,
+                              json={"routeVersion": 1})
+    assert new_started.status_code == 200
+    assert new_started.json()["routeId"] == new_route_id
+    # The old route remains in history, but inactivity is never reported as completion.
+    history = client.get("/v1/routes/history", headers=headers)
+    assert next(item for item in history.json()["items"]
+                if item["routeId"] == old_route_id)["walkStatus"] == "STOPPED"
+    assert client.post(f"/v1/walks/{old_walk_id}/actions", headers=headers,
+                       json={"action": "STOP"}).status_code == 409
+
+
 def test_guest_history_reports_ready_and_completed_statuses():
     app.dependency_overrides[get_intent_provider] = FakeIntent
     app.dependency_overrides[get_geo_provider] = FakeGeo
@@ -416,6 +461,31 @@ def test_guest_history_reports_ready_and_completed_statuses():
     statuses = {item["routeId"]: item["walkStatus"] for item in history.json()["items"]}
     assert statuses[ready_id] is None
     assert statuses[active_id] == "COMPLETED"
+
+
+def test_reading_guest_history_does_not_change_paused_walk_state():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "История три часа", "deviceSessionId": session,
+    })
+    assert created.status_code == 200
+    route_id = created.json()["routeId"]
+    started = client.post(f"/v1/routes/{route_id}/walks", headers=headers,
+                          json={"routeVersion": 1})
+    assert started.status_code == 200
+    walk_id = started.json()["walkId"]
+    paused = client.post(f"/v1/walks/{walk_id}/actions", headers=headers,
+                         json={"action": "PAUSE"})
+    assert paused.json()["status"] == "PAUSED"
+
+    history = client.get("/v1/routes/history", headers=headers)
+    assert history.status_code == 200
+    assert next(item for item in history.json()["items"]
+                if item["routeId"] == route_id)["walkStatus"] == "PAUSED"
+    assert client.get(f"/v1/walks/{walk_id}", headers=headers).json()["status"] == "PAUSED"
 
 
 def test_same_request_with_new_request_id_uses_recent_result_cache():

@@ -119,3 +119,104 @@ def test_walk_state_is_persisted_and_removed_with_route():
     assert repository.find_active_walk(owner).session.walkId == walk.session.walkId
     assert repository.delete(route_id, owner) is True
     assert repository.get_walk(walk.session.walkId, owner) is None
+
+
+def test_walk_recovery_survives_repository_reopen(tmp_path):
+    path = tmp_path / "walk-recovery.sqlite3"
+    owner, route_id = uuid4(), uuid4()
+    itinerary = route(route_id)
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+
+    first = RouteRepository(path)
+    first.save_new(itinerary, owner, payload)
+    walk = start_walk(itinerary, StartWalk(routeVersion=1))
+    first.save_walk(walk, owner)
+    first.close()
+
+    reopened = RouteRepository(path)
+    restored = reopened.get_walk(walk.session.walkId, owner)
+    assert restored is not None
+    assert restored.session.status == "ACTIVE"
+    assert reopened.find_active_walk(owner).session.walkId == walk.session.walkId
+    reopened.close()
+
+
+def test_paused_walk_recovery_survives_repository_reopen(tmp_path):
+    path = tmp_path / "paused-walk-recovery.sqlite3"
+    owner, route_id = uuid4(), uuid4()
+    itinerary = route(route_id)
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+
+    first = RouteRepository(path)
+    first.save_new(itinerary, owner, payload)
+    walk = start_walk(itinerary, StartWalk(routeVersion=1))
+    paused = walk.model_copy(update={
+        "session": walk.session.model_copy(update={"status": "PAUSED"}),
+    })
+    first.save_walk(paused, owner)
+    first.close()
+
+    reopened = RouteRepository(path)
+    restored = reopened.get_walk(paused.session.walkId, owner)
+    assert restored is not None
+    assert restored.session.status == "PAUSED"
+    assert reopened.find_active_walk(owner).session.walkId == paused.session.walkId
+    reopened.close()
+
+
+def test_recent_active_walk_is_not_abandoned():
+    repository = RouteRepository(":memory:")
+    owner, route_id = uuid4(), uuid4()
+    itinerary = route(route_id)
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+    repository.save_new(itinerary, owner, payload)
+    walk = start_walk(itinerary, StartWalk(routeVersion=1))
+    repository.save_walk(walk, owner)
+
+    assert repository.abandoned_walk_hours == 168
+    assert repository.find_abandoned_active_walk(owner) is None
+    assert repository.find_active_walk(owner).session.status == "ACTIVE"
+
+
+def test_old_paused_walk_is_identified_without_using_gps_samples():
+    repository = RouteRepository(":memory:")
+    owner, route_id = uuid4(), uuid4()
+    itinerary = route(route_id)
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+    repository.save_new(itinerary, owner, payload)
+    walk = start_walk(itinerary, StartWalk(routeVersion=1))
+    paused = walk.model_copy(update={
+        "session": walk.session.model_copy(update={"status": "PAUSED"}),
+    })
+    repository.save_walk(paused, owner)
+    with repository._connection:
+        repository._connection.execute(
+            "UPDATE walks SET updated_at = datetime('now', '-8 days') WHERE walk_id = ?",
+            (str(paused.session.walkId),),
+        )
+
+    assert repository.find_abandoned_active_walk(owner).session.walkId == paused.session.walkId
+    assert repository.find_active_walk(owner).session.status == "PAUSED"
+
+
+def test_completed_walk_route_is_removed_after_guest_retention(monkeypatch):
+    monkeypatch.setenv("GULYAY_ROUTE_RETENTION_MINUTES", "5")
+    repository = RouteRepository(":memory:")
+    owner, route_id = uuid4(), uuid4()
+    itinerary = route(route_id)
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+    repository.save_new(itinerary, owner, payload)
+    walk = start_walk(itinerary, StartWalk(routeVersion=1))
+    completed = walk.model_copy(update={
+        "session": walk.session.model_copy(update={"status": "COMPLETED"}),
+    })
+    repository.save_walk(completed, owner)
+    with repository._connection:
+        repository._connection.execute(
+            "UPDATE routes SET updated_at = datetime('now', '-2 hours') WHERE route_id = ?",
+            (str(route_id),),
+        )
+
+    repository.purge_expired()
+    assert repository.get(route_id, owner) is None
+    assert repository.latest_walk_for_route(owner, route_id) is None

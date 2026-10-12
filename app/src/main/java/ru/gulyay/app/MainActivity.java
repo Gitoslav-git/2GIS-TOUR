@@ -63,6 +63,13 @@ public final class MainActivity extends Activity {
     private TextView routeCardIcon;
     private LinearLayout guestHistoryList;
     private ScrollView guestHistoryScroll;
+    private TextView guestHistoryStatus;
+    // Incremented on the UI thread. A late network response must not redraw a
+    // route list that has since been refreshed for another route.
+    private int guestHistoryRequestGeneration;
+    // Changes whenever the in-memory route is replaced or detached. Route id
+    // alone is insufficient when the user returns to the same id after a revision.
+    private int routeLifecycleGeneration;
     private LinearLayout selectedFilters;
     private Button durationFilterButton, childrenFilterButton, foodFilterButton, unusualFilterButton;
     private boolean filterTwoHours, filterChildren, filterFood, filterUnusual;
@@ -342,6 +349,11 @@ public final class MainActivity extends Activity {
         guestHistoryList = new LinearLayout(this);
         guestHistoryList.setOrientation(LinearLayout.VERTICAL);
         historyStack.addView(guestHistoryList, new LinearLayout.LayoutParams(-1, -2));
+        guestHistoryStatus = UiKit.label(this, "", 13, UiKit.MUTED);
+        guestHistoryStatus.setVisibility(View.GONE);
+        guestHistoryStatus.setPadding(UiKit.dp(this, 4), UiKit.dp(this, 6),
+                UiKit.dp(this, 4), UiKit.dp(this, 6));
+        historyStack.addView(guestHistoryStatus, new LinearLayout.LayoutParams(-1, -2));
         TextView history = UiKit.label(this,
                 "🔒  Полная история будет доступна после входа в профиль", 15, UiKit.MUTED);
         history.setGravity(Gravity.CENTER);
@@ -713,6 +725,7 @@ public final class MainActivity extends Activity {
                 if (finalResponse.success) {
                     retryAllowedAtMillis = 0;
                     routeId = finalResponse.routeId;
+                    routeLifecycleGeneration++;
                     routeVersion = finalResponse.routeVersion;
                     routeCityId = cityId;
                     routeFinished = false;
@@ -792,6 +805,7 @@ public final class MainActivity extends Activity {
                 if (isFinishing() || isDestroyed()) return;
                 if (finalResponse.success) {
                     routeId = finalResponse.routeId;
+                    routeLifecycleGeneration++;
                     routeVersion = finalResponse.routeVersion;
                     currentPoints.clear();
                     currentPoints.addAll(finalResponse.points);
@@ -933,6 +947,7 @@ public final class MainActivity extends Activity {
                 if (isFinishing() || isDestroyed()) return;
                 if (finalResponse.success) {
                     routeId = finalResponse.routeId;
+                    routeLifecycleGeneration++;
                     routeVersion = finalResponse.routeVersion;
                     currentPoints.clear();
                     currentPoints.addAll(finalResponse.points);
@@ -1413,6 +1428,7 @@ public final class MainActivity extends Activity {
     }
 
     private void detachFinishedRouteForNewBuild() {
+        routeLifecycleGeneration++;
         routeId = null;
         routeVersion = 0;
         routeCityId = null;
@@ -1467,6 +1483,7 @@ public final class MainActivity extends Activity {
     private void recoverActiveWalkOrOpenRoute() {
         if (routeId == null || routeCityId == null || requestInFlight) return;
         final String requestedRouteId = routeId;
+        final int requestedGeneration = routeLifecycleGeneration;
         final String owner = sessionId();
         setNetworkBusy(true);
         result.setText("Восстанавливаем сохранённый маршрут…");
@@ -1481,7 +1498,9 @@ public final class MainActivity extends Activity {
             }
             ApiClient.WalkResult finalResponse = response;
             runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed()) return;
+                if (isFinishing() || isDestroyed()
+                        || !RouteLifecycleRecovery.isCurrentRouteStateRequest(requestedRouteId,
+                        requestedGeneration, routeId, routeLifecycleGeneration)) return;
                 finishNetwork(0);
                 if (finalResponse.success && finalResponse.walkId != null) {
                     currentWalkStatus = finalResponse.status;
@@ -1557,6 +1576,7 @@ public final class MainActivity extends Activity {
     private void syncWalkStateFromBackend() {
         if (routeId == null || routeCityId == null || walkStateSyncInFlight) return;
         final String requestedRouteId = routeId;
+        final int requestedGeneration = routeLifecycleGeneration;
         final String knownWalkId = activeWalkIdForCurrentRoute();
         final String owner = sessionId();
         walkStateSyncInFlight = true;
@@ -1564,6 +1584,8 @@ public final class MainActivity extends Activity {
         network.execute(() -> {
             ApiClient.WalkResult response = null;
             String terminalStatus = null;
+            boolean historyLoaded = false;
+            boolean routeFoundInHistory = false;
             String error = null;
             try {
                 if (knownWalkId != null) response = ApiClient.getWalk(knownWalkId, owner);
@@ -1574,10 +1596,12 @@ public final class MainActivity extends Activity {
                 if (!response.success && "NOT_FOUND".equals(response.errorCode)) {
                     for (ApiClient.GuestHistoryItem item : ApiClient.getGuestHistory(owner)) {
                         if (requestedRouteId.equals(item.routeId)) {
+                            routeFoundInHistory = true;
                             terminalStatus = item.walkStatus;
                             break;
                         }
                     }
+                    historyLoaded = true;
                 } else if (!response.success) {
                     error = response.message;
                 }
@@ -1586,10 +1610,15 @@ public final class MainActivity extends Activity {
             }
             ApiClient.WalkResult finalResponse = response;
             String finalTerminalStatus = terminalStatus;
+            RouteLifecycleRecovery.HistoryRouteState finalHistoryRouteState =
+                    RouteLifecycleRecovery.fromHistory(historyLoaded, routeFoundInHistory,
+                            terminalStatus);
             String finalError = error;
             runOnUiThread(() -> {
                 walkStateSyncInFlight = false;
-                if (isFinishing() || isDestroyed() || !requestedRouteId.equals(routeId)) return;
+                if (isFinishing() || isDestroyed()
+                        || !RouteLifecycleRecovery.isCurrentRouteStateRequest(requestedRouteId,
+                        requestedGeneration, routeId, routeLifecycleGeneration)) return;
                 if (finalError != null) {
                     walkStateVerified = false;
                     walkStateError = finalError;
@@ -1617,12 +1646,26 @@ public final class MainActivity extends Activity {
                             ? finalResponse.status : finalTerminalStatus);
                     updateQueryEditActions();
                     refreshGuestHistory();
-                } else {
+                } else if (finalHistoryRouteState == RouteLifecycleRecovery.HistoryRouteState.READY) {
+                    // The route itself exists but has no active or terminal
+                    // walk. This is the only confirmed READY recovery state.
                     currentWalkStatus = null;
                     routeFinished = false;
                     walkStateVerified = true;
+                    walkStateError = null;
                     clearActiveWalkState();
                     persistRouteState(query.getText().toString().trim());
+                    renderRouteCard(null);
+                } else if (finalHistoryRouteState == RouteLifecycleRecovery.HistoryRouteState.REMOVED) {
+                    // A successful history response proved retention removed
+                    // this route. Do not revive its local snapshot as READY.
+                    clearLocalRouteState("Сохранённый маршрут больше недоступен на backend. Создайте новый маршрут.");
+                } else {
+                    // An unknown response must never erase the last confirmed
+                    // lifecycle hint. The next explicit retry will reconcile it.
+                    walkStateVerified = false;
+                    walkStateError = "Не удалось подтвердить состояние прогулки. Нажмите карточку, чтобы повторить.";
+                    result.setText(walkStateError);
                     renderRouteCard(null);
                 }
             });
@@ -1654,19 +1697,40 @@ public final class MainActivity extends Activity {
     private void refreshGuestHistory() {
         if (guestHistoryList == null || guestHistoryScroll == null) return;
         final String currentRouteId = routeId;
+        final int requestGeneration = ++guestHistoryRequestGeneration;
         network.execute(() -> {
-            List<ApiClient.GuestHistoryItem> items;
+            List<ApiClient.GuestHistoryItem> items = null;
+            String error = null;
             try { items = ApiClient.getGuestHistory(sessionId()); }
-            catch (Exception ignored) { items = Collections.emptyList(); }
+            catch (Exception exception) {
+                error = "Не удалось загрузить историю. Нажмите, чтобы повторить.";
+            }
             List<ApiClient.GuestHistoryItem> finalItems = items;
+            String finalError = error;
             runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed()) return;
+                if (isFinishing() || isDestroyed()
+                        || !RouteLifecycleRecovery.isCurrentHistoryResponse(requestGeneration,
+                        guestHistoryRequestGeneration)) return;
+                if (!RouteLifecycleRecovery.shouldReplaceHistoryCards(finalError == null,
+                        requestGeneration, guestHistoryRequestGeneration)) {
+                    guestHistoryStatus.setText(finalError);
+                    guestHistoryStatus.setVisibility(View.VISIBLE);
+                    guestHistoryStatus.setOnClickListener(view -> refreshGuestHistory());
+                    return;
+                }
                 guestHistoryList.removeAllViews();
+                guestHistoryStatus.setOnClickListener(null);
+                guestHistoryStatus.setText(finalItems.isEmpty() ? "Маршрутов пока нет." : "");
+                guestHistoryStatus.setVisibility(finalItems.isEmpty() ? View.VISIBLE : View.GONE);
                 boolean recoveredTerminalRoute = false;
                 for (ApiClient.GuestHistoryItem item : finalItems) {
                     if (item.routeId.equals(currentRouteId) && item.finished()) {
-                        markCurrentRouteFinished(item.walkStatus);
-                        recoveredTerminalRoute = true;
+                        // Ignore a response for a route replaced while the
+                        // history request was in flight.
+                        if (currentRouteId != null && currentRouteId.equals(routeId)) {
+                            markCurrentRouteFinished(item.walkStatus);
+                            recoveredTerminalRoute = true;
+                        }
                         break;
                     }
                 }
@@ -1702,11 +1766,7 @@ public final class MainActivity extends Activity {
     }
 
     private static String historyStatusLabel(String status) {
-        if ("ACTIVE".equals(status)) return "Прогулка идёт";
-        if ("PAUSED".equals(status)) return "На паузе";
-        if ("STOPPED".equals(status)) return "Прогулка остановлена";
-        if ("COMPLETED".equals(status)) return "Маршрут пройден";
-        return "Маршрут готов";
+        return RouteLifecycleRecovery.historyStatusLabel(status);
     }
 
     private void openGuestHistoryRoute(ApiClient.GuestHistoryItem item) {
@@ -1726,6 +1786,7 @@ public final class MainActivity extends Activity {
                     intent.putExtra(MapActivity.EXTRA_SESSION_ID, sessionId());
                     intent.putExtra(MapActivity.EXTRA_ROUTE_SNAPSHOT,
                             ApiClient.routeSnapshot(finalResponse));
+                    intent.putExtra(MapActivity.EXTRA_WALK_STATUS, item.walkStatus);
                     intent.putExtra(MapActivity.EXTRA_HISTORY_READ_ONLY, true);
                     startActivityForResult(intent, ROUTE_SCREEN_REQUEST);
                 } else result.setText(finalResponse.message);
@@ -1737,13 +1798,15 @@ public final class MainActivity extends Activity {
     private void renderRouteCard(ApiClient.WalkResult walk) {
         if (routeCard == null || routeId == null) return;
         if (!walkStateVerified) {
-            routeCardTitle.setText(routeCityName() + ": синхронизация прогулки");
+            String lastKnownState = historyStatusLabel(currentWalkStatus);
+            routeCardTitle.setText(routeCityName() + ": состояние прогулки не подтверждено");
             routeCardSubtitle.setText(walkStateError == null
                     ? "Проверяем состояние на сервере…"
-                    : "Нет связи с backend — нажмите карточку, чтобы повторить");
+                    : "Последнее состояние: " + lastKnownState
+                    + " • нажмите карточку, чтобы повторить");
             routeCardActivity.setVisibility(View.GONE);
             routeCardIcon.setVisibility(View.VISIBLE);
-            routeCardIcon.setText("…");
+            routeCardIcon.setText("↻");
             routeControlButton.setVisibility(View.GONE);
             routeCard.setOnClickListener(view -> syncWalkStateFromBackend());
             return;
@@ -1866,6 +1929,8 @@ public final class MainActivity extends Activity {
 
     private void showHomeWalkMenu(String walkId) {
         final String requestedWalkId = walkId;
+        final String requestedRouteId = routeId;
+        final int requestedGeneration = routeLifecycleGeneration;
         network.execute(() -> {
             ApiClient.WalkResult response;
             try {
@@ -1876,7 +1941,9 @@ public final class MainActivity extends Activity {
             }
             ApiClient.WalkResult finalResponse = response;
             runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed()) return;
+                if (isFinishing() || isDestroyed()
+                        || !RouteLifecycleRecovery.isCurrentRouteStateRequest(requestedRouteId,
+                        requestedGeneration, routeId, routeLifecycleGeneration)) return;
                 if (!finalResponse.success) {
                     result.setText(finalResponse.message);
                     return;
@@ -1920,6 +1987,9 @@ public final class MainActivity extends Activity {
     private void sendHomeWalkAction(String walkId, String action) {
         if (requestInFlight) return;
         setNetworkBusy(true);
+        final String requestedRouteId = routeId;
+        final int requestedGeneration = routeLifecycleGeneration;
+        final String requestedWalkId = walkId;
         network.execute(() -> {
             ApiClient.WalkResult response;
             try {
@@ -1930,7 +2000,10 @@ public final class MainActivity extends Activity {
             }
             ApiClient.WalkResult finalResponse = response;
             runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed()) return;
+                if (isFinishing() || isDestroyed()
+                        || !RouteLifecycleRecovery.isCurrentRouteStateRequest(requestedRouteId,
+                        requestedGeneration, routeId, routeLifecycleGeneration)
+                        || !requestedWalkId.equals(activeWalkIdForCurrentRoute())) return;
                 if (finalResponse.success && ("ACTIVE".equals(finalResponse.status)
                         || "PAUSED".equals(finalResponse.status))) {
                     currentWalkStatus = finalResponse.status;
@@ -1966,6 +2039,7 @@ public final class MainActivity extends Activity {
         result.setText("Запускаем прогулку…");
         final String requestedRouteId = routeId;
         final int requestedVersion = routeVersion;
+        final int requestedGeneration = routeLifecycleGeneration;
         final String owner = sessionId();
         network.execute(() -> {
             ApiClient.WalkResult response;
@@ -1979,7 +2053,9 @@ public final class MainActivity extends Activity {
             }
             ApiClient.WalkResult finalResponse = response;
             runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed()) return;
+                if (isFinishing() || isDestroyed()
+                        || !RouteLifecycleRecovery.isCurrentRouteStateRequest(requestedRouteId,
+                        requestedGeneration, routeId, routeLifecycleGeneration)) return;
                 if (finalResponse.success) {
                     currentWalkStatus = finalResponse.status;
                     routeFinished = false;
@@ -2048,6 +2124,7 @@ public final class MainActivity extends Activity {
     }
 
     private void clearLocalRouteState(String message) {
+        routeLifecycleGeneration++;
         routeId = null;
         routeVersion = 0;
         routeCityId = null;
@@ -2092,6 +2169,7 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 routeId = data.getStringExtra(RouteChatActivity.EXTRA_ROUTE_ID);
+                routeLifecycleGeneration++;
                 routeVersion = data.getIntExtra(RouteChatActivity.EXTRA_ROUTE_VERSION, 0);
                 routeCityId = data.getStringExtra(RouteChatActivity.EXTRA_CITY);
                 routeSnapshot = data.getStringExtra(RouteChatActivity.EXTRA_SNAPSHOT);
@@ -2110,11 +2188,10 @@ public final class MainActivity extends Activity {
         if (requestCode != ROUTE_SCREEN_REQUEST) return;
         if (resultCode != RESULT_OK || data == null) {
             if (routeId != null) {
-                queryEditMode = true;
-                persistQueryEditMode();
-                updateQueryEditActions();
-                result.setText("Экран карты закрылся, но маршрут сохранён. "
-                        + "Нажмите «Вернуться к маршруту».");
+                // RESULT_CANCELED also arrives when Android kills the isolated
+                // map process. Do not turn that into an edit request.
+                syncWalkStateFromBackend();
+                result.setText("Экран карты завершился, состояние прогулки проверяется.");
             }
             refreshHomeRouteCard();
             return;

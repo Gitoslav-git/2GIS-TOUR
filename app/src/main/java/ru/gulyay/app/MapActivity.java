@@ -463,7 +463,7 @@ public final class MapActivity extends ComponentActivity {
         mapInitializationStarted = true;
         logMemory("before-sdk");
         if (hasCriticalMemoryPressure()) {
-            mapPlaceholder.setText("Недостаточно свободной памяти для карты 2ГИС\n"
+            showMapFallback("Недостаточно свободной памяти для карты 2ГИС\n"
                     + "Маршрут и точки доступны без неё");
             Log.w(MEMORY_LOG, "Map initialization skipped: Android reports low memory");
             return;
@@ -474,7 +474,7 @@ public final class MapActivity extends ComponentActivity {
             ru.dgis.sdk.Context sdkContext = application.sdkContext();
             if (sdkContext == null) {
                 String message = application.mapError();
-                mapPlaceholder.setText(message == null
+                showMapFallback(message == null
                         ? "Карта 2ГИС пока недоступна\nМаршрут и точки работают без неё"
                         : message);
                 return;
@@ -492,8 +492,13 @@ public final class MapActivity extends ComponentActivity {
             mapContainer.removeView(mapPlaceholder);
             zoomControls.setVisibility(View.VISIBLE);
             logMemory("after-map-view");
-            mapView.getMapAsync(readyMap -> {
-                if (isFinishing() || isDestroyed()) return Unit.INSTANCE;
+            final MapView requestedMapView = mapView;
+            requestedMapView.getMapAsync(readyMap -> {
+                if (!MapLifecycleGuard.shouldApplyMapCallback(requestedMapView, mapView,
+                        mapInitializationStarted, !isFinishing() && !isDestroyed())) {
+                    Log.i(MEMORY_LOG, "Ignoring callback from released MapView");
+                    return Unit.INSTANCE;
+                }
                 try {
                     map = readyMap;
                     renderRoute();
@@ -520,13 +525,20 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void showMapFallback(String message) {
+        mapInitializationStarted = false;
+        releaseMapResources();
         if (mapView != null) {
+            getLifecycle().removeObserver(mapView);
             mapContainer.removeView(mapView);
             mapView = null;
         }
-        map = null;
         zoomControls.setVisibility(View.GONE);
-        mapPlaceholder.setText(message);
+        mapPlaceholder.setText(message + "\nНажмите, чтобы повторить");
+        mapPlaceholder.setOnClickListener(view -> {
+            if (route == null || !route.success || mapInitializationStarted) return;
+            mapPlaceholder.setText("Проверяем доступную память и запускаем карту…");
+            initializeMapIfReady();
+        });
         if (mapPlaceholder.getParent() == null) {
             mapContainer.addView(mapPlaceholder, 0, new FrameLayout.LayoutParams(-1, -1));
         }
@@ -631,12 +643,15 @@ public final class MapActivity extends ComponentActivity {
         }
         if (route == null || !route.success) return;
         if (getIntent().getBooleanExtra(EXTRA_HISTORY_READ_ONLY, false)) {
+            String historyStatus = getIntent().getStringExtra(EXTRA_WALK_STATUS);
+            String statusLabel = RouteLifecycleRecovery.historyStatusLabel(historyStatus);
             screenTitle.setText("Маршрут из истории");
             routeSummary.setText(route.points.isEmpty() ? "Маршрут" : route.points.get(0).name);
-            status.setText("Просмотр завершённого маршрута • " + route.points.size() + " мест");
+            status.setText("Просмотр истории • " + statusLabel + " • "
+                    + route.points.size() + " мест");
             guidancePanel.setVisibility(View.GONE);
             mapRouteSummary.setVisibility(View.VISIBLE);
-            mapRouteSummary.setText("Маршрут завершён");
+            mapRouteSummary.setText(statusLabel);
             primaryAction.setVisibility(View.GONE);
             editQuery.setVisibility(View.GONE);
             editPoints.setVisibility(View.GONE);
@@ -1351,6 +1366,17 @@ public final class MapActivity extends ComponentActivity {
         }
     }
 
+    private void releaseMapResources() {
+        if (objects != null) objects.removeAll();
+        objects = null;
+        routeMarkerImages.clear();
+        startMarkerImage = null;
+        userMarkerImage = null;
+        userMarker = null;
+        map = null;
+        logMemory("map-resources-released");
+    }
+
     private void persistFinishedRoute() {
         String routeId = getIntent().getStringExtra(EXTRA_ROUTE_ID);
         if (routeId == null) return;
@@ -1637,6 +1663,13 @@ public final class MapActivity extends ComponentActivity {
     @Override protected void onStart() {
         super.onStart();
         if (walk != null && walk.success) syncLocationTracking();
+    }
+
+    @Override public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (map == null && level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            mapInitializationStarted = false;
+        }
     }
 
     @Override protected void onStop() {
@@ -2146,14 +2179,9 @@ public final class MapActivity extends ComponentActivity {
     @Override protected void onDestroy() {
         uiHandler.removeCallbacksAndMessages(null);
         stopLocationTracking();
-        if (objects != null) objects.removeAll();
-        objects = null;
-        routeMarkerImages.clear();
-        startMarkerImage = null;
-        userMarkerImage = null;
-        userMarker = null;
-        map = null;
+        releaseMapResources();
         if (mapView != null) {
+            getLifecycle().removeObserver(mapView);
             if (mapView.getParent() == mapContainer) mapContainer.removeView(mapView);
             mapView = null;
         }

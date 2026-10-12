@@ -28,6 +28,13 @@ class RouteRepository:
         except ValueError:
             retention_minutes = 1440
         self.retention_minutes = max(1, min(10_080, retention_minutes))
+        try:
+            abandoned_walk_hours = int(os.getenv("GULYAY_ABANDONED_WALK_HOURS", "168"))
+        except ValueError:
+            abandoned_walk_hours = 168
+        # A week leaves room for offline use and Android process recovery. It
+        # is deliberately independent from short guest-history retention.
+        self.abandoned_walk_hours = max(24, min(720, abandoned_walk_hours))
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(resolved, check_same_thread=False, timeout=10)
         self._connection.execute("PRAGMA busy_timeout = 10000")
@@ -211,6 +218,29 @@ class RouteRepository:
             rows = self._connection.execute(
                 """SELECT walk_json FROM walks WHERE owner_session = ?
                    ORDER BY updated_at DESC""", (str(owner),),
+            ).fetchall()
+        for row in rows:
+            try:
+                state = WalkState.model_validate_json(row[0])
+            except ValueError:
+                continue
+            if state.session.status in {"ACTIVE", "PAUSED"}:
+                return state
+        return None
+
+    def find_abandoned_active_walk(self, owner: UUID) -> WalkState | None:
+        """Return an ACTIVE/PAUSED walk untouched for the configured long interval.
+
+        `updated_at` is server-observed lifecycle activity (actions or accepted
+        progress), not an inference from missing GPS samples on the device.
+        Callers must transition the returned state under the API state lock.
+        """
+        modifier = f"-{self.abandoned_walk_hours} hours"
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT walk_json FROM walks WHERE owner_session = ?
+                   AND updated_at < datetime('now', ?)
+                   ORDER BY updated_at DESC""", (str(owner), modifier),
             ).fetchall()
         for row in rows:
             try:

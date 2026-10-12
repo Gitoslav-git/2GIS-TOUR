@@ -298,11 +298,24 @@ def create_walk(route_id: UUID, payload: StartWalk,
                            {"currentVersion": route.routeVersion})
         active = repository.find_active_walk(x_device_session)
         if active is not None:
-            if (active.session.routeId == route_id
-                    and active.session.routeVersion == payload.routeVersion):
-                return active.session
-            return failure("ACTIVE_WALK_EXISTS", "Сначала завершите текущую прогулку", 409,
-                           request_id, {"walkId": str(active.session.walkId)})
+            abandoned = repository.find_abandoned_active_walk(x_device_session)
+            if abandoned is not None and abandoned.session.walkId == active.session.walkId:
+                abandoned_route = repository.get_version(
+                    abandoned.session.routeId, x_device_session, abandoned.session.routeVersion,
+                )
+                if abandoned_route is not None:
+                    # Do not use COMPLETED for inactivity. This uses the same
+                    # validated STOP transition as an explicit user action.
+                    repository.replace_walk(apply_action(
+                        abandoned, abandoned_route, WalkAction(action="STOP"),
+                    ), x_device_session)
+                    active = None
+            if active is not None:
+                if (active.session.routeId == route_id
+                        and active.session.routeVersion == payload.routeVersion):
+                    return active.session
+                return failure("ACTIVE_WALK_EXISTS", "Сначала завершите текущую прогулку", 409,
+                               request_id, {"walkId": str(active.session.walkId)})
         try:
             state = start_walk(route, payload)
         except WalkInvalidState:

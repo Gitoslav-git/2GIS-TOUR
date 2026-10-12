@@ -723,8 +723,9 @@ def test_source_limiter_uses_peer_unless_proxy_is_explicitly_trusted(monkeypatch
     assert limited.status_code == 429
     assert b'"dependency":"source"' in limited.body
 
-    SOURCE_REQUESTS["expired"].append(0.0)
-    _prune_rate_state(time.monotonic())
+    now = time.monotonic()
+    SOURCE_REQUESTS["expired"].append(now - 61)
+    _prune_rate_state(now)
     assert "expired" not in SOURCE_REQUESTS
 
 

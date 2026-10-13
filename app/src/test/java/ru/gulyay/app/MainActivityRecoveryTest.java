@@ -10,6 +10,7 @@ import java.io.EOFException;
 import java.net.SocketTimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 public class MainActivityRecoveryTest {
@@ -164,8 +165,14 @@ public class MainActivityRecoveryTest {
         assertEquals(65, VisitStopwatch.elapsedSeconds(60, 10_000L, 15_000L, true));
         assertEquals(60, VisitStopwatch.elapsedSeconds(60, 10_000L, 25_000L, false));
         assertEquals("00:00", VisitStopwatch.format(0));
+        assertEquals("00:33", VisitStopwatch.format(33));
         assertEquals("01:05", VisitStopwatch.format(65));
+        assertEquals("18:42", VisitStopwatch.format(1122));
+        assertEquals("59:59", VisitStopwatch.format(3599));
+        assertEquals("1:00:00", VisitStopwatch.format(3600));
         assertEquals("1:01:01", VisitStopwatch.format(3661));
+        assertEquals("1:22:16", VisitStopwatch.format(4936));
+        assertEquals("12:34:56", VisitStopwatch.format(45296));
     }
 
     @Test public void routeReadRetriesOneTransientTransportFailureOnly() {
@@ -185,5 +192,77 @@ public class MainActivityRecoveryTest {
         }, value -> false);
         assertEquals("route", result);
         assertEquals(2, calls.get());
+    }
+
+    @Test public void visitingPresentationUsesCurrentPointAndRealNextLeg() {
+        ApiClient.Result route = visitingRoute();
+        ApiClient.WalkResult walk = new ApiClient.WalkResult(true, "", "walk", "ACTIVE",
+                1, 30, true, 0, null, 0, "VISITING", 1122, false);
+
+        VisitingPresentation.Model model = VisitingPresentation.from(route, walk, 1122, null);
+
+        assertEquals("Точка 1 из 3", model.pointLabel);
+        assertEquals("Очень длинное название текущей локации", model.pointName);
+        assertEquals("18:42", model.stopwatch);
+        assertEquals("Далее: Красная площадь", model.nextTitle);
+        assertEquals("261 м · 4 мин пешком", model.nextMeta);
+        assertTrue(model.showNext);
+        assertFalse(VisitingPresentation.shouldShowPartnerOffer(model.partnerOffer));
+        assertEquals("Фото", VisitingPresentation.PHOTO_PLACEHOLDER);
+    }
+
+    @Test public void visitingPresentationHidesNextAndPartnerAtLastPoint() {
+        ApiClient.Result route = visitingRoute();
+        ApiClient.WalkResult walk = new ApiClient.WalkResult(true, "", "walk", "PAUSED",
+                3, 0, false, 0, null, 0, "VISITING", 65, false);
+
+        VisitingPresentation.Model model = VisitingPresentation.from(route, walk, 65, null);
+
+        assertEquals("Точка 3 из 3", model.pointLabel);
+        assertEquals("01:05", model.stopwatch);
+        assertFalse(model.showNext);
+        assertEquals("", model.nextTitle);
+        assertEquals("", model.nextMeta);
+        assertFalse(VisitingPresentation.shouldShowPartnerOffer(null));
+        assertTrue(VisitingPresentation.shouldShowPartnerOffer(
+                new VisitingPresentation.PartnerOffer("Зайти за кофе?", "Реклама")));
+        assertTrue(VisitingPresentation.shouldShowRemainingPoints(true));
+        assertTrue(VisitingPresentation.shouldShowRemainingPoints(false));
+    }
+
+    @Test public void visitingPointListOnlyRendersWhenItsStructureChanges() {
+        ApiClient.Result route = visitingRoute();
+        String initial = VisitingPresentation.pointListRenderKey(route, 1, true);
+
+        assertEquals(initial, VisitingPresentation.pointListRenderKey(route, 1, true));
+        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(route, 2, true)));
+        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(route, 1, false)));
+
+        ApiClient.WalkResult active = new ApiClient.WalkResult(true, "", "walk", "ACTIVE",
+                1, 30, true, 0, null, 0, "VISITING", 33, false);
+        ApiClient.WalkResult gpsRefresh = new ApiClient.WalkResult(true, "", "walk", "ACTIVE",
+                1, 29, false, 80, null, 0, "VISITING", 34, false);
+        ApiClient.WalkResult nextVisit = new ApiClient.WalkResult(true, "", "walk", "ACTIVE",
+                2, 20, true, 0, null, 0, "VISITING", 0, false);
+
+        assertEquals(VisitingPresentation.structureRenderKey(route, active),
+                VisitingPresentation.structureRenderKey(route, gpsRefresh));
+        assertFalse(VisitingPresentation.structureRenderKey(route, active).equals(
+                VisitingPresentation.structureRenderKey(route, nextVisit)));
+    }
+
+    private static ApiClient.Result visitingRoute() {
+        List<ApiClient.PlaceOption> points = Arrays.asList(
+                new ApiClient.PlaceOption("one",
+                        "Очень длинное название текущей локации", false),
+                new ApiClient.PlaceOption("two", "Красная площадь", false),
+                new ApiClient.PlaceOption("three", "Музей", false));
+        ApiClient.Result route = new ApiClient.Result(true, "", "route", 1,
+                0, null, points, Collections.emptyList());
+        route.legGeometries = Arrays.asList(
+                new ApiClient.RouteLegGeometry(1, 120, 100, Collections.emptyList()),
+                new ApiClient.RouteLegGeometry(2, 261, 240, Collections.emptyList()),
+                new ApiClient.RouteLegGeometry(3, 500, 420, Collections.emptyList()));
+        return route;
     }
 }

@@ -57,10 +57,19 @@ final class ApiClient {
 
     static final class RouteLegGeometry {
         final int toOrder;
+        final int distanceMeters;
+        final int durationSeconds;
         final List<GeoCoordinate> path;
 
         RouteLegGeometry(int toOrder, List<GeoCoordinate> path) {
+            this(toOrder, 0, 0, path);
+        }
+
+        RouteLegGeometry(int toOrder, int distanceMeters, int durationSeconds,
+                         List<GeoCoordinate> path) {
             this.toOrder = toOrder;
+            this.distanceMeters = Math.max(0, distanceMeters);
+            this.durationSeconds = Math.max(0, durationSeconds);
             this.path = path;
         }
     }
@@ -768,6 +777,7 @@ final class ApiClient {
                 }
             }
             legGeometries.add(new RouteLegGeometry(leg.optInt("toOrder", i + 1),
+                    leg.optInt("distanceMeters", 0), leg.optInt("durationSeconds", 0),
                     compactPath(legPath, 240)));
         }
         result.totalDistanceMeters = distance;

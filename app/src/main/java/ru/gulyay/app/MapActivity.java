@@ -21,7 +21,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.text.Editable;
+import android.text.SpannableString;
+import android.text.Spanned;
 import android.text.TextWatcher;
+import android.text.style.RelativeSizeSpan;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -125,14 +128,23 @@ public final class MapActivity extends ComponentActivity {
     private TextView routeSummary;
     private TextView mapRouteSummary;
     private LinearLayout guidancePanel;
+    private TextView guidanceLeadingIcon;
     private TextView guidanceTitle;
     private TextView guidanceSubtitle;
+    private View guidanceDivider;
     private TextView guidanceTurnIcon;
     private TextView nextLabel;
     private LinearLayout pointHero;
     private LinearLayout pointList;
     private ScrollView pointListScroll;
     private LinearLayout actions;
+    private TextView photoPlaceholder;
+    private LinearLayout visitingNextCard;
+    private TextView visitingNextIcon;
+    private TextView visitingNextTitle;
+    private TextView visitingNextMeta;
+    private TextView partnerOfferView;
+    private boolean compactScreen;
     private final List<ApiClient.PlaceOption> editingPoints = new ArrayList<>();
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private boolean pointEditing;
@@ -166,6 +178,9 @@ public final class MapActivity extends ComponentActivity {
     private int visitTimerBaseSeconds;
     private long visitTimerSyncedAtElapsedMillis;
     private Runnable visitTimerTick;
+    private String renderedPointListKey;
+    private String renderedVisitingStructureKey;
+    private boolean mapGestureActive;
     private final Runnable cameraBoundsGuard = this::enforceRouteCameraBounds;
 
     @Override public void onCreate(Bundle savedInstanceState) {
@@ -180,6 +195,7 @@ public final class MapActivity extends ComponentActivity {
         page.setOrientation(LinearLayout.VERTICAL);
         root.addView(page, new FrameLayout.LayoutParams(-1, -1));
         boolean compact = getResources().getConfiguration().screenHeightDp <= 720;
+        compactScreen = compact;
 
         mapContainer = new FrameLayout(this);
         mapContainer.setBackground(UiKit.rounded(UiKit.MAP, 0, this));
@@ -206,10 +222,10 @@ public final class MapActivity extends ComponentActivity {
                 UiKit.dp(this, 10), UiKit.dp(this, 8));
         guidancePanel.setBackground(UiKit.rounded(0xF7FFFFFF, 22, this));
         guidancePanel.setVisibility(View.GONE);
-        TextView walkingIcon = UiKit.label(this, "🚶", 25, UiKit.GREEN_DARK);
-        walkingIcon.setGravity(Gravity.CENTER);
-        walkingIcon.setBackground(UiKit.rounded(0xFFE4F8EA, 28, this));
-        guidancePanel.addView(walkingIcon, new LinearLayout.LayoutParams(
+        guidanceLeadingIcon = UiKit.label(this, "🚶", 25, UiKit.GREEN_DARK);
+        guidanceLeadingIcon.setGravity(Gravity.CENTER);
+        guidanceLeadingIcon.setBackground(UiKit.rounded(0xFFE4F8EA, 28, this));
+        guidancePanel.addView(guidanceLeadingIcon, new LinearLayout.LayoutParams(
                 UiKit.dp(this, 54), UiKit.dp(this, 54)));
         LinearLayout guidanceText = new LinearLayout(this);
         guidanceText.setOrientation(LinearLayout.VERTICAL);
@@ -225,7 +241,7 @@ public final class MapActivity extends ComponentActivity {
         guidanceText.addView(guidanceTitle);
         guidanceText.addView(guidanceSubtitle);
         guidancePanel.addView(guidanceText, new LinearLayout.LayoutParams(0, -1, 1));
-        TextView guidanceDivider = UiKit.label(this, "", 1, 0x00000000);
+        guidanceDivider = UiKit.label(this, "", 1, 0x00000000);
         guidanceDivider.setBackgroundColor(0xFFD5DAD7);
         LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(
                 UiKit.dp(this, 1), UiKit.dp(this, 44));
@@ -285,11 +301,15 @@ public final class MapActivity extends ComponentActivity {
         routeSummary.setMaxLines(2);
         routeSummary.setEllipsize(android.text.TextUtils.TruncateAt.END);
         pointHero.addView(routeSummary, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView photo = UiKit.label(this, "Фото", 11, UiKit.MUTED);
-        photo.setGravity(Gravity.CENTER);
-        photo.setBackground(UiKit.rounded(0xFFE5E9E6, 14, this));
-        pointHero.addView(photo, new LinearLayout.LayoutParams(
-                UiKit.dp(this, compact ? 58 : 72), UiKit.dp(this, compact ? 46 : 56)));
+        photoPlaceholder = UiKit.label(this, VisitingPresentation.PHOTO_PLACEHOLDER,
+                11, UiKit.MUTED);
+        photoPlaceholder.setGravity(Gravity.CENTER);
+        photoPlaceholder.setContentDescription("Заглушка фотографии локации");
+        photoPlaceholder.setBackground(UiKit.rounded(0xFFE5E9E6, 14, this));
+        LinearLayout.LayoutParams photoParams = new LinearLayout.LayoutParams(
+                UiKit.dp(this, compact ? 58 : 72), UiKit.dp(this, compact ? 46 : 56));
+        photoParams.leftMargin = UiKit.dp(this, 12);
+        pointHero.addView(photoPlaceholder, photoParams);
         sheet.addView(pointHero, new LinearLayout.LayoutParams(-1,
                 UiKit.dp(this, compact ? 50 : 60)));
 
@@ -302,6 +322,46 @@ public final class MapActivity extends ComponentActivity {
         statusParams.topMargin = UiKit.dp(this, 4);
         statusParams.bottomMargin = UiKit.dp(this, 4);
         sheet.addView(status, statusParams);
+
+        visitingNextCard = new LinearLayout(this);
+        visitingNextCard.setOrientation(LinearLayout.HORIZONTAL);
+        visitingNextCard.setGravity(Gravity.CENTER_VERTICAL);
+        visitingNextCard.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 10),
+                UiKit.dp(this, 14), UiKit.dp(this, 10));
+        visitingNextCard.setBackground(UiKit.bordered(0xFFF5F8F6, 0xFFE0E9E3, 14, this));
+        visitingNextIcon = UiKit.label(this, "›", 24, UiKit.GREEN_DARK);
+        visitingNextIcon.setGravity(Gravity.CENTER);
+        visitingNextIcon.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        visitingNextIcon.setBackground(UiKit.rounded(0xFFE3F3E8, 16, this));
+        visitingNextCard.addView(visitingNextIcon, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 32), UiKit.dp(this, 32)));
+        LinearLayout visitingNextText = new LinearLayout(this);
+        visitingNextText.setOrientation(LinearLayout.VERTICAL);
+        visitingNextTitle = UiKit.label(this, "", compact ? 14 : 15, UiKit.TEXT);
+        visitingNextTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        visitingNextTitle.setSingleLine(true);
+        visitingNextTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        visitingNextMeta = UiKit.label(this, "", 12, UiKit.MUTED);
+        visitingNextMeta.setSingleLine(true);
+        visitingNextMeta.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        visitingNextText.addView(visitingNextTitle);
+        visitingNextText.addView(visitingNextMeta);
+        LinearLayout.LayoutParams nextTextParams = new LinearLayout.LayoutParams(0, -2, 1);
+        nextTextParams.leftMargin = UiKit.dp(this, 10);
+        visitingNextCard.addView(visitingNextText, nextTextParams);
+        visitingNextCard.setVisibility(View.GONE);
+        LinearLayout.LayoutParams nextCardParams = new LinearLayout.LayoutParams(-1, -2);
+        nextCardParams.topMargin = UiKit.dp(this, 2);
+        nextCardParams.bottomMargin = UiKit.dp(this, 6);
+        sheet.addView(visitingNextCard, nextCardParams);
+
+        partnerOfferView = UiKit.label(this, "", 13, UiKit.TEXT);
+        partnerOfferView.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 10),
+                UiKit.dp(this, 14), UiKit.dp(this, 10));
+        partnerOfferView.setBackground(UiKit.rounded(0xFFFFF6DF, 14, this));
+        partnerOfferView.setVisibility(View.GONE);
+        sheet.addView(partnerOfferView, new LinearLayout.LayoutParams(-1, -2));
+
         pointList = new LinearLayout(this);
         pointList.setOrientation(LinearLayout.VERTICAL);
         pointListScroll = new ScrollView(this);
@@ -663,6 +723,7 @@ public final class MapActivity extends ComponentActivity {
 
     private void showRouteStatus() {
         if (route == null || !route.success) return;
+        resetVisitingUi();
         if (isOfflineView()) {
             String lastKnownStatus = lastKnownStatusLabel();
             screenTitle.setText("Сохранённый маршрут");
@@ -730,17 +791,33 @@ public final class MapActivity extends ComponentActivity {
     }
 
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            mapGestureActive = isTouchInside(mapContainer, event);
+            if (mapGestureActive) uiHandler.removeCallbacks(cameraBoundsGuard);
+        }
         boolean handled = super.dispatchTouchEvent(event);
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-            uiHandler.removeCallbacks(cameraBoundsGuard);
-        } else if (routeCameraReady && (event.getActionMasked() == MotionEvent.ACTION_UP
-                || event.getActionMasked() == MotionEvent.ACTION_CANCEL)) {
+        if (routeCameraReady && mapGestureActive && (action == MotionEvent.ACTION_UP
+                || action == MotionEvent.ACTION_CANCEL)) {
             uiHandler.removeCallbacks(cameraBoundsGuard);
             uiHandler.postDelayed(cameraBoundsGuard, 40L);
             uiHandler.postDelayed(cameraBoundsGuard, 260L);
             uiHandler.postDelayed(cameraBoundsGuard, 900L);
         }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            mapGestureActive = false;
+        }
         return handled;
+    }
+
+    private boolean isTouchInside(View view, MotionEvent event) {
+        if (view == null || view.getVisibility() != View.VISIBLE) return false;
+        int[] location = new int[2];
+        view.getLocationOnScreen(location);
+        float x = event.getRawX();
+        float y = event.getRawY();
+        return x >= location[0] && x < location[0] + view.getWidth()
+                && y >= location[1] && y < location[1] + view.getHeight();
     }
 
     private String cityName() {
@@ -752,9 +829,18 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void renderPointList(int currentOrder) {
+        renderPointList(currentOrder, false);
+    }
+
+    private void renderPointList(int currentOrder, boolean nextPointAlreadyFeatured) {
+        String renderKey = VisitingPresentation.pointListRenderKey(
+                route, currentOrder, nextPointAlreadyFeatured);
+        if (renderKey.equals(renderedPointListKey)) return;
+        renderedPointListKey = renderKey;
         pointList.removeAllViews();
         if (route == null || route.points.isEmpty()) return;
         int start = currentOrder > 0 ? currentOrder : 1;
+        if (nextPointAlreadyFeatured) start++;
         int end = route.points.size();
         for (int i = start; i < end; i++) {
             ApiClient.PlaceOption point = route.points.get(i);
@@ -776,6 +862,10 @@ public final class MapActivity extends ComponentActivity {
             row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
             pointList.addView(row, new LinearLayout.LayoutParams(
                     -1, UiKit.dp(this, 54)));
+        }
+        if (walk != null && "VISITING".equals(walk.phase)) {
+            pointListScroll.setVisibility(pointList.getChildCount() > 0
+                    ? View.VISIBLE : View.GONE);
         }
         pointListScroll.post(() -> pointListScroll.scrollTo(0, 0));
     }
@@ -844,6 +934,8 @@ public final class MapActivity extends ComponentActivity {
         nextLabel.setText("ТОЧКИ МАРШРУТА");
         pointHero.setVisibility(View.GONE);
         status.setVisibility(View.GONE);
+        visitingNextCard.setVisibility(View.GONE);
+        renderPartnerOffer(null);
         editQuery.setVisibility(View.GONE);
         primaryAction.setVisibility(View.GONE);
         editPoints.setText("Подтвердить");
@@ -907,6 +999,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void renderEditablePointList() {
+        renderedPointListKey = null;
         pointList.removeAllViews();
         for (int i = 0; i < editingPoints.size(); i++) {
             LinearLayout row = editablePointRow(editingPoints.get(i), i);
@@ -1374,6 +1467,7 @@ public final class MapActivity extends ComponentActivity {
         routeSummary.setText(pointName);
         boolean visiting = "VISITING".equals(walk.phase) && walk.currentPointOrder > 0;
         if (!visiting) {
+            resetVisitingUi();
             stopVisitStopwatch();
             status.setText("◷  Осталось ≈" + walk.remainingMinutes + " мин"
                     + "              ●  Точка " + walk.currentPointOrder + " из "
@@ -1395,7 +1489,7 @@ public final class MapActivity extends ComponentActivity {
         } else {
             updateGuidance(latestUserLat, latestUserLon);
         }
-        renderPointList(walk.currentPointOrder);
+        renderPointList(walk.currentPointOrder, visiting);
         boolean active = "ACTIVE".equals(walk.status);
         boolean paused = "PAUSED".equals(walk.status);
         pauseResume.setVisibility(View.GONE);
@@ -1404,7 +1498,7 @@ public final class MapActivity extends ComponentActivity {
         primaryAction.setContentDescription("Пауза или остановка прогулки");
         primaryAction.setTextColor(0xFFFFFFFF);
         primaryAction.setBackground(UiKit.rounded(paused ? 0xFF98A19D : UiKit.RED, 14, this));
-        if (paused) {
+        if (paused && !visiting) {
             mapRouteSummary.setVisibility(View.VISIBLE);
             mapRouteSummary.setText("Прогулка на паузе");
         }
@@ -1420,6 +1514,7 @@ public final class MapActivity extends ComponentActivity {
         stopVisitStopwatch();
         visitTimerBaseSeconds = Math.max(0, walk.visitElapsedSeconds);
         visitTimerSyncedAtElapsedMillis = SystemClock.elapsedRealtime();
+        configureVisitingUi(pointName);
         renderVisitStopwatch(pointName);
         if (!"ACTIVE".equals(walk.status)) return;
         final String expectedWalkId = walk.walkId;
@@ -1446,15 +1541,129 @@ public final class MapActivity extends ComponentActivity {
         int elapsed = VisitStopwatch.elapsedSeconds(visitTimerBaseSeconds,
                 visitTimerSyncedAtElapsedMillis, SystemClock.elapsedRealtime(), running);
         String stopwatch = VisitStopwatch.format(elapsed);
-        status.setText((running ? "Посещение" : "Посещение на паузе") + " • " + stopwatch
-                + "              ●  Точка " + walk.currentPointOrder + " из "
-                + (route == null ? walk.currentPointOrder : route.points.size()));
-        guidanceTitle.setText(pointName);
-        guidanceSubtitle.setText((running ? "На локации " : "Секундомер остановлен на ")
-                + stopwatch + (running ? " · выход подтверждается за 115 м" : ""));
-        guidanceTurnIcon.setText("◷");
+        String timerLabel = running ? "На локации" : "На локации · пауза";
+        SpannableString timer = new SpannableString(timerLabel + "\n" + stopwatch);
+        timer.setSpan(new RelativeSizeSpan(0.43f), 0, timerLabel.length(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        timer.setSpan(new android.text.style.ForegroundColorSpan(UiKit.MUTED),
+                0, timerLabel.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        timer.setSpan(new android.text.style.StyleSpan(Typeface.NORMAL),
+                0, timerLabel.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        status.setText(timer);
+        status.setContentDescription(timerLabel + ", " + stopwatch);
+    }
+
+    private void configureVisitingUi(String pointName) {
+        String structureKey = VisitingPresentation.structureRenderKey(route, walk);
+        if (structureKey.equals(renderedVisitingStructureKey)) return;
+        renderedVisitingStructureKey = structureKey;
+        VisitingPresentation.Model model = VisitingPresentation.from(
+                route, walk, Math.max(0, walk.visitElapsedSeconds), null);
+        nextLabel.setText(model.pointLabel.toUpperCase(java.util.Locale.getDefault()));
+        routeSummary.setText(model.pointName);
+        status.setTextSize(compactScreen ? 29 : 33);
+        status.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        status.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        status.setIncludeFontPadding(true);
+        status.setMinLines(2);
+        status.setMaxLines(2);
+        status.setLineSpacing(0f, 1f);
+        int timerHeight = UiKit.dp(this, compactScreen ? 90 : 96);
+        status.setMinHeight(timerHeight);
+        status.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 8),
+                UiKit.dp(this, 16), UiKit.dp(this, 12));
+        status.setBackground(UiKit.rounded(0xFFEAF7EE, 16, this));
+        status.setTextColor(UiKit.GREEN_DARK);
+        status.setCompoundDrawables(makeVisitClockIcon(), null, null, null);
+        status.setCompoundDrawablePadding(UiKit.dp(this, 13));
+        LinearLayout.LayoutParams timerParams = new LinearLayout.LayoutParams(-1, timerHeight);
+        timerParams.topMargin = UiKit.dp(this, 8);
+        timerParams.bottomMargin = UiKit.dp(this, 6);
+        status.setLayoutParams(timerParams);
+
+        visitingNextCard.setVisibility(model.showNext ? View.VISIBLE : View.GONE);
+        visitingNextTitle.setText(model.nextTitle);
+        visitingNextMeta.setText(model.nextMeta);
+        visitingNextMeta.setVisibility(model.nextMeta.isEmpty() ? View.GONE : View.VISIBLE);
+        pointListScroll.setVisibility(View.VISIBLE);
+        renderPartnerOffer(model.partnerOffer);
+        renderVisitArrivalCard(pointName);
+    }
+
+    private void renderVisitArrivalCard(String pointName) {
+        guidanceLeadingIcon.setText("✓");
+        guidanceLeadingIcon.setTextSize(27);
+        guidanceLeadingIcon.setBackground(UiKit.rounded(UiKit.GREEN, 28, this));
+        guidanceLeadingIcon.setTextColor(0xFFFFFFFF);
+        guidanceTitle.setText("Вы на месте");
+        guidanceSubtitle.setText(pointName + " · Вы в зоне локации");
+        guidanceDivider.setVisibility(View.GONE);
+        guidanceTurnIcon.setVisibility(View.GONE);
         mapRouteSummary.setVisibility(View.GONE);
         guidancePanel.setVisibility(View.VISIBLE);
+    }
+
+    private void renderPartnerOffer(VisitingPresentation.PartnerOffer offer) {
+        if (!VisitingPresentation.shouldShowPartnerOffer(offer)) {
+            partnerOfferView.setText("");
+            partnerOfferView.setVisibility(View.GONE);
+            return;
+        }
+        partnerOfferView.setText(offer.title + (offer.disclosure == null
+                || offer.disclosure.trim().isEmpty() ? "" : "\n" + offer.disclosure));
+        partnerOfferView.setVisibility(View.VISIBLE);
+    }
+
+    private void resetVisitingUi() {
+        renderedVisitingStructureKey = null;
+        visitingNextCard.setVisibility(View.GONE);
+        pointListScroll.setVisibility(View.VISIBLE);
+        renderPartnerOffer(null);
+        nextLabel.setText("ПЕРВАЯ ТОЧКА");
+        status.setTextSize(14);
+        status.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
+        status.setTextColor(UiKit.MUTED);
+        status.setGravity(Gravity.CENTER_VERTICAL);
+        status.setIncludeFontPadding(true);
+        status.setMinLines(0);
+        status.setMaxLines(Integer.MAX_VALUE);
+        status.setMinHeight(0);
+        status.setPadding(UiKit.dp(this, 14), 0, UiKit.dp(this, 14), 0);
+        status.setBackground(UiKit.rounded(0xFFEAF9EF, 12, this));
+        status.setCompoundDrawables(null, null, null, null);
+        status.setCompoundDrawablePadding(0);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1,
+                UiKit.dp(this, compactScreen ? 40 : 46));
+        statusParams.topMargin = UiKit.dp(this, 4);
+        statusParams.bottomMargin = UiKit.dp(this, 4);
+        status.setLayoutParams(statusParams);
+        guidanceLeadingIcon.setText("🚶");
+        guidanceLeadingIcon.setTextSize(25);
+        guidanceLeadingIcon.setTextColor(UiKit.GREEN_DARK);
+        guidanceLeadingIcon.setBackground(UiKit.rounded(0xFFE4F8EA, 28, this));
+        guidanceDivider.setVisibility(View.VISIBLE);
+        guidanceTurnIcon.setVisibility(View.VISIBLE);
+    }
+
+    private android.graphics.drawable.Drawable makeVisitClockIcon() {
+        int size = UiKit.dp(this, compactScreen ? 38 : 42);
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float center = size / 2f;
+        paint.setColor(0xFFDCEFE3);
+        canvas.drawCircle(center, center, size * 0.48f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, size * 0.055f));
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setColor(UiKit.GREEN_DARK);
+        canvas.drawCircle(center, center, size * 0.26f, paint);
+        canvas.drawLine(center, center, center, size * 0.34f, paint);
+        canvas.drawLine(center, center, size * 0.66f, size * 0.54f, paint);
+        android.graphics.drawable.BitmapDrawable drawable =
+                new android.graphics.drawable.BitmapDrawable(getResources(), bitmap);
+        drawable.setBounds(0, 0, size, size);
+        return drawable;
     }
 
     private void stopVisitStopwatch() {
@@ -1733,6 +1942,12 @@ public final class MapActivity extends ComponentActivity {
 
     private void showGpsWaiting(String reason) {
         if (guidancePanel == null || walk == null || !"ACTIVE".equals(walk.status)) return;
+        if ("VISITING".equals(walk.phase) && route != null
+                && walk.currentPointOrder > 0
+                && walk.currentPointOrder <= route.points.size()) {
+            renderVisitArrivalCard(route.points.get(walk.currentPointOrder - 1).name);
+            return;
+        }
         guidanceTitle.setText("VISITING".equals(walk.phase)
                 ? "Подтверждаем выход с локации" : "Точка маршрута рядом");
         guidanceSubtitle.setText(reason);

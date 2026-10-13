@@ -1,0 +1,105 @@
+package ru.gulyay.app;
+
+import java.util.Locale;
+
+/** Pure VISITING presentation data; it never changes walk or GPS state. */
+final class VisitingPresentation {
+    static final String PHOTO_PLACEHOLDER = "Фото";
+
+    static final class PartnerOffer {
+        final String title;
+        final String disclosure;
+
+        PartnerOffer(String title, String disclosure) {
+            this.title = title;
+            this.disclosure = disclosure;
+        }
+    }
+
+    static final class Model {
+        final String pointLabel;
+        final String pointName;
+        final String stopwatch;
+        final String nextTitle;
+        final String nextMeta;
+        final boolean showNext;
+        final PartnerOffer partnerOffer;
+
+        Model(String pointLabel, String pointName, String stopwatch, String nextTitle,
+              String nextMeta, boolean showNext, PartnerOffer partnerOffer) {
+            this.pointLabel = pointLabel;
+            this.pointName = pointName;
+            this.stopwatch = stopwatch;
+            this.nextTitle = nextTitle;
+            this.nextMeta = nextMeta;
+            this.showNext = showNext;
+            this.partnerOffer = partnerOffer;
+        }
+    }
+
+    private VisitingPresentation() { }
+
+    static Model from(ApiClient.Result route, ApiClient.WalkResult walk, int elapsedSeconds,
+                      PartnerOffer partnerOffer) {
+        int total = route == null ? 0 : route.points.size();
+        int order = walk == null ? 0 : walk.currentPointOrder;
+        String pointName = "Локация";
+        if (route != null && order > 0 && order <= total) {
+            pointName = route.points.get(order - 1).name;
+        }
+        boolean showNext = route != null && order > 0 && order < total;
+        String nextTitle = "";
+        String nextMeta = "";
+        if (showNext) {
+            nextTitle = "Далее: " + route.points.get(order).name;
+            ApiClient.RouteLegGeometry leg = nextLeg(route, order + 1);
+            if (leg != null) nextMeta = formatLeg(leg.distanceMeters, leg.durationSeconds);
+        }
+        return new Model("Точка " + order + " из " + Math.max(order, total), pointName,
+                VisitStopwatch.format(elapsedSeconds), nextTitle, nextMeta, showNext,
+                partnerOffer);
+    }
+
+    static boolean shouldShowPartnerOffer(PartnerOffer offer) {
+        return offer != null && offer.title != null && !offer.title.trim().isEmpty();
+    }
+
+    static boolean shouldShowRemainingPoints(boolean compactScreen) {
+        return true;
+    }
+
+    static String pointListRenderKey(ApiClient.Result route, int currentOrder,
+                                     boolean nextPointAlreadyFeatured) {
+        StringBuilder key = new StringBuilder()
+                .append(currentOrder).append(':').append(nextPointAlreadyFeatured);
+        if (route == null) return key.append(":no-route").toString();
+        key.append(':').append(route.routeVersion).append(':').append(route.points.size());
+        for (ApiClient.PlaceOption point : route.points) {
+            key.append('|').append(point.placeId).append(':').append(point.name);
+        }
+        return key.toString();
+    }
+
+    static String structureRenderKey(ApiClient.Result route, ApiClient.WalkResult walk) {
+        if (walk == null) return "no-walk";
+        return pointListRenderKey(route, walk.currentPointOrder, true)
+                + ':' + walk.phase;
+    }
+
+    private static ApiClient.RouteLegGeometry nextLeg(ApiClient.Result route, int toOrder) {
+        if (route.legGeometries == null) return null;
+        for (ApiClient.RouteLegGeometry leg : route.legGeometries) {
+            if (leg.toOrder == toOrder) return leg;
+        }
+        return null;
+    }
+
+    private static String formatLeg(int distanceMeters, int durationSeconds) {
+        String distance = distanceMeters > 0
+                ? String.format(Locale.US, "%d м", distanceMeters) : "";
+        String duration = durationSeconds > 0
+                ? Math.max(1, (int) Math.ceil(durationSeconds / 60.0)) + " мин пешком" : "";
+        if (!distance.isEmpty() && !duration.isEmpty()) return distance + " · " + duration;
+        return distance.isEmpty() ? duration : distance;
+    }
+}

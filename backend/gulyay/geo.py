@@ -821,6 +821,51 @@ class DgisGeoProvider:
                 return True
         return False
 
+    def search_partner_branches_by_name(
+            self, city_id: str, search_name: str,
+            origin: tuple[float, float]) -> list[PartnerBranch]:
+        """Search nearby real branches by network name; never infer partnership."""
+        center = self.resolve_city_center(city_id)
+        lat, lon = round(origin[0], 3), round(origin[1], 3)
+        items = self._places(
+            request_type="partner_discovery", q=search_name,
+            type="branch", locale="ru_RU",
+            point=f"{lon:.3f},{lat:.3f}", location=f"{lon:.3f},{lat:.3f}",
+            radius=5000, sort="distance", page_size=20,
+            fields=("items.point,items.brand,items.schedule,items.is_routing_available,"
+                    "items.adm_div,items.city_alias"),
+        )
+        result: list[PartnerBranch] = []
+        seen: set[str] = set()
+        for item in items:
+            point = item.get("point")
+            place_id = str(item.get("id", "")).strip()
+            name = str(item.get("name", "")).strip()
+            if (not place_id or place_id in seen or not name
+                    or not _valid_point(point)
+                    or item.get("is_routing_available") is False
+                    or not _belongs_to_city(item, city_id, center)):
+                continue
+            raw = item.get("brand")
+            rows = raw if isinstance(raw, list) else [raw]
+            brands = {str(v.get("name", "")).strip() for v in rows
+                      if isinstance(v, dict) and str(v.get("name", "")).strip()}
+            if brands:
+                if len(brands) != 1 or not _brand_names_match(search_name, next(iter(brands))):
+                    continue
+            elif not _partner_branch_name_matches(search_name, name):
+                continue
+            brand = _item_brand(item)
+            schedule = item.get("schedule")
+            result.append(PartnerBranch(
+                dgis_place_id=place_id, dgis_brand_id=brand[0] if brand else "",
+                name=name, lat=float(point["lat"]), lon=float(point["lon"]),
+                schedule=schedule if isinstance(schedule, dict) else {},
+            ))
+            seen.add(place_id)
+        return result
+
+
     def search_partner_branches(self, city_id: str, dgis_brand_id: str,
                                 origin: tuple[float, float]) -> list[PartnerBranch]:
         """Find only branches carrying the already verified provider brand id."""
@@ -951,6 +996,14 @@ def _item_brand(item: dict) -> tuple[str, str] | None:
         if brand_id and name:
             return brand_id, name
     return None
+
+
+def _partner_branch_name_matches(expected: str, actual: str) -> bool:
+    """Allow a network prefix followed by a branch suffix, not similar words."""
+    tokens = lambda value: re.findall(
+        r"[а-яёa-z0-9]+", value.casefold().replace("ё", "е"))
+    wanted, got = tokens(expected), tokens(actual)
+    return bool(wanted) and got[:len(wanted)] == wanted
 
 
 def _brand_names_match(expected: str, actual: str) -> bool:

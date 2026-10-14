@@ -276,6 +276,9 @@ class PartnerRegistry:
                   AND brands.partnership_status = 'ACTIVE'
                   AND brands.is_active_partner = 1
                   AND brands.partner_discovery_enabled = 1
+                  AND brands.dgis_id_status = 'VERIFIED'
+                  AND brands.dgis_brand_id IS NOT NULL
+                  AND trim(brands.dgis_brand_id) <> ''
                 ORDER BY offers.offer_id
             """, (city_id, current, current)).fetchall()
         return [CommercialOffer(
@@ -348,12 +351,14 @@ class PartnerOfferSelector:
         origin = (position.lat, position.lon)
         # Search only verified active brands, merge their nearby branches, then
         # spend a single bounded routing budget across the combined pool.
-        offers_by_name: dict[str, list[CommercialOffer]] = {}
+        grouped: dict[str, list[CommercialOffer]] = {}
         for offer in offers:
-            offers_by_name.setdefault(offer.search_query, []).append(offer)
+            group_key = offer.search_query if preview else (offer.dgis_brand_id or "")
+            grouped.setdefault(group_key, []).append(offer)
         candidates: list[tuple[float, CommercialOffer, PartnerBranch]] = []
-        for name, brand_offers in offers_by_name.items():
-            branches = self.geo.search_partner_branches_by_name(city_id, name, origin)
+        for key, brand_offers in grouped.items():
+            branches = (self.geo.search_partner_branches_by_name(city_id, key, origin)
+                        if preview else self.geo.search_partner_branches(city_id, key, origin))
             for branch in branches[:BRANCHES_PER_BRAND_LIMIT]:
                 direct_distance = _haversine(origin, (branch.lat, branch.lon))
                 if direct_distance > GEOGRAPHIC_PREFILTER_METERS:

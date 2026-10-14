@@ -146,6 +146,7 @@ public final class MapActivity extends ComponentActivity {
     private TextView visitingNextTitle;
     private TextView visitingNextMeta;
     private LinearLayout partnerOfferCard;
+    private TextView partnerDisclosure;
     private TextView partnerOfferView;
     private Button partnerOfferButton;
     private boolean compactScreen;
@@ -365,7 +366,7 @@ public final class MapActivity extends ComponentActivity {
         partnerOfferCard.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 11),
                 UiKit.dp(this, 14), UiKit.dp(this, 11));
         partnerOfferCard.setBackground(UiKit.rounded(0xFFFFF6DF, 14, this));
-        TextView partnerDisclosure = UiKit.label(
+        partnerDisclosure = UiKit.label(
                 this, "ПАРТНЁРСКОЕ ПРЕДЛОЖЕНИЕ", 11, UiKit.RED_SOFT);
         partnerDisclosure.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         partnerOfferCard.addView(partnerDisclosure);
@@ -1625,6 +1626,7 @@ public final class MapActivity extends ComponentActivity {
         if (!VisitingPresentation.shouldShowPartnerOffer(offer)) {
             partnerOfferView.setText("");
             partnerOfferButton.setText("Открыть в 2ГИС");
+            partnerDisclosure.setText("");
             partnerOfferCard.setVisibility(View.GONE);
             return;
         }
@@ -1634,6 +1636,7 @@ public final class MapActivity extends ComponentActivity {
             details += "\n" + offer.description;
         }
         partnerOfferView.setText(details);
+        partnerDisclosure.setText(offer.disclosure);
         partnerOfferButton.setText(offer.actionLabel);
         partnerOfferCard.setVisibility(View.VISIBLE);
     }

@@ -28,10 +28,11 @@ final class VisitingPresentation {
         }
 
         static PartnerOffer from(ApiClient.PartnerOffer offer) {
-            if (offer == null || !offer.commercial) return null;
+            if (offer == null) return null;
             return new PartnerOffer(
                     offer.title, offer.description, offer.venueName,
-                    offer.walkingMinutes, "Партнёрское предложение",
+                    offer.walkingMinutes, offer.commercial
+                            ? "Партнёрское предложение" : "ТЕСТОВЫЙ ПОИСК · НЕ РЕКЛАМА",
                     offer.actionLabel, offer.actionUrl);
         }
     }

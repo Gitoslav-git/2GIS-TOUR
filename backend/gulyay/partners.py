@@ -7,6 +7,7 @@ activated the registry row, and inserted a currently active offer.
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -32,6 +33,16 @@ PARTNER_BRANDS = (
     ("chaihona1", "Чайхона №1 (Тимура Ланского)", "RESTAURANT",
      "Чайхона №1 Тимура Ланского"),
     ("syrovarnya", "Сыроварня", "RESTAURANT", "Сыроварня"),
+)
+
+NAME_SEARCH_PILOT = (
+    ("drinkit", "Дринкит", "COFFEE"),
+    ("surf", "Surf Coffee", "COFFEE"),
+    ("oneprice", "One Price Coffee", "COFFEE"),
+    ("thebull", "THE БЫК", "RESTAURANT"),
+    ("tanuki", "Тануки", "RESTAURANT"),
+    ("frank", "FRANK by Баста", "RESTAURANT"),
+    ("syrovarnya", "Сыроварня", "RESTAURANT"),
 )
 
 MAX_WALKING_MINUTES = {"COFFEE": 25, "RESTAURANT": 25}
@@ -63,7 +74,8 @@ class CommercialOffer:
     partner_brand_id: str
     city_id: str
     segment: str
-    dgis_brand_id: str
+    dgis_brand_id: str | None
+    search_query: str
     title: str
     description: str
     valid_from: datetime
@@ -253,7 +265,7 @@ class PartnerRegistry:
         current = _utc_text(moment)
         with self._lock:
             rows = self._connection.execute("""
-                SELECT offers.*, brands.segment, brands.dgis_brand_id
+                SELECT offers.*, brands.segment, brands.initial_search_q, brands.dgis_brand_id
                 FROM partner_offers AS offers
                 JOIN partner_brand_registry AS brands
                   ON brands.partner_brand_id = offers.partner_brand_id
@@ -272,7 +284,8 @@ class PartnerRegistry:
         return [CommercialOffer(
             offer_id=row["offer_id"], partner_brand_id=row["partner_brand_id"],
             city_id=row["city_id"], segment=row["segment"],
-            dgis_brand_id=row["dgis_brand_id"], title=row["title"],
+            dgis_brand_id=row["dgis_brand_id"],
+            search_query=row["initial_search_q"], title=row["title"],
             description=row["description"],
             valid_from=_parse_utc(row["valid_from"]),
             valid_until=_parse_utc(row["valid_until"]),
@@ -296,6 +309,17 @@ class PartnerRegistry:
         )
 
 
+def _name_search_preview_offers(moment: datetime) -> list[CommercialOffer]:
+    """Transient preview only; these networks are not commercial partners."""
+    return [CommercialOffer(
+        offer_id=f"preview_{partner_id}_moscow", partner_brand_id=partner_id,
+        city_id="moscow", segment=segment, dgis_brand_id=None,
+        search_query=name, title="Зайти по пути?",
+        description="Тестовый поиск заведений. Не реклама и не партнёрская акция.",
+        valid_from=moment, valid_until=moment, button_text="Открыть в 2ГИС",
+    ) for partner_id, name, segment in NAME_SEARCH_PILOT]
+
+
 class PartnerOfferSelector:
     def __init__(self, registry: PartnerRegistry, geo: DgisGeoProvider):
         self.registry = registry
@@ -309,7 +333,11 @@ class PartnerOfferSelector:
             return None
 
         # This database check intentionally precedes every 2GIS operation.
-        offers = self.registry.eligible_offers(city_id, moment)
+        preview = (city_id == "moscow"
+                   and os.getenv("GULYAY_ENV") in {"test", "development"}
+                   and os.getenv("GULYAY_PARTNER_PREVIEW") == "1")
+        offers = (_name_search_preview_offers(moment) if preview else
+                  self.registry.eligible_offers(city_id, moment))
         if not offers:
             return None
         position = state.lastPosition
@@ -323,12 +351,14 @@ class PartnerOfferSelector:
         origin = (position.lat, position.lon)
         # Search only verified active brands, merge their nearby branches, then
         # spend a single bounded routing budget across the combined pool.
-        offers_by_brand: dict[str, list[CommercialOffer]] = {}
+        grouped: dict[str, list[CommercialOffer]] = {}
         for offer in offers:
-            offers_by_brand.setdefault(offer.dgis_brand_id, []).append(offer)
+            group_key = offer.search_query if preview else (offer.dgis_brand_id or "")
+            grouped.setdefault(group_key, []).append(offer)
         candidates: list[tuple[float, CommercialOffer, PartnerBranch]] = []
-        for brand_id, brand_offers in offers_by_brand.items():
-            branches = self.geo.search_partner_branches(city_id, brand_id, origin)
+        for key, brand_offers in grouped.items():
+            branches = (self.geo.search_partner_branches_by_name(city_id, key, origin)
+                        if preview else self.geo.search_partner_branches(city_id, key, origin))
             for branch in branches[:BRANCHES_PER_BRAND_LIMIT]:
                 direct_distance = _haversine(origin, (branch.lat, branch.lon))
                 if direct_distance > GEOGRAPHIC_PREFILTER_METERS:
@@ -381,7 +411,7 @@ class PartnerOfferSelector:
             description=offer.description,
             venueName=branch.name,
             walkingMinutes=minutes,
-            isCommercial=True,
+            isCommercial=not preview,
             action=PartnerOfferAction(
                 type="OPEN_DGIS", label=offer.button_text,
                 url=f"https://2gis.ru/{city_id}/firm/{safe_place_id}",

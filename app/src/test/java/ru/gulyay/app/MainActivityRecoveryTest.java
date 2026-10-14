@@ -244,11 +244,13 @@ public class MainActivityRecoveryTest {
                 new VisitingPresentation.PartnerOffer(
                         "Зайти", "", "Cofix", 4, "Партнёрское предложение",
                         "Открыть", "https://example.com")));
-        assertFalse(VisitingPresentation.shouldShowPartnerOffer(
+        VisitingPresentation.PartnerOffer preview =
                 VisitingPresentation.PartnerOffer.from(new ApiClient.PartnerOffer(
-                        "offer", "cofix", "branch-1", "Зайти", "Без скидок",
-                        "Cofix", 4, false, "Открыть",
-                        "https://2gis.ru/moscow/firm/branch-1"))));
+                        "preview", "drinkit", "branch-1", "Зайти", "Не реклама",
+                        "Дринкит", 4, false, "Открыть",
+                        "https://2gis.ru/moscow/firm/branch-1"));
+        assertTrue(VisitingPresentation.shouldShowPartnerOffer(preview));
+        assertEquals("ТЕСТОВЫЙ ПОИСК · НЕ РЕКЛАМА", preview.disclosure);
     }
 
     @Test public void stalePartnerOfferResponseCannotCrossPointOrWalkState() {

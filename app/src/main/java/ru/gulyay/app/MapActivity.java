@@ -1645,12 +1645,17 @@ public final class MapActivity extends ComponentActivity {
             return;
         }
         String key = PartnerOfferRequestPolicy.key(walk.walkId, walk.currentPointOrder);
-        if (key.equals(routeViewModel.partnerOfferKey)) {
+        long nowElapsed = SystemClock.elapsedRealtime();
+        if (!PartnerOfferRequestPolicy.shouldRequest(
+                key, routeViewModel.partnerOfferKey,
+                routeViewModel.partnerOffer != null, nowElapsed,
+                routeViewModel.partnerOfferLastRequestElapsedMillis)) {
             renderPartnerOffer(VisitingPresentation.PartnerOffer.from(
                     routeViewModel.partnerOffer));
             return;
         }
         routeViewModel.partnerOfferKey = key;
+        routeViewModel.partnerOfferLastRequestElapsedMillis = nowElapsed;
         routeViewModel.partnerOffer = null;
         renderPartnerOffer(null);
         int generation = ++partnerOfferRequestGeneration;
@@ -1671,6 +1676,7 @@ public final class MapActivity extends ComponentActivity {
                         walk.currentPointOrder, partnerOfferRequestGeneration)) return;
                 routeViewModel.partnerOffer = finalResponse.success
                         ? finalResponse.offer : null;
+                routeViewModel.partnerOfferLastStatus = finalResponse.status;
                 renderPartnerOffer(VisitingPresentation.PartnerOffer.from(
                         routeViewModel.partnerOffer));
             });
@@ -1680,6 +1686,8 @@ public final class MapActivity extends ComponentActivity {
     private void invalidatePartnerOffer() {
         partnerOfferRequestGeneration++;
         routeViewModel.partnerOfferKey = null;
+        routeViewModel.partnerOfferLastRequestElapsedMillis = 0L;
+        routeViewModel.partnerOfferLastStatus = null;
         routeViewModel.partnerOffer = null;
         renderPartnerOffer(null);
     }
@@ -2796,6 +2804,8 @@ public final class MapActivity extends ComponentActivity {
         int guidancePointOrder;
         int guidancePathIndex;
         String partnerOfferKey;
+        long partnerOfferLastRequestElapsedMillis;
+        String partnerOfferLastStatus;
         ApiClient.PartnerOffer partnerOffer;
     }
 }

@@ -176,6 +176,17 @@ class PartnerRegistry:
     def confirm_brand_id(self, partner_brand_id: str, city_id: str,
                          dgis_brand_id: str) -> bool:
         with self._lock, self._connection:
+            existing = self._connection.execute("""
+                SELECT dgis_brand_id, dgis_id_status
+                FROM partner_brand_registry
+                WHERE partner_brand_id = ? AND city_id = ?
+            """, (partner_brand_id, city_id)).fetchone()
+            if existing is None:
+                return False
+            if (existing["dgis_id_status"] == "VERIFIED"
+                    and existing["dgis_brand_id"]
+                    and existing["dgis_brand_id"] != dgis_brand_id):
+                return False
             cursor = self._connection.execute("""
                 UPDATE partner_brand_registry
                 SET dgis_brand_id = ?, dgis_id_status = 'VERIFIED',

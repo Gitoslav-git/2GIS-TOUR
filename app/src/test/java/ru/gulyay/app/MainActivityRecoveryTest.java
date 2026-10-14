@@ -265,6 +265,16 @@ public class MainActivityRecoveryTest {
                 key, 3, "walk", "ACTIVE", "VISITING", 1, 4));
     }
 
+    @Test public void missingPartnerOfferRetriesOnlyAfterFreshMinuteSlot() {
+        String key = PartnerOfferRequestPolicy.key("walk", 1);
+        assertTrue(PartnerOfferRequestPolicy.shouldRequest(key, null, false, 1_000L, 0L));
+        assertFalse(PartnerOfferRequestPolicy.shouldRequest(key, key, false, 60_999L, 1_000L));
+        assertTrue(PartnerOfferRequestPolicy.shouldRequest(key, key, false, 61_000L, 1_000L));
+        assertFalse(PartnerOfferRequestPolicy.shouldRequest(key, key, true, 120_000L, 1_000L));
+        assertTrue(PartnerOfferRequestPolicy.shouldRequest(
+                PartnerOfferRequestPolicy.key("walk", 2), key, false, 2_000L, 1_000L));
+    }
+
     @Test public void visitingPointListOnlyRendersWhenItsStructureChanges() {
         ApiClient.Result route = visitingRoute();
         String initial = VisitingPresentation.pointListRenderKey(route, 1, true);

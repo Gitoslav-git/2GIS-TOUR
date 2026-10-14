@@ -255,6 +255,86 @@ def test_admin_discovery_does_not_guess_and_confirmation_revalidates_id():
     ) is False
 
 
+def test_batch_reference_lookup_extracts_brand_id_and_never_substitutes_org_id():
+    clear_geo_caches()
+    requests = []
+
+    def response(request):
+        requests.append(request)
+        items = [
+            {"id": "branch-with-brand", "name": "Cofix", "city_alias": "moscow",
+             "brand": {"id": "brand-cofix", "name": "Cofix"},
+             "org": {"id": "org-cofix", "name": "Cofix LLC"},
+             "point": {"lat": 55.75, "lon": 37.61}},
+            {"id": "branch-with-org-only", "name": "Restaurant", "city_alias": "moscow",
+             "org": {"id": "org-only", "name": "Restaurant LLC"},
+             "point": {"lat": 55.76, "lon": 37.62}},
+        ]
+        return httpx.Response(200, json={"meta": {"code": 200},
+                                         "result": {"items": items}})
+
+    provider = DgisGeoProvider("places", "routing", httpx.MockTransport(response))
+    found = provider.resolve_partner_brand_references(
+        ["branch-with-brand", "branch-with-org-only"],
+    )
+    assert found["branch-with-brand"].dgis_brand_id == "brand-cofix"
+    assert found["branch-with-brand"].dgis_org_id == "org-cofix"
+    assert found["branch-with-org-only"].dgis_brand_id is None
+    assert found["branch-with-org-only"].dgis_org_id == "org-only"
+    assert len(requests) == 1
+    assert requests[0].url.path.endswith("/3.0/items/byid")
+    assert requests[0].url.params["id"] == "branch-with-brand,branch-with-org-only"
+    assert "items.brand" in requests[0].url.params["fields"]
+
+
+def test_reference_match_rejects_wrong_city_and_ambiguous_brand_name():
+    clear_geo_caches()
+
+    def response(request):
+        return httpx.Response(200, json={"meta": {"code": 200}, "result": {"items": [
+            {"id": "city", "name": "Москва", "point": {"lat": 55.7558, "lon": 37.6173}},
+        ]}})
+
+    provider = DgisGeoProvider("places", "routing", httpx.MockTransport(response))
+    from gulyay.geo import PartnerBrandReference
+    wrong_city = PartnerBrandReference(
+        "branch", "Cofix", "brand", "Cofix", "org", "tula", 54.19, 37.61, 1,
+    )
+    wrong_name = PartnerBrandReference(
+        "branch", "Другое", "brand", "Другое", "org", "moscow", 55.75, 37.61, 1,
+    )
+    assert provider.partner_reference_matches(wrong_city, "moscow", "Cofix") is False
+    assert provider.partner_reference_matches(wrong_name, "moscow", "Cofix") is False
+
+
+def test_batch_reference_lookup_rejects_multiple_brand_values():
+    clear_geo_caches()
+
+    def response(request):
+        item = {"id": "ambiguous", "name": "Shared branch", "city_alias": "moscow",
+                "brand": [{"id": "brand-one", "name": "One"},
+                          {"id": "brand-two", "name": "Two"}],
+                "point": {"lat": 55.75, "lon": 37.61}}
+        return httpx.Response(200, json={"meta": {"code": 200},
+                                         "result": {"items": [item]}})
+
+    provider = DgisGeoProvider("places", "routing", httpx.MockTransport(response))
+    reference = provider.resolve_partner_brand_references(["ambiguous"])["ambiguous"]
+    assert reference.brand_count == 2
+    assert reference.dgis_brand_id is None
+    assert reference.dgis_org_id is None
+
+
+def test_verified_brand_id_cannot_be_silently_replaced():
+    registry = PartnerRegistry(":memory:")
+    assert registry.confirm_brand_id("cofix", "moscow", "brand-one") is True
+    assert registry.confirm_brand_id("cofix", "moscow", "brand-two") is False
+    brand = registry.get_brand("cofix", "moscow")
+    assert brand.dgis_brand_id == "brand-one"
+    assert brand.dgis_id_status == "VERIFIED"
+    registry.close()
+
+
 def route_for_api():
     return Route(
         routeId=uuid4(), routeVersion=1, status="READY", cityId="moscow",

@@ -71,18 +71,48 @@ Backend проверяет владельца прогулки, `status=ACTIVE`,
 
 ## Проверка идентификаторов 2ГИС
 
+`partner_admin` и backend используют один путь: переменную `GULYAY_DB_PATH`,
+а при её отсутствии — `backend/data/gulyay.sqlite3`. Для production-проверки
+задайте путь явно и не создавайте отдельную базу.
+
 Из каталога `backend`:
 
 ```powershell
 python -m gulyay.partner_admin list
 python -m gulyay.partner_admin discover --city moscow --brand cofix
+python -m gulyay.partner_admin preview-references --city moscow |
+  Tee-Object -FilePath partner-brand-preview.jsonl
 python -m gulyay.partner_admin confirm --city moscow --brand cofix --dgis-brand-id <ID>
 ```
 
 `discover` использует `DGIS_PLACES_API_KEY`, выводит все найденные варианты и
 ничего не сохраняет. `confirm` повторно запрашивает филиалы по выбранному ID,
 проверяет город, имя и `items.brand.id`, после чего сохраняет ID. Команда не
-активирует коммерческий статус.
+активирует коммерческий статус и откажется молча заменить другой уже
+подтверждённый ID.
+
+`preview-references` выполняет один пакетный запрос `/3.0/items/byid` для девяти
+справочных филиалов, извлекает исключительно `items.brand.id`, затем повторно
+проверяет каждый ID поиском московских филиалов. `items.org.id` выводится только
+для аудита и никогда не используется вместо brand ID. Статусы
+`VERIFIED_CANDIDATE`, `AMBIGUOUS` и `NOT_FOUND` в JSONL являются результатом
+предварительного просмотра: команда не меняет БД. Справочные branch ID находятся
+только в операторской CLI и не участвуют в поиске предложения во время прогулки.
+
+Рекомендуемый production-запуск:
+
+```powershell
+$env:DGIS_PLACES_API_KEY='<существующий ключ>'
+$env:GULYAY_DB_PATH=(Resolve-Path '.\data\gulyay.sqlite3').Path
+python -m gulyay.partner_admin preview-references --city moscow |
+  Tee-Object -FilePath partner-brand-preview.jsonl
+```
+
+После ручного просмотра выполнять `confirm` отдельно для каждой строки со
+статусом `VERIFIED_CANDIDATE`. После этого проверить `list`: допустимо изменение
+только `dgis_brand_id` и `dgis_id_status=VERIFIED`; поля
+`partnership_status=CANDIDATE`, `is_active_partner=false` и
+`partner_discovery_enabled=false` должны сохраниться.
 
 ## Ручная проверка production-состояния
 
@@ -120,3 +150,9 @@ python -m gulyay.partner_test_fixture --db-path $env:GULYAY_DB_PATH --disable
 При переходе на другую точку, паузе или завершении прогулки карточка немедленно
 скрывается. Запоздалый ответ от старой точки игнорируется по сочетанию
 `walkId + pointOrder + requestGeneration`.
+
+После ответа без предложения или временной ошибки Android может повторить
+запрос на той же точке только после нового синхронизированного состояния
+прогулки и не чаще одного раза в 60 секунд. Фоновый цикл опроса не создаётся.
+До наличия активного предложения повторный endpoint-вызов завершается локальной
+проверкой БД и не обращается к 2ГИС.

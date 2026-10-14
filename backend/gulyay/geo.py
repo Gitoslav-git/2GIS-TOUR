@@ -73,6 +73,19 @@ class PartnerBrandCandidate:
 
 
 @dataclass(frozen=True)
+class PartnerBrandReference:
+    dgis_place_id: str
+    place_name: str
+    dgis_brand_id: str | None
+    brand_name: str | None
+    dgis_org_id: str | None
+    city_alias: str | None
+    lat: float | None
+    lon: float | None
+    brand_count: int
+
+
+@dataclass(frozen=True)
 class PartnerBranch:
     dgis_place_id: str
     dgis_brand_id: str
@@ -711,7 +724,14 @@ class DgisGeoProvider:
         for item in items:
             if not _belongs_to_city(item, city_id, center):
                 continue
-            brand = _item_brand(item)
+            brand_value = item.get("brand")
+            brand_rows = brand_value if isinstance(brand_value, list) else [brand_value]
+            brands = {(str(row.get("id", "")).strip(),
+                       str(row.get("name", "")).strip())
+                      for row in brand_rows if isinstance(row, dict)
+                      and str(row.get("id", "")).strip()
+                      and str(row.get("name", "")).strip()}
+            brand = next(iter(brands)) if len(brands) == 1 else None
             if brand is None:
                 continue
             brand_id, brand_name = brand
@@ -725,6 +745,63 @@ class DgisGeoProvider:
         ) for brand_id, (name, count) in found.items()),
                       key=lambda candidate: (not candidate.name_matches,
                                              candidate.brand_name.casefold()))
+
+    def resolve_partner_brand_references(
+            self, place_ids: list[str]) -> dict[str, PartnerBrandReference]:
+        """Resolve known branch IDs in one request without guessing an identity."""
+        clean_ids = [str(value).strip() for value in place_ids if str(value).strip()]
+        if not clean_ids or len(clean_ids) > 100 or len(set(clean_ids)) != len(clean_ids):
+            raise GeoPlaceNotFound()
+        items = self._places_from(
+            PLACES_BY_ID_URL, request_type="partner_admin",
+            id=",".join(clean_ids), locale="ru_RU",
+            fields="items.brand,items.org,items.point,items.city_alias,items.adm_div",
+        )
+        result: dict[str, PartnerBrandReference] = {}
+        expected = set(clean_ids)
+        for item in items:
+            place_id = str(item.get("id", "")).strip()
+            if place_id not in expected:
+                continue
+            brand_value = item.get("brand")
+            brand_rows = brand_value if isinstance(brand_value, list) else [brand_value]
+            brands = {(str(row.get("id", "")).strip(),
+                       str(row.get("name", "")).strip())
+                      for row in brand_rows if isinstance(row, dict)
+                      and str(row.get("id", "")).strip()
+                      and str(row.get("name", "")).strip()}
+            brand = next(iter(brands)) if len(brands) == 1 else None
+            org = item.get("org")
+            org_id = (str(org.get("id", "")).strip() or None
+                      if isinstance(org, dict) else None)
+            point = item.get("point")
+            result[place_id] = PartnerBrandReference(
+                dgis_place_id=place_id,
+                place_name=str(item.get("name", "")).strip(),
+                dgis_brand_id=None if brand is None else brand[0],
+                brand_name=None if brand is None else brand[1],
+                dgis_org_id=org_id,
+                city_alias=str(item.get("city_alias", "")).strip() or None,
+                lat=float(point["lat"]) if _valid_point(point) else None,
+                lon=float(point["lon"]) if _valid_point(point) else None,
+                brand_count=len(brands),
+            )
+        return result
+
+    def partner_reference_matches(self, reference: PartnerBrandReference,
+                                  city_id: str, expected_name: str) -> bool:
+        """Check branch city/name/brand; org IDs are deliberately never accepted."""
+        if (reference.brand_count != 1 or not reference.dgis_brand_id
+                or not reference.brand_name):
+            return False
+        item: dict = {}
+        if reference.city_alias:
+            item["city_alias"] = reference.city_alias
+        if reference.lat is not None and reference.lon is not None:
+            item["point"] = {"lat": reference.lat, "lon": reference.lon}
+        center = self.resolve_city_center(city_id)
+        return (_belongs_to_city(item, city_id, center)
+                and _brand_names_match(expected_name, reference.brand_name))
 
     def verify_partner_brand_id(self, city_id: str, expected_name: str,
                                 dgis_brand_id: str) -> bool:

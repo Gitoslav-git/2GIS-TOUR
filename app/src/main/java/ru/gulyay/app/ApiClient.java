@@ -455,10 +455,17 @@ final class ApiClient {
 
     static final class PartnerOfferResult {
         final boolean success;
+        final String status;
         final PartnerOffer offer;
 
         PartnerOfferResult(boolean success, PartnerOffer offer) {
+            this(success, success ? (offer == null ? "NONE" : "AVAILABLE") : "CLIENT_ERROR",
+                    offer);
+        }
+
+        PartnerOfferResult(boolean success, String status, PartnerOffer offer) {
             this.success = success;
+            this.status = status;
             this.offer = offer;
         }
     }
@@ -511,8 +518,9 @@ final class ApiClient {
             BackendConfig.logResponse(method, path, status, startedAt);
             JSONObject response = readJson(connection, status);
             if (status >= 400) return new PartnerOfferResult(false, null);
+            String offerStatus = response.optString("status", "NONE");
             JSONObject value = response.optJSONObject("offer");
-            if (value == null) return new PartnerOfferResult(true, null);
+            if (value == null) return new PartnerOfferResult(true, offerStatus, null);
             JSONObject action = value.getJSONObject("action");
             PartnerOffer offer = new PartnerOffer(
                     value.getString("offerId"), value.getString("partnerBrandId"),
@@ -520,7 +528,7 @@ final class ApiClient {
                     value.getString("description"), value.getString("venueName"),
                     value.getInt("walkingMinutes"), value.optBoolean("isCommercial", false),
                     action.getString("label"), action.getString("url"));
-            return new PartnerOfferResult(true, offer);
+            return new PartnerOfferResult(true, offerStatus, offer);
         } catch (Exception error) {
             BackendConfig.logFailure(method, path, startedAt, error);
             throw error;

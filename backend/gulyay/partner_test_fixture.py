@@ -1,4 +1,4 @@
-"""Create or disable the approved Cofix fixture in an isolated test DB only."""
+"""Create or disable synthetic partner fixtures in an isolated test DB only."""
 from __future__ import annotations
 
 import argparse
@@ -8,14 +8,34 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .geo import DgisGeoProvider
-from .partners import PartnerRegistry
+from .partners import PARTNER_BRANDS, PartnerRegistry
+
+
+BRAND_IDS = tuple(row[0] for row in PARTNER_BRANDS)
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--db-path", required=True)
     result.add_argument("--disable", action="store_true")
+    selection = result.add_mutually_exclusive_group()
+    selection.add_argument("--brand", choices=BRAND_IDS)
+    selection.add_argument("--all", action="store_true")
+    result.add_argument("--brand-id", action="append", default=[],
+                        metavar="PARTNER_BRAND_ID=DGIS_BRAND_ID")
+    # Backward-compatible single-Cofix form.
     result.add_argument("--dgis-brand-id")
+    return result
+
+
+def _brand_id_map(values: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        partner_id, separator, dgis_id = value.partition("=")
+        if (not separator or partner_id not in BRAND_IDS or not dgis_id.strip()
+                or partner_id in result):
+            raise SystemExit("--brand-id must be a unique known PARTNER=DGIS value")
+        result[partner_id] = dgis_id.strip()
     return result
 
 
@@ -30,35 +50,47 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("Refusing fixture: --db-path must not be the production DB")
     registry = PartnerRegistry(path)
     try:
+        selected = list(BRAND_IDS) if args.all else [args.brand or "cofix"]
         if args.disable:
-            registry.set_brand_commercial_state(
-                "cofix", "moscow", "CANDIDATE", False, False,
-            )
-            print("Synthetic Cofix fixture disabled")
+            for partner_id in selected:
+                registry.set_brand_commercial_state(
+                    partner_id, "moscow", "CANDIDATE", False, False,
+                )
+            print("Synthetic partner fixture disabled: " + ", ".join(selected))
             return 0
-        if not args.dgis_brand_id:
-            raise SystemExit("--dgis-brand-id is required when enabling the fixture")
-        brand = registry.get_brand("cofix", "moscow")
+        supplied = _brand_id_map(args.brand_id)
+        if args.dgis_brand_id:
+            if len(selected) != 1 or supplied:
+                raise SystemExit("--dgis-brand-id is only for one brand and cannot be combined")
+            supplied[selected[0]] = args.dgis_brand_id
+        missing = [partner_id for partner_id in selected if partner_id not in supplied]
+        if missing:
+            raise SystemExit("Missing --brand-id for: " + ", ".join(missing))
         provider = DgisGeoProvider()
-        if brand is None or not provider.verify_partner_brand_id(
-                "moscow", brand.initial_search_q, args.dgis_brand_id):
-            raise SystemExit("Cofix brand id did not pass 2GIS verification")
-        registry.confirm_brand_id("cofix", "moscow", args.dgis_brand_id)
-        registry.set_brand_commercial_state(
-            "cofix", "moscow", "ACTIVE", True, True,
-        )
+        for partner_id in selected:
+            brand = registry.get_brand(partner_id, "moscow")
+            if brand is None or not provider.verify_partner_brand_id(
+                    "moscow", brand.initial_search_q, supplied[partner_id]):
+                raise SystemExit(f"{partner_id} brand id did not pass 2GIS verification")
         moscow = ZoneInfo("Europe/Moscow")
-        registry.save_offer(
-            offer_id="test_cofix_moscow_001", partner_brand_id="cofix",
-            city_id="moscow", title="Зайти за кофе?",
-            description=("Обычное посещение кофейни. Скидки, бонусы и "
-                         "промокоды не предусмотрены."),
-            valid_from=datetime(2026, 10, 13, 0, 0, tzinfo=moscow),
-            valid_until=datetime(2026, 12, 31, 23, 59, 59, tzinfo=moscow),
-            timezone_name="Europe/Moscow", button_text="Открыть в 2ГИС",
-            status="ACTIVE",
-        )
-        print(f"Synthetic Cofix fixture enabled only in {path}")
+        for partner_id in selected:
+            registry.confirm_brand_id(partner_id, "moscow", supplied[partner_id])
+            registry.set_brand_commercial_state(
+                partner_id, "moscow", "ACTIVE", True, True,
+            )
+            registry.save_offer(
+                offer_id=f"test_{partner_id}_moscow_001",
+                partner_brand_id=partner_id, city_id="moscow",
+                title="Зайти по пути?",
+                description=("Обычное посещение заведения. Скидки, бонусы и "
+                             "промокоды не предусмотрены."),
+                valid_from=datetime(2026, 10, 13, 0, 0, tzinfo=moscow),
+                valid_until=datetime(2026, 12, 31, 23, 59, 59, tzinfo=moscow),
+                timezone_name="Europe/Moscow", button_text="Открыть в 2ГИС",
+                status="ACTIVE",
+            )
+        print(f"Synthetic partner fixture enabled only in {path}: "
+              + ", ".join(selected))
         return 0
     finally:
         registry.close()

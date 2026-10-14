@@ -66,8 +66,17 @@ Backend проверяет владельца прогулки, `status=ACTIVE`,
 
 Поиск филиалов выполняется только по подтверждённому `brand_id`. Для ближайших
 кандидатов проверяются принадлежность бренду, город, расписание и реальный
-пешеходный маршрут. Лимиты в одну сторону: COFFEE — 10 минут (предпочтительно
-до 5), RESTAURANT — 20 минут (предпочтительно до 15).
+пешеходный маршрут. Для COFFEE и RESTAURANT действует одинаковый жёсткий лимит
+25 минут в одну сторону и предпочтение до 20 минут. Категория не даёт
+безусловного приоритета: выигрывает ближайшее доступное действующее предложение.
+
+Поиск выполняется только для активных подтверждённых брендов с действующим
+приглашением. Филиалы всех таких сетей объединяются в один пул, явно далёкие
+отсеиваются по географическому расстоянию, а Routing API вызывается максимум
+пять раз суммарно на одно определение предложения. Время и окончательный выбор
+всегда основаны на пешеходном `durationSeconds`, а не на прямом расстоянии.
+Координаты Places-поиска округляются до GPS-ячейки около 110 м, чтобы штатный
+TTL-кэш поглощал дрожание позиции и не создавал новый поиск при каждом fix.
 
 ## Проверка идентификаторов 2ГИС
 
@@ -127,16 +136,30 @@ python -m gulyay.partner_admin preview-references --city moscow |
 
 ## Изолированный позитивный сценарий
 
-Нужны тестовая БД и вручную подтверждённый ID Cofix. Команда имеет две защиты:
+Нужны тестовая БД и вручную подтверждённые brand ID. Можно включить одну из
+девяти сетей или все сети. Команда имеет две защиты:
 требует `GULYAY_ENV=test` и отказывается изменять штатный файл
 `backend/data/gulyay.sqlite3`.
 
 ```powershell
 $env:GULYAY_ENV='test'
 $env:GULYAY_DB_PATH="$env:TEMP\gulyay-partner-test.sqlite3"
-python -m gulyay.partner_test_fixture --db-path $env:GULYAY_DB_PATH --dgis-brand-id <ID>
+python -m gulyay.partner_test_fixture --db-path $env:GULYAY_DB_PATH `
+  --brand cofix --brand-id cofix=<ID>
 python -m uvicorn gulyay.api:app --host 0.0.0.0 --port 8000
 ```
+
+Для всех девяти сетей передаются девять явно проверенных значений:
+
+```powershell
+python -m gulyay.partner_test_fixture --db-path $env:GULYAY_DB_PATH --all `
+  --brand-id cofix=<ID> --brand-id surf=<ID> --brand-id drinkit=<ID> `
+  --brand-id oneprice=<ID> --brand-id thebull=<ID> --brand-id tanuki=<ID> `
+  --brand-id frank=<ID> --brand-id chaihona1=<ID> --brand-id syrovarnya=<ID>
+```
+
+Каждый ID повторно проверяется через Places API до изменения тестовой БД. Это
+синтетические приглашения для технической проверки, а не коммерческие акции.
 
 В `VISITING` карточка должна показать маркировку, конкретный филиал, проверенное
 время пешком и кнопку открытия 2ГИС. Она не добавляет филиал в маршрут.
@@ -144,7 +167,7 @@ python -m uvicorn gulyay.api:app --host 0.0.0.0 --port 8000
 После проверки:
 
 ```powershell
-python -m gulyay.partner_test_fixture --db-path $env:GULYAY_DB_PATH --disable
+python -m gulyay.partner_test_fixture --db-path $env:GULYAY_DB_PATH --all --disable
 ```
 
 При переходе на другую точку, паузе или завершении прогулки карточка немедленно

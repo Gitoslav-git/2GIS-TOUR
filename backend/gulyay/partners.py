@@ -34,11 +34,13 @@ PARTNER_BRANDS = (
     ("syrovarnya", "Сыроварня", "RESTAURANT", "Сыроварня"),
 )
 
-MAX_WALKING_MINUTES = {"COFFEE": 10, "RESTAURANT": 20}
-PREFERRED_WALKING_MINUTES = {"COFFEE": 5, "RESTAURANT": 15}
+MAX_WALKING_MINUTES = {"COFFEE": 25, "RESTAURANT": 25}
+PREFERRED_WALKING_MINUTES = {"COFFEE": 20, "RESTAURANT": 20}
 MAX_POSITION_AGE_SECONDS = 60
 MAX_POSITION_ACCURACY_METERS = 50
+BRANCHES_PER_BRAND_LIMIT = 3
 ROUTING_CANDIDATE_LIMIT = 5
+GEOGRAPHIC_PREFILTER_METERS = 4_000
 
 
 @dataclass(frozen=True)
@@ -319,34 +321,54 @@ class PartnerOfferSelector:
             return None
 
         origin = (position.lat, position.lon)
+        # Search only verified active brands, merge their nearby branches, then
+        # spend a single bounded routing budget across the combined pool.
+        offers_by_brand: dict[str, list[CommercialOffer]] = {}
+        for offer in offers:
+            offers_by_brand.setdefault(offer.dgis_brand_id, []).append(offer)
+        candidates: list[tuple[float, CommercialOffer, PartnerBranch]] = []
+        for brand_id, brand_offers in offers_by_brand.items():
+            branches = self.geo.search_partner_branches(city_id, brand_id, origin)
+            for branch in branches[:BRANCHES_PER_BRAND_LIMIT]:
+                direct_distance = _haversine(origin, (branch.lat, branch.lon))
+                if direct_distance > GEOGRAPHIC_PREFILTER_METERS:
+                    continue
+                for offer in brand_offers:
+                    candidates.append((direct_distance, offer, branch))
+        candidates.sort(key=lambda value: (
+            value[0], value[1].offer_id, value[2].dgis_place_id,
+        ))
+
         choices: list[tuple[tuple[int, int, int, str], CommercialOffer,
                             PartnerBranch, int]] = []
-        for offer in offers:
-            branches = self.geo.search_partner_branches(
-                city_id, offer.dgis_brand_id, origin,
-            )
-            maximum = MAX_WALKING_MINUTES[offer.segment]
-            preferred = PREFERRED_WALKING_MINUTES[offer.segment]
-            for branch in branches[:ROUTING_CANDIDATE_LIMIT]:
+        routed_branches: dict[str, object] = {}
+        routing_attempts = 0
+        for _, offer, branch in candidates:
+            if branch.dgis_place_id in routed_branches:
+                leg = routed_branches[branch.dgis_place_id]
+            else:
+                if routing_attempts >= ROUTING_CANDIDATE_LIMIT:
+                    break
+                routing_attempts += 1
                 try:
                     leg = self.geo.walking_leg(
                         origin, (branch.lat, branch.lon), 0, 1,
                     )
                 except GeoRouteNotFound:
+                    routed_branches[branch.dgis_place_id] = None
                     continue
-                if leg.durationSeconds > maximum * 60:
-                    continue
-                arrival = moment.astimezone(city_timezone()) + timedelta(
-                    seconds=leg.durationSeconds,
-                )
-                if schedule_status_at(branch.schedule, arrival, 1) != "OPEN":
-                    continue
-                minutes = max(1, math.ceil(leg.durationSeconds / 60))
-                score = (
-                    int(minutes > preferred), minutes, leg.distanceMeters,
-                    branch.dgis_place_id,
-                )
-                choices.append((score, offer, branch, minutes))
+                routed_branches[branch.dgis_place_id] = leg
+            if leg is None or leg.durationSeconds > MAX_WALKING_MINUTES[offer.segment] * 60:
+                continue
+            arrival = moment.astimezone(city_timezone()) + timedelta(
+                seconds=leg.durationSeconds,
+            )
+            if schedule_status_at(branch.schedule, arrival, 1) != "OPEN":
+                continue
+            minutes = max(1, math.ceil(leg.durationSeconds / 60))
+            score = (int(minutes > PREFERRED_WALKING_MINUTES[offer.segment]),
+                     leg.durationSeconds, leg.distanceMeters, offer.offer_id)
+            choices.append((score, offer, branch, minutes))
         if not choices:
             return None
         _, offer, branch, minutes = min(choices, key=lambda choice: choice[0])
@@ -379,3 +401,11 @@ def _utc_text(value: datetime) -> str:
 
 def _parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _haversine(start: tuple[float, float], end: tuple[float, float]) -> float:
+    lat1, lon1, lat2, lon2 = map(math.radians, (*start, *end))
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    value = (math.sin(dlat / 2) ** 2
+             + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2)
+    return 6_371_000 * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))

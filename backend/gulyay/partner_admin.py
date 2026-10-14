@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(brand.__dict__, ensure_ascii=False, sort_keys=True))
             return 0
         provider = DgisGeoProvider()
+        if not provider.places_key:
+            raise SystemExit("DGIS_PLACES_API_KEY is not configured; database was not changed")
         if args.command == "preview-references":
             brands = registry.list_brands(args.city)
             if args.brand:
@@ -63,7 +65,9 @@ def main(argv: list[str] | None = None) -> int:
             for brand in brands:
                 place_id = references.get(brand.partner_brand_id)
                 item = resolved.get(place_id or "")
-                status, reason, branch_examples = "NOT_FOUND", "reference branch was not returned", []
+                status, reason, branch_examples, branch_count = (
+                    "NOT_FOUND", "reference branch was not returned", [], 0,
+                )
                 if item is not None:
                     if item.brand_count > 1:
                         status, reason = "AMBIGUOUS", "reference returned multiple items.brand values"
@@ -85,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
                             status, reason = "AMBIGUOUS", "brand_id search returned no other Moscow branches"
                         else:
                             status, reason = "VERIFIED_CANDIDATE", None
+                            branch_count = len(branches)
                             branch_examples = [branch.dgis_place_id for branch in other[:3]]
                 print(json.dumps({
                     "partner_brand_id": brand.partner_brand_id,
@@ -96,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                     "city_alias": None if item is None else item.city_alias,
                     "status": status,
                     "other_branch_examples": branch_examples,
+                    "found_branch_count": branch_count,
                     "reason": reason,
                     "database_changed": False,
                 }, ensure_ascii=False, sort_keys=True))

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from gulyay.api import (app, get_geo_provider, get_partner_registry,
@@ -10,7 +11,8 @@ from gulyay.geo import (DgisGeoProvider, GeoRouteNotFound, GeoUnavailable,
                         PartnerBranch, clear_geo_caches)
 from gulyay.models import (CreateRoute, Filters, Route, RouteLeg, RoutePoint,
                            SearchArea, WalkPosition, WalkSession, WalkState)
-from gulyay.partners import PartnerOfferSelector, PartnerRegistry
+from gulyay.partners import PARTNER_BRANDS, PartnerOfferSelector, PartnerRegistry
+from gulyay.partner_test_fixture import BRAND_IDS, _brand_id_map
 from gulyay.repository import RouteRepository
 
 
@@ -63,13 +65,15 @@ def visiting_state(*, status="ACTIVE", phase="VISITING", age_seconds=5,
     )
 
 
-def activate_test_cofix(registry: PartnerRegistry, *, status="ACTIVE") -> None:
-    assert registry.confirm_brand_id("cofix", "moscow", "verified-cofix")
+def activate_test_brand(registry: PartnerRegistry, partner_id: str,
+                        *, status="ACTIVE", active=True) -> None:
+    dgis_id = f"verified-{partner_id}"
+    assert registry.confirm_brand_id(partner_id, "moscow", dgis_id)
     assert registry.set_brand_commercial_state(
-        "cofix", "moscow", "ACTIVE", True, True,
+        partner_id, "moscow", "ACTIVE" if active else "CANDIDATE", active, active,
     )
     registry.save_offer(
-        offer_id="test_cofix_moscow_001", partner_brand_id="cofix",
+        offer_id=f"test_{partner_id}_moscow_001", partner_brand_id=partner_id,
         city_id="moscow", title="Зайти за кофе?",
         description=("Обычное посещение кофейни. Скидки, бонусы и промокоды "
                      "не предусмотрены."),
@@ -79,6 +83,10 @@ def activate_test_cofix(registry: PartnerRegistry, *, status="ACTIVE") -> None:
         timezone_name="Europe/Moscow", button_text="Открыть в 2ГИС",
         status=status,
     )
+
+
+def activate_test_cofix(registry: PartnerRegistry, *, status="ACTIVE") -> None:
+    activate_test_brand(registry, "cofix", status=status)
 
 
 def test_registry_creation_and_seed_are_idempotent_and_inactive(tmp_path):
@@ -162,7 +170,7 @@ def test_closed_far_and_unroutable_branch_are_rejected():
     assert PartnerOfferSelector(registry, FakePartnerGeo(closed, 120)).select(
         visiting_state(), "moscow", NOW,
     ) is None
-    assert PartnerOfferSelector(registry, FakePartnerGeo(duration_seconds=601)).select(
+    assert PartnerOfferSelector(registry, FakePartnerGeo(duration_seconds=1501)).select(
         visiting_state(), "moscow", NOW,
     ) is None
     assert PartnerOfferSelector(registry, FakePartnerGeo(duration_seconds=None)).select(
@@ -191,6 +199,133 @@ def test_multiple_branches_choose_preferred_then_shortest():
     )
     assert offer is not None and offer.dgisPlaceId == "four"
     registry.close()
+
+
+def test_coffee_and_restaurant_at_24_minutes_are_allowed_but_25_limit_is_hard():
+    for partner_id in ("cofix", "tanuki"):
+        registry = PartnerRegistry(":memory:")
+        activate_test_brand(registry, partner_id)
+        branch = PartnerBranch(
+            dgis_place_id=f"{partner_id}-branch",
+            dgis_brand_id=f"verified-{partner_id}", name=partner_id,
+            lat=55.756, lon=37.618, schedule={"is_24x7": True},
+        )
+        allowed = PartnerOfferSelector(
+            registry, FakePartnerGeo([branch], duration_seconds=24 * 60),
+        ).select(visiting_state(), "moscow", NOW)
+        assert allowed is not None and allowed.walkingMinutes == 24
+        rejected = PartnerOfferSelector(
+            registry, FakePartnerGeo([branch], duration_seconds=25 * 60 + 1),
+        ).select(visiting_state(), "moscow", NOW)
+        assert rejected is None
+        registry.close()
+
+
+def test_all_nine_active_networks_share_one_bounded_routing_pool():
+    registry = PartnerRegistry(":memory:")
+    for partner_id, *_ in PARTNER_BRANDS:
+        activate_test_brand(registry, partner_id)
+
+    class AllBrandsGeo(FakePartnerGeo):
+        def search_partner_branches(self, city_id, dgis_brand_id, origin):
+            self.search_calls += 1
+            index = [row[0] for row in PARTNER_BRANDS].index(
+                dgis_brand_id.removeprefix("verified-"),
+            )
+            return [PartnerBranch(
+                dgis_place_id=f"branch-{index}", dgis_brand_id=dgis_brand_id,
+                name=f"Network {index}", lat=55.756 + index * .001,
+                lon=37.618, schedule={"is_24x7": True},
+            )]
+
+        def walking_leg(self, start, end, from_order, to_order):
+            self.routing_calls += 1
+            return RouteLeg(fromOrder=0, toOrder=1, distanceMeters=200,
+                            durationSeconds=180 + self.routing_calls,
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    geo = AllBrandsGeo()
+    offer = PartnerOfferSelector(registry, geo).select(
+        visiting_state(), "moscow", NOW,
+    )
+    assert offer is not None
+    assert geo.search_calls == 9
+    assert geo.routing_calls == 5
+    assert offer.partnerBrandId in {row[0] for row in PARTNER_BRANDS}
+    registry.close()
+
+
+def test_nearest_routed_offer_wins_across_segments_and_only_one_is_returned():
+    registry = PartnerRegistry(":memory:")
+    activate_test_brand(registry, "cofix")
+    activate_test_brand(registry, "tanuki")
+    branches = {
+        "verified-cofix": PartnerBranch(
+            "coffee", "verified-cofix", "Coffee", 55.758, 37.618,
+            {"is_24x7": True}),
+        "verified-tanuki": PartnerBranch(
+            "restaurant", "verified-tanuki", "Restaurant", 55.756, 37.618,
+            {"is_24x7": True}),
+    }
+
+    class NearbyGeo(FakePartnerGeo):
+        def search_partner_branches(self, city_id, dgis_brand_id, origin):
+            self.search_calls += 1
+            return [branches[dgis_brand_id]]
+
+        def walking_leg(self, start, end, from_order, to_order):
+            self.routing_calls += 1
+            seconds = 240 if end[0] == branches["verified-tanuki"].lat else 360
+            return RouteLeg(fromOrder=0, toOrder=1, distanceMeters=300,
+                            durationSeconds=seconds,
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    offer = PartnerOfferSelector(registry, NearbyGeo()).select(
+        visiting_state(), "moscow", NOW,
+    )
+    assert offer is not None
+    assert offer.partnerBrandId == "tanuki"
+    assert offer.dgisPlaceId == "restaurant"
+    registry.close()
+
+
+def test_active_moscow_offer_is_not_searched_in_another_city():
+    registry = PartnerRegistry(":memory:")
+    activate_test_cofix(registry)
+    geo = FakePartnerGeo()
+    assert PartnerOfferSelector(registry, geo).select(
+        visiting_state(), "tula", NOW,
+    ) is None
+    assert geo.search_calls == 0 and geo.routing_calls == 0
+    registry.close()
+
+
+def test_clearly_far_branch_is_rejected_before_routing():
+    registry = PartnerRegistry(":memory:")
+    activate_test_cofix(registry)
+    far = PartnerBranch(
+        "far", "verified-cofix", "Far Cofix", 56.0, 37.61,
+        {"is_24x7": True},
+    )
+    geo = FakePartnerGeo([far], duration_seconds=60)
+    assert PartnerOfferSelector(registry, geo).select(
+        visiting_state(), "moscow", NOW,
+    ) is None
+    assert geo.search_calls == 1 and geo.routing_calls == 0
+    registry.close()
+
+
+def test_fixture_accepts_exactly_all_nine_explicit_brand_mappings():
+    expected = tuple(row[0] for row in PARTNER_BRANDS)
+    assert BRAND_IDS == expected
+    values = [f"{partner_id}=dgis-{partner_id}" for partner_id in BRAND_IDS]
+    assert _brand_id_map(values) == {
+        partner_id: f"dgis-{partner_id}" for partner_id in BRAND_IDS
+    }
+    with pytest.raises(SystemExit):
+        _brand_id_map(["cofix=one", "cofix=two"])
+    with pytest.raises(SystemExit):
+        _brand_id_map(["unknown=value"])
 
 
 def test_provider_brand_search_requires_exact_returned_brand_id():

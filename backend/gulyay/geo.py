@@ -825,10 +825,13 @@ class DgisGeoProvider:
                                 origin: tuple[float, float]) -> list[PartnerBranch]:
         """Find only branches carrying the already verified provider brand id."""
         center = self.resolve_city_center(city_id)
+        # A ~110 m cell preserves a local search while allowing the Places TTL
+        # cache to absorb ordinary GPS jitter instead of querying on each fix.
+        search_lat, search_lon = round(origin[0], 3), round(origin[1], 3)
         items = self._places(
             request_type="partner_discovery", brand_id=dgis_brand_id, type="branch",
-            locale="ru_RU", point=f"{origin[1]:.7f},{origin[0]:.7f}", radius=50000,
-            location=f"{origin[1]:.7f},{origin[0]:.7f}", sort="distance",
+            locale="ru_RU", point=f"{search_lon:.3f},{search_lat:.3f}", radius=50000,
+            location=f"{search_lon:.3f},{search_lat:.3f}", sort="distance",
             fields=("items.point,items.brand,items.schedule,items.is_routing_available,"
                     "items.adm_div,items.city_alias"),
             page_size=10,

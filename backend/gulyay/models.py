@@ -444,7 +444,8 @@ class PartnerOffer(StrictModel):
     description: str = Field(min_length=1, max_length=1000)
     venueName: str = Field(min_length=1, max_length=240)
     walkingMinutes: int = Field(ge=1, le=120)
-    isCommercial: Literal[True] = True
+    # Preview suggestions are never commercial offers.
+    isCommercial: bool = True
     action: PartnerOfferAction
 
 

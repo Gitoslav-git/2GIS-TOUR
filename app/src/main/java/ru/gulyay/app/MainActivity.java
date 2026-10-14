@@ -110,11 +110,14 @@ public final class MainActivity extends Activity {
     private Double startLat;
     private Double startLon;
     private Double startAccuracyMeters;
+    private long startMeasuredAtMillis;
     private boolean routeLocationDirty;
     private LocationManager locationManager;
     private LocationListener locationListener;
     private Runnable locationTimeout;
     private boolean locationResolved;
+    private boolean citySelectedManually;
+    private boolean cityTouchInProgress;
     private boolean queryEditMode;
 
     @Override public void onCreate(Bundle savedInstanceState) {
@@ -196,7 +199,7 @@ public final class MainActivity extends Activity {
         locationStatus.setMaxLines(compact ? 1 : 2);
         locationStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
         content.addView(locationStatus);
-        locationButton.setVisibility(View.GONE);
+        locationButton.setVisibility(View.VISIBLE);
 
         selectedFilters = new LinearLayout(this);
         selectedFilters.setOrientation(LinearLayout.HORIZONTAL);
@@ -447,6 +450,7 @@ public final class MainActivity extends Activity {
 
         if (savedInstanceState != null) {
             city.setSelection(savedInstanceState.getInt("city"));
+            citySelectedManually = savedInstanceState.getBoolean("citySelectedManually", false);
             query.setText(savedInstanceState.getString("query", ""));
             result.setText(savedInstanceState.getString("result", ""));
             retryAllowedAtMillis = savedInstanceState.getLong("retryAllowedAtMillis", 0);
@@ -454,10 +458,12 @@ public final class MainActivity extends Activity {
                 startLat = savedInstanceState.getDouble("startLat");
                 startLon = savedInstanceState.getDouble("startLon");
                 startAccuracyMeters = savedInstanceState.getDouble("startAccuracyMeters", 100.0);
+                startMeasuredAtMillis = savedInstanceState.getLong("startMeasuredAtMillis", 0L);
                 String restoredCityId = cityIdForLocation(startLat, startLon);
                 if (restoredCityId != null) {
                     city.setSelection(cityPosition(restoredCityId));
-                    showLocation(restoredCityId);
+                    if (currentStartLocationIsUsable()) showLocation(restoredCityId);
+                    else locationStatus.setText("Сохранённая геопозиция устарела. Обновляем координаты…");
                 } else {
                     clearLocationToUnknown();
                 }
@@ -479,10 +485,18 @@ public final class MainActivity extends Activity {
         routeCard.setOnClickListener(view -> returnToCurrentRoute());
         routeControlButton.setOnClickListener(view -> showRouteControlMenu());
         locationButton.setOnClickListener(view -> toggleLocation());
+        city.setOnTouchListener((view, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN) cityTouchInProgress = true;
+            return false;
+        });
         city.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
                                                   int position, long id) {
                 updateCityArrow();
+                if (cityTouchInProgress) {
+                    citySelectedManually = position != 0;
+                    cityTouchInProgress = false;
+                }
                 String selected = selectedCityId();
                 if (selected != null && startLat != null && startLon != null
                         && !locationMatchesCity(selected, startLat, startLon)) {
@@ -658,13 +672,13 @@ public final class MainActivity extends Activity {
             new AlertDialog.Builder(this).setTitle("Сбросить текущий маршрут?")
                     .setMessage("Построение нового маршрута закроет текущий.")
                     .setNegativeButton("Нет", (dialog, which) -> query.setText(savedQuery))
-                    .setPositiveButton("Да", (dialog, which) -> generateConfirmed(text)).show();
+                    .setPositiveButton("Да", (dialog, which) -> generateConfirmed(text, true)).show();
             return;
         }
-        generateConfirmed(text);
+        generateConfirmed(text, false);
     }
 
-    private void generateConfirmed(String text) {
+    private void generateConfirmed(String text, boolean createNewRoute) {
         if (System.currentTimeMillis() < retryAllowedAtMillis) {
             applyCooldown();
             return;
@@ -687,7 +701,13 @@ public final class MainActivity extends Activity {
         chat.putExtra(RouteChatActivity.EXTRA_CITY, cityId);
         chat.putExtra(RouteChatActivity.EXTRA_QUERY, text);
         chat.putExtra(RouteChatActivity.EXTRA_SESSION, sessionId());
-        if (routeId != null && !routeFinished && cityId.equals(routeCityId)) {
+        if (currentStartLocationIsUsable()) {
+            chat.putExtra(RouteChatActivity.EXTRA_START_LAT, startLat);
+            chat.putExtra(RouteChatActivity.EXTRA_START_LON, startLon);
+            chat.putExtra(RouteChatActivity.EXTRA_START_ACCURACY, startAccuracyMeters);
+            chat.putExtra(RouteChatActivity.EXTRA_START_MEASURED_AT, startMeasuredAtMillis);
+        }
+        if (!createNewRoute && routeId != null && !routeFinished && cityId.equals(routeCityId)) {
             chat.putExtra(RouteChatActivity.EXTRA_ROUTE_ID, routeId);
             chat.putExtra(RouteChatActivity.EXTRA_ROUTE_VERSION, routeVersion);
         }
@@ -1099,6 +1119,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onSaveInstanceState(Bundle out) {
         out.putInt("city", city.getSelectedItemPosition());
+        out.putBoolean("citySelectedManually", citySelectedManually);
         out.putString("query", query.getText().toString());
         out.putString("result", result.getText().toString());
         out.putString("routeId", routeId);
@@ -1113,6 +1134,7 @@ public final class MainActivity extends Activity {
             out.putDouble("startLon", startLon);
             out.putDouble("startAccuracyMeters",
                     startAccuracyMeters == null ? 100.0 : startAccuracyMeters);
+            out.putLong("startMeasuredAtMillis", startMeasuredAtMillis);
         }
         out.putBoolean("routeLocationDirty", routeLocationDirty);
         out.putBoolean("queryEditMode", queryEditMode);
@@ -1196,19 +1218,12 @@ public final class MainActivity extends Activity {
         };
         try {
             int requestedProviders = 0;
-            if (gpsEnabled) {
-                if (claimGeoAttempt()) {
-                    locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER,
-                            locationListener, Looper.getMainLooper());
-                    requestedProviders++;
-                }
-            }
-            if (networkEnabled) {
-                if (claimGeoAttempt()) {
-                    locationManager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER,
-                            locationListener, Looper.getMainLooper());
-                    requestedProviders++;
-                }
+            String provider = gpsEnabled ? LocationManager.GPS_PROVIDER
+                    : LocationManager.NETWORK_PROVIDER;
+            if (claimGeoAttempt()) {
+                locationManager.requestSingleUpdate(provider, locationListener,
+                        Looper.getMainLooper());
+                requestedProviders = 1;
             }
             if (requestedProviders == 0) {
                 locationListener = null;
@@ -1297,14 +1312,23 @@ public final class MainActivity extends Activity {
     }
 
     private void acceptLocation(Location location) {
+        RouteStartLocation candidate = new RouteStartLocation(location.getLatitude(),
+                location.getLongitude(), location.hasAccuracy() ? location.getAccuracy()
+                : Double.MAX_VALUE, location.getTime());
+        if (!candidate.isFreshAndAccurate(System.currentTimeMillis())) {
+            locationStatus.setText("Получена недостаточно точная геопозиция. Нужна точность не хуже 100 м…");
+            return;
+        }
         String cityId = cityIdForLocation(location.getLatitude(), location.getLongitude());
         if (cityId == null) {
             startLat = null;
             startLon = null;
             startAccuracyMeters = null;
-            city.setSelection(0);
+            startMeasuredAtMillis = 0L;
+            if (!citySelectedManually) city.setSelection(0);
             locationStatus.setText("Получены координаты вне доступных городов. " +
-                    "Ожидаем другой источник геопозиции…");
+                    (citySelectedManually ? "Выбранный вручную город сохранён."
+                            : "Ожидаем другой источник геопозиции…"));
             return;
         }
         if (locationManager != null && locationListener != null) {
@@ -1315,11 +1339,19 @@ public final class MainActivity extends Activity {
             uiHandler.removeCallbacks(locationTimeout);
             locationTimeout = null;
         }
+        if (citySelectedManually && selectedCityId() != null && !selectedCityId().equals(cityId)) {
+            clearCoordinatesKeepingCity();
+            locationResolved = false;
+            locationButton.setEnabled(true);
+            showManualCity(selectedCityId());
+            return;
+        }
         locationResolved = true;
         startLat = location.getLatitude();
         startLon = location.getLongitude();
         startAccuracyMeters = location.hasAccuracy() ? (double) location.getAccuracy() : 100.0;
-        city.setSelection(cityPosition(cityId));
+        startMeasuredAtMillis = location.getTime();
+        if (!citySelectedManually) city.setSelection(cityPosition(cityId));
         locationButton.setEnabled(true);
         showLocation(cityId);
         markRouteLocationDirty();
@@ -1341,6 +1373,7 @@ public final class MainActivity extends Activity {
         startLat = null;
         startLon = null;
         startAccuracyMeters = null;
+        startMeasuredAtMillis = 0L;
         locationButton.setText("Обновить геопозицию");
         markRouteLocationDirty();
     }
@@ -1374,7 +1407,7 @@ public final class MainActivity extends Activity {
         return "Тула";
     }
 
-    private static String cityIdForLocation(double lat, double lon) {
+    static String cityIdForLocation(double lat, double lon) {
         if (locationMatchesCity("borovsk", lat, lon)) return "borovsk";
         if (locationMatchesCity("moscow", lat, lon)) return "moscow";
         if (locationMatchesCity("vladimir", lat, lon)) return "vladimir";
@@ -1382,7 +1415,7 @@ public final class MainActivity extends Activity {
         return null;
     }
 
-    private static boolean locationMatchesCity(String cityId, double lat, double lon) {
+    static boolean locationMatchesCity(String cityId, double lat, double lon) {
         double centerLat = 54.1930, centerLon = 37.6178, limitKm = 50.0;
         if ("vladimir".equals(cityId)) { centerLat = 56.1291; centerLon = 40.4075; }
         if ("moscow".equals(cityId)) { centerLat = 55.7558; centerLon = 37.6173; limitKm = 80.0; }
@@ -2330,6 +2363,11 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         if (startWalkButton == null) return;
+        if (locationListener == null && !currentStartLocationIsUsable()
+                && (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED)) {
+            requestCurrentLocation();
+        }
         if (routeId != null) syncWalkStateFromBackend();
         SharedPreferences walk = getSharedPreferences("active_walk", MODE_PRIVATE);
         String activeWalkId = walk.getString("walkId", null);
@@ -2349,6 +2387,12 @@ public final class MainActivity extends Activity {
             resetRouteButton.setEnabled(routeId != null);
         }
         refreshHomeRouteCard();
+    }
+
+    private boolean currentStartLocationIsUsable() {
+        return startLat != null && startLon != null && startAccuracyMeters != null
+                && new RouteStartLocation(startLat, startLon, startAccuracyMeters,
+                startMeasuredAtMillis).isFreshAndAccurate(System.currentTimeMillis());
     }
 
     @Override protected void onDestroy() {

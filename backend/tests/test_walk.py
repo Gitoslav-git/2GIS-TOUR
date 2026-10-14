@@ -53,6 +53,9 @@ def test_two_accurate_measurements_five_seconds_apart_reach_point():
     assert state.session.currentPointOrder == 1
     assert state.session.phase == "VISITING"
     assert state.session.visitStartedAt == start + timedelta(minutes=10, seconds=5)
+    assert state.lastPosition is not None
+    assert state.lastPosition.lat == itinerary.points[0].lat
+    assert state.lastPosition.accuracyMeters == 10
     assert state.session.visitElapsedSeconds == 0
     assert state.session.visits[0].pointOrder == 1
     assert state.session.estimatedRemainingMinutes == 110

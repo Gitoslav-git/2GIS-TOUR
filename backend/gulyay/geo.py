@@ -64,6 +64,24 @@ class CatalogPlaceResolution:
     lon: float
 
 
+@dataclass(frozen=True)
+class PartnerBrandCandidate:
+    dgis_brand_id: str
+    brand_name: str
+    branch_count: int
+    name_matches: bool
+
+
+@dataclass(frozen=True)
+class PartnerBranch:
+    dgis_place_id: str
+    dgis_brand_id: str
+    name: str
+    lat: float
+    lon: float
+    schedule: dict
+
+
 class GeoProvider(Protocol):
     def ensure_configured(self) -> None: ...
     def resolve_city_center(self, city_id: str) -> tuple[float, float]: ...
@@ -677,6 +695,85 @@ class DgisGeoProvider:
                 result[place_id] = schedule
         return result
 
+    def discover_partner_brand_candidates(
+            self, city_id: str, search_name: str) -> list[PartnerBrandCandidate]:
+        """Return review candidates without persisting an identifier."""
+        center = self.resolve_city_center(city_id)
+        items = self._places(
+            request_type="partner_admin", q=f"{search_name}, {CITY_NAMES[city_id]}",
+            type="branch", locale="ru_RU",
+            point=f"{center[1]:.7f},{center[0]:.7f}", radius=50000,
+            location=f"{center[1]:.7f},{center[0]:.7f}",
+            fields="items.brand,items.adm_div,items.city_alias", page_size=20,
+            search_is_query_text_complete="true",
+        )
+        found: dict[str, tuple[str, int]] = {}
+        for item in items:
+            if not _belongs_to_city(item, city_id, center):
+                continue
+            brand = _item_brand(item)
+            if brand is None:
+                continue
+            brand_id, brand_name = brand
+            previous = found.get(brand_id)
+            found[brand_id] = (brand_name, 1 if previous is None else previous[1] + 1)
+        return sorted((PartnerBrandCandidate(
+            dgis_brand_id=brand_id,
+            brand_name=name,
+            branch_count=count,
+            name_matches=_brand_names_match(search_name, name),
+        ) for brand_id, (name, count) in found.items()),
+                      key=lambda candidate: (not candidate.name_matches,
+                                             candidate.brand_name.casefold()))
+
+    def verify_partner_brand_id(self, city_id: str, expected_name: str,
+                                dgis_brand_id: str) -> bool:
+        """Validate an operator-selected brand id against Moscow branches."""
+        center = self.resolve_city_center(city_id)
+        items = self._places(
+            request_type="partner_admin", brand_id=dgis_brand_id, type="branch",
+            locale="ru_RU", point=f"{center[1]:.7f},{center[0]:.7f}", radius=50000,
+            location=f"{center[1]:.7f},{center[0]:.7f}",
+            fields="items.brand,items.adm_div,items.city_alias", page_size=10,
+        )
+        for item in items:
+            brand = _item_brand(item)
+            if (brand is not None and brand[0] == dgis_brand_id
+                    and _brand_names_match(expected_name, brand[1])
+                    and _belongs_to_city(item, city_id, center)):
+                return True
+        return False
+
+    def search_partner_branches(self, city_id: str, dgis_brand_id: str,
+                                origin: tuple[float, float]) -> list[PartnerBranch]:
+        """Find only branches carrying the already verified provider brand id."""
+        center = self.resolve_city_center(city_id)
+        items = self._places(
+            request_type="partner_discovery", brand_id=dgis_brand_id, type="branch",
+            locale="ru_RU", point=f"{origin[1]:.7f},{origin[0]:.7f}", radius=50000,
+            location=f"{origin[1]:.7f},{origin[0]:.7f}", sort="distance",
+            fields=("items.point,items.brand,items.schedule,items.is_routing_available,"
+                    "items.adm_div,items.city_alias"),
+            page_size=10,
+        )
+        result: list[PartnerBranch] = []
+        for item in items:
+            brand = _item_brand(item)
+            point = item.get("point")
+            place_id = str(item.get("id", "")).strip()
+            name = str(item.get("name", "")).strip()
+            if (brand is None or brand[0] != dgis_brand_id or not place_id or not name
+                    or not _valid_point(point) or item.get("is_routing_available") is False
+                    or not _belongs_to_city(item, city_id, center)):
+                continue
+            schedule = item.get("schedule")
+            result.append(PartnerBranch(
+                dgis_place_id=place_id, dgis_brand_id=brand[0], name=name,
+                lat=float(point["lat"]), lon=float(point["lon"]),
+                schedule=schedule if isinstance(schedule, dict) else {},
+            ))
+        return result
+
     def walking_leg(self, start: tuple[float, float], end: tuple[float, float],
                     from_order: int, to_order: int) -> RouteLeg:
         cache_key = tuple(round(value, 6) for value in (*start, *end))
@@ -761,6 +858,34 @@ def _valid_point(point: object) -> bool:
     return (isinstance(point, dict)
             and isinstance(point.get("lat"), (int, float))
             and isinstance(point.get("lon"), (int, float)))
+
+
+def _item_brand(item: dict) -> tuple[str, str] | None:
+    value = item.get("brand")
+    brands = value if isinstance(value, list) else [value]
+    for brand in brands:
+        if not isinstance(brand, dict):
+            continue
+        brand_id = str(brand.get("id", "")).strip()
+        name = str(brand.get("name", "")).strip()
+        if brand_id and name:
+            return brand_id, name
+    return None
+
+
+def _brand_names_match(expected: str, actual: str) -> bool:
+    def normalized(value: str) -> str:
+        return " ".join(re.findall(
+            r"[а-яёa-z0-9]+", value.casefold().replace("ё", "е"),
+        ))
+    expected_value, actual_value = normalized(expected), normalized(actual)
+    if not expected_value or not actual_value:
+        return False
+    if expected_value == actual_value:
+        return True
+    expected_tokens = set(expected_value.split())
+    actual_tokens = set(actual_value.split())
+    return len(expected_tokens) >= 2 and expected_tokens <= actual_tokens
 
 
 def _is_item_not_found(meta: object) -> bool:

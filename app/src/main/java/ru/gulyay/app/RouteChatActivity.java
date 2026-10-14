@@ -1,7 +1,12 @@
 package ru.gulyay.app;
 
+import android.Manifest;
 import android.content.Intent;
 import android.app.AlertDialog;
+import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -27,16 +32,34 @@ public final class RouteChatActivity extends ComponentActivity {
     static final String EXTRA_SNAPSHOT = "routeSnapshot";
     static final String EXTRA_OPEN_ROUTE = "openRoute";
     static final String EXTRA_RESET_ROUTE = "resetRoute";
+    static final String EXTRA_START_LAT = "startLat";
+    static final String EXTRA_START_LON = "startLon";
+    static final String EXTRA_START_ACCURACY = "startAccuracyMeters";
+    static final String EXTRA_START_MEASURED_AT = "startMeasuredAtMillis";
+    private static final int LOCATION_PERMISSION_REQUEST = 78;
+    private static final long LOCATION_TIMEOUT_MILLIS = 20_000L;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private LinearLayout messages; private ScrollView scroll; private EditText input; private Button send;
     private final Handler typingHandler = new Handler(Looper.getMainLooper());
     private TextView typingBubble; private Button currentAction;
     private int typingFrame;
     private String city, session, routeId, initialRouteId; private int routeVersion; private boolean busy; private ApiClient.Result latest; private boolean editingExistingRoute, createdNewRouteInThisChat;
+    private RouteStartLocation startLocation;
+    private LocationManager locationManager;
+    private LocationListener locationListener;
+    private Runnable locationTimeout;
+    private String pendingNewRouteQuery;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         city = getIntent().getStringExtra(EXTRA_CITY); session = getIntent().getStringExtra(EXTRA_SESSION);
+        if (getIntent().hasExtra(EXTRA_START_LAT) && getIntent().hasExtra(EXTRA_START_LON)) {
+            startLocation = new RouteStartLocation(
+                    getIntent().getDoubleExtra(EXTRA_START_LAT, 0.0),
+                    getIntent().getDoubleExtra(EXTRA_START_LON, 0.0),
+                    getIntent().getDoubleExtra(EXTRA_START_ACCURACY, Double.MAX_VALUE),
+                    getIntent().getLongExtra(EXTRA_START_MEASURED_AT, 0L));
+        }
         routeId = getIntent().getStringExtra(EXTRA_ROUTE_ID); initialRouteId = routeId; editingExistingRoute = initialRouteId != null; routeVersion = getIntent().getIntExtra(EXTRA_ROUTE_VERSION, 0);
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(UiKit.dp(this,16), UiKit.dp(this,18), UiKit.dp(this,16), UiKit.dp(this,12)); root.setBackgroundColor(0xFFFFFFFF);
         LinearLayout header = new LinearLayout(this); header.setGravity(Gravity.CENTER_VERTICAL);
@@ -55,8 +78,128 @@ public final class RouteChatActivity extends ComponentActivity {
     private final Runnable typingTick = new Runnable(){ @Override public void run(){ if(typingBubble==null)return; String[] dots={"● ○ ○","○ ● ○","○ ○ ●"}; typingBubble.setText("Гуляй составляет маршрут…\n"+dots[typingFrame++%dots.length]); typingHandler.postDelayed(this,360); }};
     private void loading(boolean on){ busy=on; input.setEnabled(!on); send.setEnabled(!on); if(on){ removeTyping(); typingBubble=UiKit.label(this,"",17,UiKit.TEXT); typingBubble.setPadding(UiKit.dp(this,16),UiKit.dp(this,12),UiKit.dp(this,16),UiKit.dp(this,12)); typingBubble.setBackground(UiKit.rounded(0xFFE8F8ED,22,this)); LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,-2); p.gravity=Gravity.START; p.topMargin=UiKit.dp(this,8); messages.addView(typingBubble,p); typingFrame=0; typingHandler.post(typingTick); scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN)); } else removeTyping(); }
     private void removeTyping(){ typingHandler.removeCallbacks(typingTick); if(typingBubble!=null){ messages.removeView(typingBubble); typingBubble=null; } }
-    private void requestInitial(String query){ loading(true); network.execute(()->call(() -> ApiClient.createRoute(city,query,session))); }
-    private void submit(){ String text=input.getText().toString().trim(); if(busy||text.length()<2)return; input.setText(""); user(text); loading(true); if(routeId==null) network.execute(()->call(()->ApiClient.createRoute(city,text,session))); else network.execute(()->call(()->ApiClient.chatRevision(routeId,routeVersion,city,text,session))); }
+    private void requestInitial(String query){ requestNewRoute(query); }
+    private void submit(){ String text=input.getText().toString().trim(); if(busy||text.length()<2)return; input.setText(""); user(text); if(routeId==null) requestNewRoute(text); else { loading(true); network.execute(()->call(()->ApiClient.chatRevision(routeId,routeVersion,city,text,session))); } }
+
+    private void requestNewRoute(String query) {
+        if (busy) return;
+        pendingNewRouteQuery = query;
+        loading(true);
+        if (startLocation != null && startLocation.isFreshAndAccurate(System.currentTimeMillis())) {
+            createNewRoute(query, startLocation);
+            return;
+        }
+        requestFreshLocation();
+    }
+
+    private void createNewRoute(String query, RouteStartLocation location) {
+        pendingNewRouteQuery = null;
+        network.execute(() -> call(() -> location == null
+                ? ApiClient.createRoute(city, query, session)
+                : ApiClient.createRoute(city, query, session, location.lat, location.lon,
+                        location.accuracyMeters)));
+    }
+
+    private void requestFreshLocation() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+                && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION}, LOCATION_PERMISSION_REQUEST);
+            return;
+        }
+        locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
+        boolean gps = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+        boolean networkProvider = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        if (!gps && !networkProvider) { showLocationFallback("Геопозиция выключена."); return; }
+        Location cached = bestLastKnown(gps, networkProvider);
+        if (cached != null) {
+            RouteStartLocation candidate = fromLocation(cached);
+            if (candidate.isFreshAndAccurate(System.currentTimeMillis())
+                    && MainActivity.locationMatchesCity(city, candidate.lat, candidate.lon)) {
+                startLocation = candidate;
+                createNewRoute(pendingNewRouteQuery, candidate);
+                return;
+            }
+        }
+        if (!claimGeoAttempt()) {
+            showLocationFallback("Лимит определения геопозиции достигнут. Повторите немного позже.");
+            return;
+        }
+        locationListener = location -> {
+            RouteStartLocation candidate = fromLocation(location);
+            if (!candidate.isFreshAndAccurate(System.currentTimeMillis())
+                    || !MainActivity.locationMatchesCity(city, candidate.lat, candidate.lon)) return;
+            stopLocationRequest();
+            startLocation = candidate;
+            createNewRoute(pendingNewRouteQuery, candidate);
+        };
+        try {
+            locationManager.requestSingleUpdate(gps ? LocationManager.GPS_PROVIDER
+                    : LocationManager.NETWORK_PROVIDER, locationListener, Looper.getMainLooper());
+            locationTimeout = () -> { stopLocationRequest(); showLocationFallback(
+                    "Не удалось получить свежую геопозицию."); };
+            typingHandler.postDelayed(locationTimeout, LOCATION_TIMEOUT_MILLIS);
+        } catch (SecurityException error) {
+            stopLocationRequest();
+            showLocationFallback("Нет разрешения на геопозицию.");
+        }
+    }
+
+    private Location bestLastKnown(boolean gps, boolean networkProvider) {
+        Location best = null;
+        try {
+            if (gps) best = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+            if (networkProvider) {
+                Location other = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+                if (other != null && (best == null || other.getTime() > best.getTime())) best = other;
+            }
+        } catch (SecurityException ignored) { }
+        return best;
+    }
+
+    private static RouteStartLocation fromLocation(Location location) {
+        return new RouteStartLocation(location.getLatitude(), location.getLongitude(),
+                location.hasAccuracy() ? location.getAccuracy() : Double.MAX_VALUE,
+                location.getTime());
+    }
+
+    private boolean claimGeoAttempt() {
+        long now = System.currentTimeMillis();
+        android.content.SharedPreferences prefs = getSharedPreferences("geo_attempt_throttle", MODE_PRIVATE);
+        long previous = prefs.getLong("previous", 0L), latestAttempt = prefs.getLong("latest", 0L);
+        long cutoff = now - 60_000L;
+        if (previous > now || latestAttempt > now) { previous = 0L; latestAttempt = 0L; }
+        if (previous > cutoff) return false;
+        if (latestAttempt > cutoff) previous = latestAttempt; else previous = 0L;
+        prefs.edit().putLong("previous", previous).putLong("latest", now).apply();
+        return true;
+    }
+
+    private void showLocationFallback(String reason) {
+        stopLocationRequest();
+        loading(false);
+        new AlertDialog.Builder(this).setTitle("Точное местоположение не определено")
+                .setMessage(reason + " Можно повторить определение GPS или явно построить маршрут от центра выбранного города.")
+                .setNegativeButton("Повторить GPS", (d, w) -> { loading(true); requestFreshLocation(); })
+                .setPositiveButton("От центра города", (d, w) -> { loading(true); createNewRoute(pendingNewRouteQuery, null); })
+                .setOnCancelListener(d -> pendingNewRouteQuery = null).show();
+    }
+
+    private void stopLocationRequest() {
+        if (locationTimeout != null) { typingHandler.removeCallbacks(locationTimeout); locationTimeout = null; }
+        if (locationManager != null && locationListener != null) {
+            try { locationManager.removeUpdates(locationListener); } catch (SecurityException ignored) { }
+        }
+        locationListener = null;
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode != LOCATION_PERMISSION_REQUEST) return;
+        boolean granted = false;
+        for (int result : results) granted |= result == PackageManager.PERMISSION_GRANTED;
+        if (granted) requestFreshLocation(); else showLocationFallback("Нет разрешения на геопозицию.");
+    }
     private interface Call { ApiClient.Result run() throws Exception; }
     private void call(Call work){ ApiClient.Result result; try { result=work.run(); } catch(Exception e){ result=new ApiClient.Result(false,"Не удалось связаться с сервером. Попробуйте ещё раз.",null,0); } ApiClient.Result r=result; runOnUiThread(()->finishCall(r)); }
     private void finishCall(ApiClient.Result r){ loading(false); if(!r.success){ bot(r.message); return; } latest=r; createdNewRouteInThisChat = !editingExistingRoute; routeId=r.routeId; routeVersion=r.routeVersion; StringBuilder s=new StringBuilder("Готово! Маршрут примерно на ").append(r.totalMinutes>0?r.totalMinutes:"несколько").append(" мин.\n\n"); for(int i=0;i<r.points.size();i++)s.append(i+1).append(". ").append(r.points.get(i).name).append('\n'); bot(s.toString().trim()); if(currentAction!=null) messages.removeView(currentAction); currentAction=UiKit.button(this,editingExistingRoute?"Применить изменения":"▶  Начать маршрут",UiKit.GREEN,0xFFFFFFFF); currentAction.setOnClickListener(v->returnRoute(true)); messages.addView(currentAction,new LinearLayout.LayoutParams(-1,UiKit.dp(this,54))); scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN)); }
@@ -64,5 +207,5 @@ public final class RouteChatActivity extends ComponentActivity {
     private void confirmCancelCreate(){ if(busy)return; new AlertDialog.Builder(this).setTitle("Отменить создание маршрута?").setMessage(createdNewRouteInThisChat ? "Созданный маршрут будет удалён." : "Чат будет закрыт без создания маршрута.").setNegativeButton("Продолжить",null).setPositiveButton("Подтвердить",(d,w)->cancelCreateChat()).show(); }
     private void cancelCreateChat(){ if(!createdNewRouteInThisChat || routeId==null){ setResult(RESULT_CANCELED); finish(); return; } loading(true); network.execute(()->{ boolean deleted; try{ deleted=ApiClient.deleteRoute(routeId,session).success; }catch(Exception ignored){ deleted=false; } final boolean done=deleted; runOnUiThread(()->{ loading(false); if(!done){ bot("Не удалось отменить маршрут. Попробуйте ещё раз."); return; } Intent data=new Intent(); data.putExtra(EXTRA_RESET_ROUTE,true); setResult(RESULT_OK,data); finish(); }); }); }
     @Override public void onBackPressed(){ if(editingExistingRoute){ if(latest!=null)returnRoute(false); else { setResult(RESULT_CANCELED); finish(); } } else if(!busy) confirmCancelCreate(); }
-    @Override protected void onDestroy(){ removeTyping(); network.shutdownNow(); super.onDestroy(); }
+    @Override protected void onDestroy(){ stopLocationRequest(); removeTyping(); network.shutdownNow(); super.onDestroy(); }
 }

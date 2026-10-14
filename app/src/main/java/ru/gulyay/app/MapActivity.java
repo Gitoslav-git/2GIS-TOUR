@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -15,6 +16,7 @@ import android.graphics.Typeface;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Debug;
 import android.os.Handler;
@@ -143,7 +145,9 @@ public final class MapActivity extends ComponentActivity {
     private TextView visitingNextIcon;
     private TextView visitingNextTitle;
     private TextView visitingNextMeta;
+    private LinearLayout partnerOfferCard;
     private TextView partnerOfferView;
+    private Button partnerOfferButton;
     private boolean compactScreen;
     private final List<ApiClient.PlaceOption> editingPoints = new ArrayList<>();
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -181,6 +185,7 @@ public final class MapActivity extends ComponentActivity {
     private String renderedPointListKey;
     private String renderedVisitingStructureKey;
     private boolean mapGestureActive;
+    private int partnerOfferRequestGeneration;
     private final Runnable cameraBoundsGuard = this::enforceRouteCameraBounds;
 
     @Override public void onCreate(Bundle savedInstanceState) {
@@ -355,12 +360,24 @@ public final class MapActivity extends ComponentActivity {
         nextCardParams.bottomMargin = UiKit.dp(this, 6);
         sheet.addView(visitingNextCard, nextCardParams);
 
+        partnerOfferCard = new LinearLayout(this);
+        partnerOfferCard.setOrientation(LinearLayout.VERTICAL);
+        partnerOfferCard.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 11),
+                UiKit.dp(this, 14), UiKit.dp(this, 11));
+        partnerOfferCard.setBackground(UiKit.rounded(0xFFFFF6DF, 14, this));
+        TextView partnerDisclosure = UiKit.label(
+                this, "ПАРТНЁРСКОЕ ПРЕДЛОЖЕНИЕ", 11, UiKit.RED_SOFT);
+        partnerDisclosure.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        partnerOfferCard.addView(partnerDisclosure);
         partnerOfferView = UiKit.label(this, "", 13, UiKit.TEXT);
-        partnerOfferView.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 10),
-                UiKit.dp(this, 14), UiKit.dp(this, 10));
-        partnerOfferView.setBackground(UiKit.rounded(0xFFFFF6DF, 14, this));
-        partnerOfferView.setVisibility(View.GONE);
-        sheet.addView(partnerOfferView, new LinearLayout.LayoutParams(-1, -2));
+        partnerOfferView.setPadding(0, UiKit.dp(this, 5), 0, UiKit.dp(this, 7));
+        partnerOfferCard.addView(partnerOfferView);
+        partnerOfferButton = UiKit.button(
+                this, "Открыть в 2ГИС", UiKit.GREEN_DARK, 0xFFFFFFFF);
+        partnerOfferButton.setOnClickListener(view -> openPartnerOffer());
+        partnerOfferCard.addView(partnerOfferButton, new LinearLayout.LayoutParams(-1, -2));
+        partnerOfferCard.setVisibility(View.GONE);
+        sheet.addView(partnerOfferCard, new LinearLayout.LayoutParams(-1, -2));
 
         pointList = new LinearLayout(this);
         pointList.setOrientation(LinearLayout.VERTICAL);
@@ -935,7 +952,7 @@ public final class MapActivity extends ComponentActivity {
         pointHero.setVisibility(View.GONE);
         status.setVisibility(View.GONE);
         visitingNextCard.setVisibility(View.GONE);
-        renderPartnerOffer(null);
+        invalidatePartnerOffer();
         editQuery.setVisibility(View.GONE);
         primaryAction.setVisibility(View.GONE);
         editPoints.setText("Подтвердить");
@@ -1508,6 +1525,7 @@ public final class MapActivity extends ComponentActivity {
             persistFinishedRoute();
             clearActiveWalk();
         }
+        syncPartnerOffer();
     }
 
     private void startVisitStopwatch(String pointName) {
@@ -1606,19 +1624,82 @@ public final class MapActivity extends ComponentActivity {
     private void renderPartnerOffer(VisitingPresentation.PartnerOffer offer) {
         if (!VisitingPresentation.shouldShowPartnerOffer(offer)) {
             partnerOfferView.setText("");
-            partnerOfferView.setVisibility(View.GONE);
+            partnerOfferButton.setText("Открыть в 2ГИС");
+            partnerOfferCard.setVisibility(View.GONE);
             return;
         }
-        partnerOfferView.setText(offer.title + (offer.disclosure == null
-                || offer.disclosure.trim().isEmpty() ? "" : "\n" + offer.disclosure));
-        partnerOfferView.setVisibility(View.VISIBLE);
+        String details = offer.title + "\n" + offer.venueName + " · "
+                + offer.walkingMinutes + " мин пешком";
+        if (offer.description != null && !offer.description.trim().isEmpty()) {
+            details += "\n" + offer.description;
+        }
+        partnerOfferView.setText(details);
+        partnerOfferButton.setText(offer.actionLabel);
+        partnerOfferCard.setVisibility(View.VISIBLE);
+    }
+
+    private void syncPartnerOffer() {
+        if (walk == null || !PartnerOfferRequestPolicy.eligible(
+                walk.status, walk.phase, walk.currentPointOrder)) {
+            invalidatePartnerOffer();
+            return;
+        }
+        String key = PartnerOfferRequestPolicy.key(walk.walkId, walk.currentPointOrder);
+        if (key.equals(routeViewModel.partnerOfferKey)) {
+            renderPartnerOffer(VisitingPresentation.PartnerOffer.from(
+                    routeViewModel.partnerOffer));
+            return;
+        }
+        routeViewModel.partnerOfferKey = key;
+        routeViewModel.partnerOffer = null;
+        renderPartnerOffer(null);
+        int generation = ++partnerOfferRequestGeneration;
+        String walkId = walk.walkId;
+        String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+        network.execute(() -> {
+            ApiClient.PartnerOfferResult response;
+            try {
+                response = ApiClient.getPartnerOffer(walkId, sessionId);
+            } catch (Exception error) {
+                response = new ApiClient.PartnerOfferResult(false, null);
+            }
+            ApiClient.PartnerOfferResult finalResponse = response;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || walk == null
+                        || !PartnerOfferRequestPolicy.isCurrent(
+                        key, generation, walk.walkId, walk.status, walk.phase,
+                        walk.currentPointOrder, partnerOfferRequestGeneration)) return;
+                routeViewModel.partnerOffer = finalResponse.success
+                        ? finalResponse.offer : null;
+                renderPartnerOffer(VisitingPresentation.PartnerOffer.from(
+                        routeViewModel.partnerOffer));
+            });
+        });
+    }
+
+    private void invalidatePartnerOffer() {
+        partnerOfferRequestGeneration++;
+        routeViewModel.partnerOfferKey = null;
+        routeViewModel.partnerOffer = null;
+        renderPartnerOffer(null);
+    }
+
+    private void openPartnerOffer() {
+        VisitingPresentation.PartnerOffer offer = VisitingPresentation.PartnerOffer.from(
+                routeViewModel.partnerOffer);
+        if (!VisitingPresentation.shouldShowPartnerOffer(offer)) return;
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(offer.actionUrl)));
+        } catch (ActivityNotFoundException error) {
+            Toast.makeText(this, "Не удалось открыть 2ГИС", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void resetVisitingUi() {
         renderedVisitingStructureKey = null;
         visitingNextCard.setVisibility(View.GONE);
         pointListScroll.setVisibility(View.VISIBLE);
-        renderPartnerOffer(null);
+        invalidatePartnerOffer();
         nextLabel.setText("ПЕРВАЯ ТОЧКА");
         status.setTextSize(14);
         status.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
@@ -2714,5 +2795,7 @@ public final class MapActivity extends ComponentActivity {
         long lastPositionMeasurementElapsedMillis;
         int guidancePointOrder;
         int guidancePathIndex;
+        String partnerOfferKey;
+        ApiClient.PartnerOffer partnerOffer;
     }
 }

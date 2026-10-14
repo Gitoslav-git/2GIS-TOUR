@@ -8,11 +8,31 @@ final class VisitingPresentation {
 
     static final class PartnerOffer {
         final String title;
+        final String description;
+        final String venueName;
+        final int walkingMinutes;
         final String disclosure;
+        final String actionLabel;
+        final String actionUrl;
 
-        PartnerOffer(String title, String disclosure) {
+        PartnerOffer(String title, String description, String venueName,
+                     int walkingMinutes, String disclosure,
+                     String actionLabel, String actionUrl) {
             this.title = title;
+            this.description = description;
+            this.venueName = venueName;
+            this.walkingMinutes = walkingMinutes;
             this.disclosure = disclosure;
+            this.actionLabel = actionLabel;
+            this.actionUrl = actionUrl;
+        }
+
+        static PartnerOffer from(ApiClient.PartnerOffer offer) {
+            if (offer == null || !offer.commercial) return null;
+            return new PartnerOffer(
+                    offer.title, offer.description, offer.venueName,
+                    offer.walkingMinutes, "Партнёрское предложение",
+                    offer.actionLabel, offer.actionUrl);
         }
     }
 
@@ -61,7 +81,18 @@ final class VisitingPresentation {
     }
 
     static boolean shouldShowPartnerOffer(PartnerOffer offer) {
-        return offer != null && offer.title != null && !offer.title.trim().isEmpty();
+        return offer != null
+                && present(offer.title)
+                && present(offer.venueName)
+                && offer.walkingMinutes > 0
+                && present(offer.disclosure)
+                && present(offer.actionLabel)
+                && offer.actionUrl != null
+                && offer.actionUrl.startsWith("https://2gis.ru/");
+    }
+
+    private static boolean present(String value) {
+        return value != null && !value.trim().isEmpty();
     }
 
     static boolean shouldShowRemainingPoints(boolean compactScreen) {

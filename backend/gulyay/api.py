@@ -22,7 +22,8 @@ from .intent import (IntentAuthenticationError, IntentInvalidResponse,
                      OpenAIIntentProvider, configured_model, interpret)
 from .models import (City, CreateRoute, GuestHistoryItem, PlaceSummary, QueryPreview, Route,
                      RouteRevision, StartWalk, WalkAction, WalkPosition,
-                     WalkProgress, WalkSession)
+                     WalkProgress, WalkSession, PartnerOfferResponse)
+from .partners import PartnerOfferSelector, PartnerRegistry
 from .planning_debug import planning_log
 from .repository import RouteRepository
 from .route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, build_route,
@@ -40,6 +41,7 @@ PLACE_CATALOG = PlaceCatalog()
 for seed_path in bundled_seed_paths():
     PLACE_CATALOG.import_seed(seed_path)
 CATALOG_PROVIDER = CatalogPlaceProvider(PLACE_CATALOG)
+PARTNER_REGISTRY = PartnerRegistry()
 IDEMPOTENT_ROUTES: dict[tuple[UUID, UUID], Route] = {}
 IDEMPOTENT_REVISIONS: dict[tuple[UUID, UUID], Route] = {}
 RECENT_ROUTES: dict[tuple[UUID, str], tuple[float, Route]] = {}
@@ -94,6 +96,10 @@ def get_route_repository() -> RouteRepository:
 
 def get_catalog_provider() -> CatalogPlaceProvider:
     return CATALOG_PROVIDER
+
+
+def get_partner_registry() -> PartnerRegistry:
+    return PARTNER_REGISTRY
 
 
 @app.exception_handler(RequestValidationError)
@@ -336,6 +342,35 @@ def get_walk(walk_id: UUID, x_device_session: UUID | None = Header(default=None)
     if state is None:
         return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
     return session_at(state)
+
+
+@app.get("/v1/walks/{walk_id}/partner-offer", response_model=PartnerOfferResponse)
+def get_partner_offer(
+        walk_id: UUID,
+        x_device_session: UUID | None = Header(default=None),
+        repository: RouteRepository = Depends(get_route_repository),
+        registry: PartnerRegistry = Depends(get_partner_registry),
+        geo: DgisGeoProvider = Depends(get_geo_provider),
+) -> PartnerOfferResponse | JSONResponse:
+    if x_device_session is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404)
+    state = repository.get_walk(walk_id, x_device_session)
+    if state is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404)
+    route = repository.get_version(
+        state.session.routeId, x_device_session, state.session.routeVersion,
+    )
+    if route is None:
+        return failure("VERSION_CONFLICT", "Версия маршрута недоступна", 409)
+    try:
+        offer = PartnerOfferSelector(registry, geo).select(state, route.cityId)
+    except GeoUnavailable:
+        # This optional provider failure is explicit in the response but remains
+        # a successful walk request: Android hides the card and keeps navigating.
+        return PartnerOfferResponse(status="PROVIDER_UNAVAILABLE", offer=None)
+    return PartnerOfferResponse(
+        status="AVAILABLE" if offer is not None else "NONE", offer=offer,
+    )
 
 
 @app.get("/v1/routes/{route_id}/walks/active", response_model=WalkSession)

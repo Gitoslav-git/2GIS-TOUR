@@ -416,6 +416,9 @@ class WalkProgress(StrictModel):
 class WalkState(StrictModel):
     session: WalkSession
     lastMeasuredAt: datetime | None = None
+    # Optional so walk JSON persisted by older releases remains readable.
+    # Partner discovery reuses this accepted device position and never starts GPS.
+    lastPosition: WalkPosition | None = None
     proximityStartedAt: datetime | None = None
     proximityPointOrder: int | None = Field(default=None, ge=1, le=8)
     exitStartedAt: datetime | None = None
@@ -425,3 +428,26 @@ class WalkState(StrictModel):
     visitPausedSeconds: int = Field(default=0, ge=0)
     # Legacy equivalent of visitPausedSeconds for final-point-only timers.
     finalPointPausedSeconds: int = Field(default=0, ge=0)
+
+
+class PartnerOfferAction(StrictModel):
+    type: Literal["OPEN_DGIS"]
+    label: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=500, pattern=r"^https://2gis\.ru/")
+
+
+class PartnerOffer(StrictModel):
+    offerId: str = Field(min_length=1, max_length=120)
+    partnerBrandId: str = Field(min_length=1, max_length=80)
+    dgisPlaceId: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=160)
+    description: str = Field(min_length=1, max_length=1000)
+    venueName: str = Field(min_length=1, max_length=240)
+    walkingMinutes: int = Field(ge=1, le=120)
+    isCommercial: Literal[True] = True
+    action: PartnerOfferAction
+
+
+class PartnerOfferResponse(StrictModel):
+    status: Literal["AVAILABLE", "NONE", "PROVIDER_UNAVAILABLE"]
+    offer: PartnerOffer | None = None

@@ -58,7 +58,11 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
             route, session.startedAt, measured, state.pausedSeconds,
         ),
     })
-    update: dict = {"lastMeasuredAt": measured, "session": session}
+    update: dict = {
+        "lastMeasuredAt": measured,
+        "lastPosition": position.model_copy(update={"measuredAt": measured}),
+        "session": session,
+    }
     accurate_and_near = (
         position.accuracyMeters <= MAX_ACCURACY_METERS
         and distance <= ARRIVAL_RADIUS_METERS
@@ -173,7 +177,11 @@ def _register_visit_position(state: WalkState, route: Route, measured: datetime,
                              position: WalkPosition,
                              distance: int) -> tuple[WalkState, WalkProgress]:
     session = _session_with_visit_elapsed(state, measured)
-    update: dict = {"lastMeasuredAt": measured, "session": session}
+    update: dict = {
+        "lastMeasuredAt": measured,
+        "lastPosition": position.model_copy(update={"measuredAt": measured}),
+        "session": session,
+    }
     accurate_and_outside = (
         position.accuracyMeters <= MAX_ACCURACY_METERS
         and distance > EXIT_RADIUS_METERS

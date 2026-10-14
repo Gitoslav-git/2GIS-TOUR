@@ -225,9 +225,44 @@ public class MainActivityRecoveryTest {
         assertEquals("", model.nextMeta);
         assertFalse(VisitingPresentation.shouldShowPartnerOffer(null));
         assertTrue(VisitingPresentation.shouldShowPartnerOffer(
-                new VisitingPresentation.PartnerOffer("Зайти за кофе?", "Реклама")));
+                new VisitingPresentation.PartnerOffer(
+                        "Зайти за кофе?", "Без скидок", "Cofix на Тверской",
+                        6, "Партнёрское предложение", "Открыть в 2ГИС",
+                        "https://2gis.ru/moscow/firm/branch-1")));
         assertTrue(VisitingPresentation.shouldShowRemainingPoints(true));
         assertTrue(VisitingPresentation.shouldShowRemainingPoints(false));
+    }
+
+    @Test public void partnerOfferRequiresCommercialDgisActionAndConfirmedFields() {
+        ApiClient.PartnerOffer apiOffer = new ApiClient.PartnerOffer(
+                "offer", "cofix", "branch-1", "Зайти за кофе?", "Без скидок",
+                "Cofix", 4, true, "Открыть в 2ГИС",
+                "https://2gis.ru/moscow/firm/branch-1");
+        VisitingPresentation.PartnerOffer offer = VisitingPresentation.PartnerOffer.from(apiOffer);
+        assertTrue(VisitingPresentation.shouldShowPartnerOffer(offer));
+        assertFalse(VisitingPresentation.shouldShowPartnerOffer(
+                new VisitingPresentation.PartnerOffer(
+                        "Зайти", "", "Cofix", 4, "Партнёрское предложение",
+                        "Открыть", "https://example.com")));
+        assertFalse(VisitingPresentation.shouldShowPartnerOffer(
+                VisitingPresentation.PartnerOffer.from(new ApiClient.PartnerOffer(
+                        "offer", "cofix", "branch-1", "Зайти", "Без скидок",
+                        "Cofix", 4, false, "Открыть",
+                        "https://2gis.ru/moscow/firm/branch-1"))));
+    }
+
+    @Test public void stalePartnerOfferResponseCannotCrossPointOrWalkState() {
+        String key = PartnerOfferRequestPolicy.key("walk", 1);
+        assertTrue(PartnerOfferRequestPolicy.isCurrent(
+                key, 3, "walk", "ACTIVE", "VISITING", 1, 3));
+        assertFalse(PartnerOfferRequestPolicy.isCurrent(
+                key, 3, "walk", "ACTIVE", "VISITING", 2, 3));
+        assertFalse(PartnerOfferRequestPolicy.isCurrent(
+                key, 3, "walk", "PAUSED", "VISITING", 1, 3));
+        assertFalse(PartnerOfferRequestPolicy.isCurrent(
+                key, 3, "walk", "ACTIVE", "MOVING", 1, 3));
+        assertFalse(PartnerOfferRequestPolicy.isCurrent(
+                key, 3, "walk", "ACTIVE", "VISITING", 1, 4));
     }
 
     @Test public void visitingPointListOnlyRendersWhenItsStructureChanges() {

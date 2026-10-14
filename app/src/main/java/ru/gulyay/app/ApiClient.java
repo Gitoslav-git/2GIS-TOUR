@@ -429,6 +429,40 @@ final class ApiClient {
         }
     }
 
+    static final class PartnerOffer {
+        final String offerId, partnerBrandId, dgisPlaceId;
+        final String title, description, venueName;
+        final int walkingMinutes;
+        final boolean commercial;
+        final String actionLabel, actionUrl;
+
+        PartnerOffer(String offerId, String partnerBrandId, String dgisPlaceId,
+                     String title, String description, String venueName,
+                     int walkingMinutes, boolean commercial,
+                     String actionLabel, String actionUrl) {
+            this.offerId = offerId;
+            this.partnerBrandId = partnerBrandId;
+            this.dgisPlaceId = dgisPlaceId;
+            this.title = title;
+            this.description = description;
+            this.venueName = venueName;
+            this.walkingMinutes = walkingMinutes;
+            this.commercial = commercial;
+            this.actionLabel = actionLabel;
+            this.actionUrl = actionUrl;
+        }
+    }
+
+    static final class PartnerOfferResult {
+        final boolean success;
+        final PartnerOffer offer;
+
+        PartnerOfferResult(boolean success, PartnerOffer offer) {
+            this.success = success;
+            this.offer = offer;
+        }
+    }
+
     static Result deleteRoute(String routeId, String sessionId) throws Exception {
         if (!BackendConfig.isConfigured()) {
             return new Result(false, "Сборка не подключена к backend.", null, 0);
@@ -463,6 +497,36 @@ final class ApiClient {
 
     static WalkResult getWalk(String walkId, String sessionId) throws Exception {
         return sendWalk("/v1/walks/" + walkId, "GET", null, sessionId);
+    }
+
+    static PartnerOfferResult getPartnerOffer(String walkId, String sessionId)
+            throws Exception {
+        String path = "/v1/walks/" + walkId + "/partner-offer";
+        String method = "GET";
+        long startedAt = BackendConfig.logRequest(method, path);
+        HttpURLConnection connection = null;
+        try {
+            connection = open(path, method, sessionId);
+            int status = connection.getResponseCode();
+            BackendConfig.logResponse(method, path, status, startedAt);
+            JSONObject response = readJson(connection, status);
+            if (status >= 400) return new PartnerOfferResult(false, null);
+            JSONObject value = response.optJSONObject("offer");
+            if (value == null) return new PartnerOfferResult(true, null);
+            JSONObject action = value.getJSONObject("action");
+            PartnerOffer offer = new PartnerOffer(
+                    value.getString("offerId"), value.getString("partnerBrandId"),
+                    value.getString("dgisPlaceId"), value.getString("title"),
+                    value.getString("description"), value.getString("venueName"),
+                    value.getInt("walkingMinutes"), value.optBoolean("isCommercial", false),
+                    action.getString("label"), action.getString("url"));
+            return new PartnerOfferResult(true, offer);
+        } catch (Exception error) {
+            BackendConfig.logFailure(method, path, startedAt, error);
+            throw error;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
     }
 
     static WalkResult getActiveWalk(String routeId, String sessionId) throws Exception {

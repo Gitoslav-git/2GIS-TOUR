@@ -539,3 +539,75 @@ def test_partner_endpoint_checks_owner_and_fails_closed_on_provider_error(tmp_pa
         app.dependency_overrides.clear()
         registry.close()
         repository.close()
+
+
+def test_seven_network_name_search_preview_no_db_ids(monkeypatch):
+    """QA preview searches names and does not write commercial partner state."""
+    monkeypatch.setenv("GULYAY_ENV", "test")
+    monkeypatch.setenv("GULYAY_PARTNER_PREVIEW", "1")
+    registry = PartnerRegistry(":memory:")
+
+    class PreviewGeo(FakePartnerGeo):
+        def __init__(self):
+            super().__init__(branches=[], duration_seconds=600)
+            self.names = []
+
+        def search_partner_branches_by_name(self, city_id, name, origin):
+            self.names.append(name)
+            if name == "Дринкит":
+                return [PartnerBranch(
+                    dgis_place_id="actual-2gis-place",
+                    dgis_brand_id="", name="Дринкит",
+                    lat=55.76, lon=37.61, schedule={"is_24x7": True},
+                )]
+            return []
+
+    geo = PreviewGeo()
+    offer = PartnerOfferSelector(registry, geo).select(visiting_state(), "moscow", NOW)
+    assert offer is not None
+    assert offer.partnerBrandId == "drinkit"
+    assert offer.isCommercial is False
+    assert offer.action.url == "https://2gis.ru/moscow/firm/actual-2gis-place"
+    assert geo.routing_calls == 1
+    assert len(geo.names) == 7
+    assert "Cofix" not in geo.names
+    assert "Чайхона №1 Тимура Ланского" not in geo.names
+    assert all(not row.is_active_partner
+               for row in registry.list_brands("moscow"))
+    registry.close()
+
+
+def test_name_search_preview_is_explicit_and_respects_25_minutes(monkeypatch):
+    registry = PartnerRegistry(":memory:")
+
+    class PreviewGeo(FakePartnerGeo):
+        def search_partner_branches_by_name(self, city_id, name, origin):
+            return [PartnerBranch(
+                dgis_place_id="real-place", dgis_brand_id="", name=name,
+                lat=55.76, lon=37.61, schedule={"is_24x7": True},
+            )] if name == "Дринкит" else []
+
+    geo = PreviewGeo(duration_seconds=1500)
+    monkeypatch.setenv("GULYAY_ENV", "test")
+    monkeypatch.delenv("GULYAY_PARTNER_PREVIEW", raising=False)
+    assert PartnerOfferSelector(registry, geo).select(
+        visiting_state(), "moscow", NOW) is None
+    monkeypatch.setenv("GULYAY_PARTNER_PREVIEW", "1")
+    offer = PartnerOfferSelector(registry, geo).select(
+        visiting_state(), "moscow", NOW)
+    assert offer is not None and offer.walkingMinutes == 25
+    geo.duration_seconds = 1501
+    assert PartnerOfferSelector(registry, geo).select(
+        visiting_state(), "moscow", NOW) is None
+    monkeypatch.setenv("GULYAY_ENV", "production")
+    assert PartnerOfferSelector(registry, geo).select(
+        visiting_state(), "moscow", NOW) is None
+    registry.close()
+
+
+def test_preview_name_filter_rejects_unrelated_2gis_hits():
+    from gulyay.geo import _partner_branch_name_matches
+    assert _partner_branch_name_matches("Surf Coffee", "Surf Coffee x Yakimanka")
+    assert _partner_branch_name_matches("One Price Coffee", "One Price Coffee")
+    assert not _partner_branch_name_matches("Surf Coffee", "Surf Coffeehouse")
+    assert not _partner_branch_name_matches("Дринкит", "Недринкит")

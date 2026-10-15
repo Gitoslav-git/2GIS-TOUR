@@ -14,6 +14,10 @@ from uuid import UUID
 from .models import CreateRoute, Route, WalkState
 
 
+class _AtomicReplaceConflict(Exception):
+    pass
+
+
 class RouteRepository:
     def __init__(self, path: str | Path | None = None):
         resolved = str(path) if path is not None else os.getenv("GULYAY_DB_PATH")
@@ -212,6 +216,40 @@ class RouteRepository:
                     (str(state.session.routeId),),
                 )
             return cursor.rowcount == 1
+
+    def replace_route_and_walk(self, route: Route, state: WalkState, owner: UUID,
+                               payload: CreateRoute, base_version: int) -> bool:
+        """Commit a route revision and its active walk rebase as one transaction."""
+        self.purge_expired()
+        try:
+            with self._lock, self._connection:
+                route_cursor = self._connection.execute(
+                    """UPDATE routes
+                       SET route_version = ?, route_json = ?, input_json = ?,
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE route_id = ? AND owner_session = ? AND route_version = ?""",
+                    (route.routeVersion, route.model_dump_json(), payload.model_dump_json(),
+                     str(route.routeId), str(owner), base_version),
+                )
+                if route_cursor.rowcount != 1:
+                    raise _AtomicReplaceConflict()
+                self._connection.execute(
+                    """INSERT INTO route_versions (route_id, route_version, route_json)
+                       VALUES (?, ?, ?)""",
+                    (str(route.routeId), route.routeVersion, route.model_dump_json()),
+                )
+                walk_cursor = self._connection.execute(
+                    """UPDATE walks SET walk_json = ?, updated_at = CURRENT_TIMESTAMP
+                       WHERE walk_id = ? AND route_id = ? AND owner_session = ?
+                         AND json_extract(walk_json, '$.session.routeVersion') = ?""",
+                    (state.model_dump_json(), str(state.session.walkId),
+                     str(route.routeId), str(owner), base_version),
+                )
+                if walk_cursor.rowcount != 1:
+                    raise _AtomicReplaceConflict()
+            return True
+        except _AtomicReplaceConflict:
+            return False
 
     def find_active_walk(self, owner: UUID) -> WalkState | None:
         with self._lock:

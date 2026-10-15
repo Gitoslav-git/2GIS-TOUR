@@ -12,19 +12,19 @@ final class VisitingPresentation {
         final String venueName;
         final int walkingMinutes;
         final String disclosure;
+        final String actionType;
         final String actionLabel;
-        final String actionUrl;
 
         PartnerOffer(String title, String description, String venueName,
                      int walkingMinutes, String disclosure,
-                     String actionLabel, String actionUrl) {
+                     String actionType, String actionLabel) {
             this.title = title;
             this.description = description;
             this.venueName = venueName;
             this.walkingMinutes = walkingMinutes;
             this.disclosure = disclosure;
+            this.actionType = actionType;
             this.actionLabel = actionLabel;
-            this.actionUrl = actionUrl;
         }
 
         static PartnerOffer from(ApiClient.PartnerOffer offer) {
@@ -32,8 +32,8 @@ final class VisitingPresentation {
             return new PartnerOffer(
                     offer.title, offer.description, offer.venueName,
                     offer.walkingMinutes, offer.commercial
-                            ? "Партнёрское предложение" : "ТЕСТОВЫЙ ПОИСК · НЕ РЕКЛАМА",
-                    offer.actionLabel, offer.actionUrl);
+                            ? "Партнёрское предложение" : "РЕКОМЕНДАЦИЯ РЯДОМ · НЕ РЕКЛАМА",
+                    offer.actionType, offer.actionLabel);
         }
     }
 
@@ -88,8 +88,7 @@ final class VisitingPresentation {
                 && offer.walkingMinutes > 0
                 && present(offer.disclosure)
                 && present(offer.actionLabel)
-                && offer.actionUrl != null
-                && offer.actionUrl.startsWith("https://2gis.ru/");
+                && "ADD_TO_ROUTE".equals(offer.actionType);
     }
 
     private static boolean present(String value) {

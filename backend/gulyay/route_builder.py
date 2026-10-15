@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .catalog import CatalogPlaceProvider
 from .geo import (GeoConstraintNotFound, GeoProvider, GeoRouteNotFound, GeoUnavailable,
-                  candidate_matches_concept, candidate_matches_food)
+                  PartnerBranch, candidate_matches_concept, candidate_matches_food)
 from .models import (CreateRoute, PlaceCandidate, QueryPreview, Route, RouteLeg,
                      RoutePoint, SearchArea)
 from .planning_debug import catalog_debug_log, planning_log
@@ -1049,6 +1049,99 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
         "planningStatus": "DEGRADED" if unmet else "SUCCESS",
         "unmetPreferences": list(dict.fromkeys(unmet)),
         "durationOverrunAccepted": duration_overrun_accepted,
+    })
+
+
+def insert_suggested_place(source: Route, branch: PartnerBranch, segment: str,
+                           current_order: int, geo: GeoProvider,
+                           now: datetime | None = None) -> Route:
+    """Insert a verified branch after the active point and reroute only the suffix."""
+    if (segment not in {"COFFEE", "RESTAURANT"}
+            or not 1 <= current_order <= len(source.points)
+            or len(source.points) >= 8
+            or any(point.placeId == branch.dgis_place_id for point in source.points)):
+        raise RouteNotFound()
+
+    candidate = PlaceCandidate(
+        placeId=branch.dgis_place_id, name=branch.name,
+        lat=branch.lat, lon=branch.lon,
+        rubrics=["Кофейня" if segment == "COFFEE" else "Ресторан"],
+        schedule=branch.schedule, isFood=True, providerType="branch",
+    )
+    visit_minutes = visit_duration_minutes(candidate, source.routePace)
+    prefix = list(source.points[:current_order])
+    suffix = list(source.points[current_order:])
+    route_points = [point.model_copy(update={"order": index + 1})
+                    for index, point in enumerate(prefix)]
+    legs = [leg for leg in source.legs if leg.toOrder <= current_order]
+    current = (prefix[-1].lat, prefix[-1].lon)
+    local_now = now or datetime.now(city_timezone())
+
+    try:
+        inserted_leg = geo.walking_leg(
+            current, (branch.lat, branch.lon), current_order, current_order + 1,
+        )
+    except GeoRouteNotFound as exc:
+        raise RouteNotFound() from exc
+    if (inserted_leg.durationSeconds > 25 * 60
+            or source.maxWalkingMinutes is not None
+            and math.ceil(inserted_leg.durationSeconds / 60) > source.maxWalkingMinutes):
+        raise RouteNotFound()
+    inserted_status = schedule_status_at(
+        branch.schedule,
+        local_now + timedelta(seconds=inserted_leg.durationSeconds),
+        visit_minutes,
+    )
+    if inserted_status != "OPEN":
+        raise RouteNotFound()
+    route_points.append(RoutePoint(
+        order=current_order + 1, placeId=branch.dgis_place_id,
+        name=branch.name, lat=branch.lat, lon=branch.lon,
+        visitMinutes=visit_minutes, scheduleStatus=inserted_status, isFood=True,
+    ))
+    legs.append(inserted_leg.model_copy(update={
+        "fromOrder": current_order, "toOrder": current_order + 1,
+    }))
+    current = branch.lat, branch.lon
+
+    for old in suffix:
+        next_order = len(route_points) + 1
+        try:
+            leg = geo.walking_leg(
+                current, (old.lat, old.lon), next_order - 1, next_order,
+            )
+        except GeoRouteNotFound as exc:
+            raise RouteNotFound() from exc
+        if (source.maxWalkingMinutes is not None
+                and math.ceil(leg.durationSeconds / 60) > source.maxWalkingMinutes):
+            raise RouteNotFound()
+        route_points.append(old.model_copy(update={"order": next_order}))
+        legs.append(leg.model_copy(update={
+            "fromOrder": next_order - 1, "toOrder": next_order,
+        }))
+        current = old.lat, old.lon
+
+    total_minutes = math.ceil((
+        sum(leg.durationSeconds for leg in legs)
+        + sum(point.visitMinutes * 60 for point in route_points)
+    ) / 60)
+    if (source.durationSource != "default"
+            and total_minutes > source.requestedMinutes
+            and not source.durationOverrunAccepted):
+        raise DurationConfirmationRequired(
+            source.requestedMinutes, total_minutes, source.durationMode,
+        )
+    unused_minutes = max(0, source.requestedMinutes - total_minutes)
+    utilization = total_minutes / max(1, source.requestedMinutes)
+    unmet = [item for item in source.unmetPreferences if item != "DURATION_TARGET"]
+    if utilization < _good_duration_utilization() or total_minutes > source.requestedMinutes:
+        unmet.append("DURATION_TARGET")
+    return source.model_copy(update={
+        "points": route_points, "legs": legs,
+        "totalMinutes": total_minutes, "unusedMinutes": unused_minutes,
+        "durationUtilization": round(utilization, 3),
+        "planningStatus": "DEGRADED" if unmet else "SUCCESS",
+        "unmetPreferences": list(dict.fromkeys(unmet)),
     })
 
 

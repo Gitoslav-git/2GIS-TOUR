@@ -7,6 +7,7 @@ import secrets
 import threading
 import time
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, Query, Request
@@ -20,14 +21,16 @@ from .geo import (DgisGeoProvider, GeoAuthenticationError, GeoConstraintNotFound
 from .intent import (IntentAuthenticationError, IntentInvalidResponse,
                      IntentNeedsClarification, IntentUnavailable,
                      OpenAIIntentProvider, configured_model, interpret)
-from .models import (City, CreateRoute, GuestHistoryItem, PlaceSummary, QueryPreview, Route,
-                     RouteRevision, StartWalk, WalkAction, WalkPosition,
-                     WalkProgress, WalkSession, PartnerOfferResponse)
-from .partners import PartnerOfferSelector, PartnerRegistry
+from .models import (City, CreateRoute, GuestHistoryItem, InsertSuggestedPlaceRequest,
+                     InsertSuggestedPlaceResponse, PartnerOfferResponse, PlaceSummary,
+                     QueryPreview, Route, RouteRevision, StartWalk, WalkAction,
+                     WalkPosition, WalkProgress, WalkSession)
+from .partners import (MAX_POSITION_ACCURACY_METERS, MAX_POSITION_AGE_SECONDS,
+                       NAME_SEARCH_PILOT, PartnerOfferSelector, PartnerRegistry)
 from .planning_debug import planning_log
 from .repository import RouteRepository
 from .route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, build_route,
-                            rebuild_route_with_points)
+                            insert_suggested_place, rebuild_route_with_points)
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, session_at, start_walk)
 from .version import __version__ as APP_VERSION
@@ -363,13 +366,137 @@ def get_partner_offer(
     if route is None:
         return failure("VERSION_CONFLICT", "Версия маршрута недоступна", 409)
     try:
-        offer = PartnerOfferSelector(registry, geo).select(state, route.cityId)
+        offer = PartnerOfferSelector(registry, geo).select(
+            state, route.cityId,
+            excluded_place_ids={point.placeId for point in route.points},
+        )
     except GeoUnavailable:
         # This optional provider failure is explicit in the response but remains
         # a successful walk request: Android hides the card and keeps navigating.
         return PartnerOfferResponse(status="PROVIDER_UNAVAILABLE", offer=None)
     return PartnerOfferResponse(
         status="AVAILABLE" if offer is not None else "NONE", offer=offer,
+    )
+
+
+@app.post("/v1/walks/{walk_id}/insert-suggested-place",
+          response_model=InsertSuggestedPlaceResponse)
+def insert_walk_suggested_place(
+        request: Request,
+        walk_id: UUID,
+        payload: InsertSuggestedPlaceRequest,
+        x_device_session: UUID | None = Header(default=None),
+        x_request_id: UUID | None = Header(default=None),
+        repository: RouteRepository = Depends(get_route_repository),
+        registry: PartnerRegistry = Depends(get_partner_registry),
+        geo: DgisGeoProvider = Depends(get_geo_provider),
+) -> InsertSuggestedPlaceResponse | JSONResponse:
+    request_id = str(x_request_id) if x_request_id else None
+    if x_device_session is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+    limited = _client_rate_limit(x_device_session, request_id, request)
+    if limited:
+        return limited
+
+    state = repository.get_walk(walk_id, x_device_session)
+    if state is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404, request_id)
+    route_state = repository.get(state.session.routeId, x_device_session)
+    if route_state is None:
+        return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
+    current, source = route_state
+    if (payload.expectedRouteVersion != current.routeVersion
+            or state.session.routeVersion != current.routeVersion):
+        return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
+                       {"currentVersion": current.routeVersion})
+    if state.session.status != "ACTIVE" or state.session.phase != "VISITING":
+        return failure("WALK_INVALID_STATE", "Добавление доступно только во время посещения",
+                       409, request_id)
+    position = state.lastPosition
+    measured = position.measuredAt.astimezone(timezone.utc) if position else None
+    position_age = ((datetime.now(timezone.utc) - measured).total_seconds()
+                    if measured else MAX_POSITION_AGE_SECONDS + 1)
+    if (position is None or position.accuracyMeters > MAX_POSITION_ACCURACY_METERS
+            or position_age < -5 or position_age > MAX_POSITION_AGE_SECONDS):
+        return failure("SUGGESTION_EXPIRED", "Нужна свежая точная геопозиция", 409,
+                       request_id)
+    current_order = state.session.currentPointOrder
+    if current_order is None or not 1 <= current_order <= len(current.points):
+        return failure("WALK_INVALID_STATE", "Текущая точка прогулки недоступна", 409,
+                       request_id)
+    if len(current.points) >= 8:
+        return failure("POINT_LIMIT_REACHED", "В маршруте может быть не больше восьми точек",
+                       409, request_id)
+    if any(point.placeId == payload.dgisPlaceId for point in current.points):
+        return failure("PLACE_ALREADY_IN_ROUTE", "Это заведение уже есть в маршруте", 409,
+                       request_id)
+
+    pilot = {partner_id: (name, segment)
+             for partner_id, name, segment in NAME_SEARCH_PILOT}
+    brand = pilot.get(payload.partnerBrandId)
+    if brand is None:
+        active = {offer.partner_brand_id: (offer.search_query, offer.segment)
+                  for offer in registry.eligible_offers(
+                      current.cityId, datetime.now(timezone.utc))}
+        brand = active.get(payload.partnerBrandId)
+    if brand is None or current.cityId != "moscow":
+        return failure("SUGGESTION_NOT_ALLOWED", "Рекомендация больше недоступна", 409,
+                       request_id)
+    expected_name, segment = brand
+
+    try:
+        branch = geo.resolve_suggested_branch(
+            current.cityId, payload.dgisPlaceId, expected_name,
+        )
+        if branch is None:
+            return failure("SUGGESTION_NOT_FOUND", "Не удалось подтвердить заведение в 2ГИС",
+                           422, request_id)
+        replacement = insert_suggested_place(
+            current, branch, segment, current_order, geo,
+        ).model_copy(update={"routeVersion": current.routeVersion + 1})
+    except (GeoAuthenticationError, GeoRateLimited, GeoInvalidResponse, GeoUnavailable) as exc:
+        return dgis_failure(exc, request_id)
+    except DurationConfirmationRequired as exc:
+        return failure(
+            "TIME_BUDGET_CONFIRMATION_REQUIRED",
+            "После добавления маршрут займёт больше выбранного времени",
+            409, request_id,
+            {"requestedMinutes": exc.requested_minutes,
+             "projectedMinutes": exc.projected_minutes,
+             "overrunMinutes": exc.overrun_minutes,
+             "durationMode": exc.duration_mode,
+             "canOverride": False},
+        )
+    except RouteNotFound:
+        return failure("ROUTE_NOT_FOUND", "Не удалось безопасно добавить заведение в маршрут",
+                       422, request_id)
+
+    delta = replacement.totalMinutes - current.totalMinutes
+    updated_session = state.session.model_copy(update={
+        "routeVersion": replacement.routeVersion,
+        "estimatedRemainingMinutes": max(
+            0, state.session.estimatedRemainingMinutes + delta,
+        ),
+    })
+    updated_walk = state.model_copy(update={"session": updated_session})
+    with STATE_LOCK:
+        latest_walk = repository.get_walk(walk_id, x_device_session)
+        latest_route = repository.get(current.routeId, x_device_session)
+        if (latest_walk is None or latest_route is None
+                or latest_route[0].routeVersion != current.routeVersion
+                or latest_walk.session.routeVersion != current.routeVersion
+                or latest_walk.session.status != "ACTIVE"
+                or latest_walk.session.phase != "VISITING"
+                or latest_walk.session.currentPointOrder != current_order):
+            latest_version = latest_route[0].routeVersion if latest_route else current.routeVersion
+            return failure("VERSION_CONFLICT", "Маршрут или прогулка уже изменились", 409,
+                           request_id, {"currentVersion": latest_version})
+        if not repository.replace_route_and_walk(
+                replacement, updated_walk, x_device_session, source,
+                current.routeVersion):
+            return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id)
+    return InsertSuggestedPlaceResponse(
+        route=replacement, walk=session_at(updated_walk),
     )
 
 

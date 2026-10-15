@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
                              "промокоды не предусмотрены."),
                 valid_from=datetime(2026, 10, 13, 0, 0, tzinfo=moscow),
                 valid_until=datetime(2026, 12, 31, 23, 59, 59, tzinfo=moscow),
-                timezone_name="Europe/Moscow", button_text="Открыть в 2ГИС",
+                timezone_name="Europe/Moscow", button_text="Добавить в маршрут",
                 status="ACTIVE",
             )
         print(f"Synthetic partner fixture enabled only in {path}: "

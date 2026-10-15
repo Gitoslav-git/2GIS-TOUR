@@ -434,12 +434,12 @@ final class ApiClient {
         final String title, description, venueName;
         final int walkingMinutes;
         final boolean commercial;
-        final String actionLabel, actionUrl;
+        final String actionType, actionLabel;
 
         PartnerOffer(String offerId, String partnerBrandId, String dgisPlaceId,
                      String title, String description, String venueName,
                      int walkingMinutes, boolean commercial,
-                     String actionLabel, String actionUrl) {
+                     String actionType, String actionLabel) {
             this.offerId = offerId;
             this.partnerBrandId = partnerBrandId;
             this.dgisPlaceId = dgisPlaceId;
@@ -448,8 +448,8 @@ final class ApiClient {
             this.venueName = venueName;
             this.walkingMinutes = walkingMinutes;
             this.commercial = commercial;
+            this.actionType = actionType;
             this.actionLabel = actionLabel;
-            this.actionUrl = actionUrl;
         }
     }
 
@@ -467,6 +467,23 @@ final class ApiClient {
             this.success = success;
             this.status = status;
             this.offer = offer;
+        }
+    }
+
+    static final class SuggestedPlaceResult {
+        final boolean success;
+        final String message;
+        final String errorCode;
+        final Result route;
+        final WalkResult walk;
+
+        SuggestedPlaceResult(boolean success, String message, String errorCode,
+                             Result route, WalkResult walk) {
+            this.success = success;
+            this.message = message;
+            this.errorCode = errorCode;
+            this.route = route;
+            this.walk = walk;
         }
     }
 
@@ -527,8 +544,47 @@ final class ApiClient {
                     value.getString("dgisPlaceId"), value.getString("title"),
                     value.getString("description"), value.getString("venueName"),
                     value.getInt("walkingMinutes"), value.optBoolean("isCommercial", false),
-                    action.getString("label"), action.getString("url"));
+                    action.getString("type"), action.getString("label"));
             return new PartnerOfferResult(true, offerStatus, offer);
+        } catch (Exception error) {
+            BackendConfig.logFailure(method, path, startedAt, error);
+            throw error;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    static SuggestedPlaceResult insertSuggestedPlace(
+            String walkId, int expectedRouteVersion, String cityId,
+            PartnerOffer offer, String sessionId) throws Exception {
+        String path = "/v1/walks/" + walkId + "/insert-suggested-place";
+        String method = "POST";
+        long startedAt = BackendConfig.logRequest(method, path);
+        HttpURLConnection connection = null;
+        try {
+            connection = open(path, method, sessionId);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            JSONObject payload = new JSONObject()
+                    .put("expectedRouteVersion", expectedRouteVersion)
+                    .put("partnerBrandId", offer.partnerBrandId)
+                    .put("dgisPlaceId", offer.dgisPlaceId);
+            byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+            try (java.io.OutputStream output = connection.getOutputStream()) {
+                output.write(bytes);
+            }
+            int status = connection.getResponseCode();
+            BackendConfig.logResponse(method, path, status, startedAt);
+            JSONObject response = readJson(connection, status);
+            if (status >= 400) {
+                Result error = routeError(response, status);
+                return new SuggestedPlaceResult(false, error.message,
+                        error.errorCode, null, null);
+            }
+            Result updatedRoute = routeFromJson(response.getJSONObject("route"), cityId);
+            WalkResult updatedWalk = walkFromJson(response.getJSONObject("walk"));
+            return new SuggestedPlaceResult(true, "Заведение добавлено в маршрут",
+                    null, updatedRoute, updatedWalk);
         } catch (Exception error) {
             BackendConfig.logFailure(method, path, startedAt, error);
             throw error;
@@ -668,23 +724,13 @@ final class ApiClient {
                 failed.transientFailure = status == 408 || status == 429 || status >= 500;
                 return failed;
             }
-            boolean pointReached = response.optBoolean("pointReached", false);
-            boolean pointExited = response.optBoolean("pointExited", false);
-            int distance = response.has("distanceMeters") && !response.isNull("distanceMeters")
-                    ? response.getInt("distanceMeters") : -1;
             JSONObject walk = response.optJSONObject("walk");
             if (walk == null) walk = response;
-            String walkStatus = walk.getString("status");
-            int order = walk.has("currentPointOrder") && !walk.isNull("currentPointOrder")
-                    ? walk.getInt("currentPointOrder") : 0;
-            int remaining = walk.optInt("estimatedRemainingMinutes", 0);
-            String phase = walk.optString("phase", "MOVING");
-            int visitElapsed = walk.optInt("visitElapsedSeconds", 0);
-            String message = walkMessage(walkStatus, order, remaining, pointReached,
-                    pointExited, phase, visitElapsed, distance);
-            return new WalkResult(true, message, walk.getString("walkId"), walkStatus,
-                    order, remaining, pointReached, distance, null, 0,
-                    phase, visitElapsed, pointExited);
+            return walkFromJson(walk,
+                    response.optBoolean("pointReached", false),
+                    response.optBoolean("pointExited", false),
+                    response.has("distanceMeters") && !response.isNull("distanceMeters")
+                            ? response.getInt("distanceMeters") : -1);
         } catch (Exception error) {
             BackendConfig.logFailure(method, path, startedAt, error);
             throw error;
@@ -727,17 +773,40 @@ final class ApiClient {
                 error.transientFailure = status == 408 || status == 429 || status >= 500;
                 return error;
             }
-            Result result = new Result(true, routeSummary(response, cityId), response.getString("routeId"),
-                    response.getInt("routeVersion"), 0, null, routePoints(response),
-                    routePath(response));
-            fillRouteMetrics(result, response);
-            return result;
+            return routeFromJson(response, cityId);
         } catch (Exception error) {
             BackendConfig.logFailure(method, path, startedAt, error);
             throw error;
         } finally {
             if (connection != null) connection.disconnect();
         }
+    }
+
+    private static Result routeFromJson(JSONObject response, String cityId) throws Exception {
+        Result result = new Result(true, routeSummary(response, cityId),
+                response.getString("routeId"), response.getInt("routeVersion"),
+                0, null, routePoints(response), routePath(response));
+        fillRouteMetrics(result, response);
+        return result;
+    }
+
+    private static WalkResult walkFromJson(JSONObject walk) throws Exception {
+        return walkFromJson(walk, false, false, -1);
+    }
+
+    private static WalkResult walkFromJson(JSONObject walk, boolean pointReached,
+                                           boolean pointExited, int distance) throws Exception {
+        String walkStatus = walk.getString("status");
+        int order = walk.has("currentPointOrder") && !walk.isNull("currentPointOrder")
+                ? walk.getInt("currentPointOrder") : 0;
+        int remaining = walk.optInt("estimatedRemainingMinutes", 0);
+        String phase = walk.optString("phase", "MOVING");
+        int visitElapsed = walk.optInt("visitElapsedSeconds", 0);
+        String message = walkMessage(walkStatus, order, remaining, pointReached,
+                pointExited, phase, visitElapsed, distance);
+        return new WalkResult(true, message, walk.getString("walkId"), walkStatus,
+                order, remaining, pointReached, distance, null, 0,
+                phase, visitElapsed, pointExited);
     }
 
     private static String formatStopwatch(int seconds) {

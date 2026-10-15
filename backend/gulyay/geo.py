@@ -865,6 +865,54 @@ class DgisGeoProvider:
             seen.add(place_id)
         return result
 
+    def resolve_suggested_branch(self, city_id: str, place_id: str,
+                                 expected_name: str) -> PartnerBranch | None:
+        """Resolve and revalidate one client-selected nearby suggestion by ID."""
+        clean_id = str(place_id).strip()
+        if not clean_id or len(clean_id) > 120 or "," in clean_id:
+            return None
+        center = self.resolve_city_center(city_id)
+        items = self._places_from(
+            PLACES_BY_ID_URL, request_type="partner_discovery",
+            id=clean_id, locale="ru_RU",
+            fields=("items.point,items.brand,items.schedule,items.is_routing_available,"
+                    "items.adm_div,items.city_alias"),
+        )
+        matching = [item for item in items
+                    if str(item.get("id", "")).strip() == clean_id]
+        if len(matching) != 1:
+            return None
+        item = matching[0]
+        point = item.get("point")
+        name = str(item.get("name", "")).strip()
+        if (not name or not _valid_point(point)
+                or item.get("is_routing_available") is False
+                or not _belongs_to_city(item, city_id, center)):
+            return None
+        raw = item.get("brand")
+        rows = raw if isinstance(raw, list) else [raw]
+        brands = {(str(value.get("id", "")).strip(),
+                   str(value.get("name", "")).strip())
+                  for value in rows if isinstance(value, dict)
+                  and str(value.get("id", "")).strip()
+                  and str(value.get("name", "")).strip()}
+        if brands:
+            if len(brands) != 1:
+                return None
+            brand_id, brand_name = next(iter(brands))
+            if not _brand_names_match(expected_name, brand_name):
+                return None
+        else:
+            if not _partner_branch_name_matches(expected_name, name):
+                return None
+            brand_id = ""
+        schedule = item.get("schedule")
+        return PartnerBranch(
+            dgis_place_id=clean_id, dgis_brand_id=brand_id, name=name,
+            lat=float(point["lat"]), lon=float(point["lon"]),
+            schedule=schedule if isinstance(schedule, dict) else {},
+        )
+
 
     def search_partner_branches(self, city_id: str, dgis_brand_id: str,
                                 origin: tuple[float, float]) -> list[PartnerBranch]:

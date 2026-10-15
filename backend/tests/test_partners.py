@@ -14,6 +14,8 @@ from gulyay.models import (CreateRoute, Filters, Route, RouteLeg, RoutePoint,
 from gulyay.partners import PARTNER_BRANDS, PartnerOfferSelector, PartnerRegistry
 from gulyay.partner_test_fixture import BRAND_IDS, _brand_id_map
 from gulyay.repository import RouteRepository
+from gulyay.route_builder import insert_suggested_place
+from gulyay.walk import register_position
 
 
 NOW = datetime(2026, 10, 14, 12, tzinfo=timezone.utc)
@@ -36,6 +38,14 @@ class FakePartnerGeo:
         if self.unavailable:
             raise GeoUnavailable()
         return self.branches
+
+    def search_partner_branches_by_name(self, city_id, name, origin):
+        self.search_calls += 1
+        if self.unavailable:
+            raise GeoUnavailable()
+        expected = name.casefold()
+        return [branch for branch in self.branches
+                if branch.name.casefold().startswith(expected)]
 
     def walking_leg(self, start, end, from_order, to_order):
         self.routing_calls += 1
@@ -80,7 +90,7 @@ def activate_test_brand(registry: PartnerRegistry, partner_id: str,
         valid_from=datetime(2026, 10, 13, tzinfo=timezone(timedelta(hours=3))),
         valid_until=datetime(2026, 12, 31, 23, 59, 59,
                              tzinfo=timezone(timedelta(hours=3))),
-        timezone_name="Europe/Moscow", button_text="Открыть в 2ГИС",
+        timezone_name="Europe/Moscow", button_text="Добавить в маршрут",
         status=status,
     )
 
@@ -106,28 +116,28 @@ def test_registry_creation_and_seed_are_idempotent_and_inactive(tmp_path):
     second.close()
 
 
-def test_no_active_partner_returns_none_without_2gis_call():
+def test_no_active_partner_still_allows_noncommercial_nearby_search():
     registry = PartnerRegistry(":memory:")
     geo = FakePartnerGeo()
     assert PartnerOfferSelector(registry, geo).select(
         visiting_state(), "moscow", NOW,
     ) is None
-    assert geo.search_calls == 0 and geo.routing_calls == 0
+    assert geo.search_calls == 7 and geo.routing_calls == 0
     registry.close()
 
 
-def test_candidate_or_offer_without_active_status_never_calls_2gis():
+def test_paused_commercial_offer_does_not_enable_commercial_search():
     registry = PartnerRegistry(":memory:")
     activate_test_cofix(registry, status="PAUSED")
     geo = FakePartnerGeo()
     assert PartnerOfferSelector(registry, geo).select(
         visiting_state(), "moscow", NOW,
     ) is None
-    assert geo.search_calls == 0
+    assert geo.search_calls == 7
     registry.close()
 
 
-def test_valid_synthetic_offer_uses_verified_walking_time_and_2gis_action():
+def test_valid_synthetic_offer_uses_verified_walking_time_and_insert_action():
     registry = PartnerRegistry(":memory:")
     activate_test_cofix(registry)
     geo = FakePartnerGeo(duration_seconds=301)
@@ -139,7 +149,8 @@ def test_valid_synthetic_offer_uses_verified_walking_time_and_2gis_action():
     assert offer.venueName == "Cofix на Тверской"
     assert offer.walkingMinutes == 6
     assert offer.isCommercial is True
-    assert offer.action.url == "https://2gis.ru/moscow/firm/branch-1"
+    assert offer.action.type == "ADD_TO_ROUTE"
+    assert offer.action.label == "Добавить в маршрут"
     assert geo.search_calls == 1 and geo.routing_calls == 1
     registry.close()
 
@@ -460,6 +471,36 @@ def test_batch_reference_lookup_rejects_multiple_brand_values():
     assert reference.dgis_org_id is None
 
 
+def test_suggested_branch_by_id_is_revalidated_for_city_and_single_brand():
+    clear_geo_caches()
+
+    def response(request):
+        if request.url.params.get("q") == "Москва":
+            items = [{"id": "city", "name": "Москва",
+                      "point": {"lat": 55.7558, "lon": 37.6173}}]
+        else:
+            items = [{
+                "id": "drinkit-branch", "name": "Дринкит на Тверской",
+                "city_alias": "moscow", "is_routing_available": True,
+                "brand": {"id": "brand-drinkit", "name": "Дринкит"},
+                "point": {"lat": 55.756, "lon": 37.618},
+                "schedule": {"is_24x7": True},
+            }]
+        return httpx.Response(200, json={"meta": {"code": 200},
+                                         "result": {"items": items}})
+
+    provider = DgisGeoProvider("places", "routing", httpx.MockTransport(response))
+    branch = provider.resolve_suggested_branch(
+        "moscow", "drinkit-branch", "Дринкит",
+    )
+    assert branch is not None
+    assert branch.dgis_place_id == "drinkit-branch"
+    assert branch.dgis_brand_id == "brand-drinkit"
+    assert provider.resolve_suggested_branch(
+        "moscow", "drinkit-branch", "Surf Coffee",
+    ) is None
+
+
 def test_verified_brand_id_cannot_be_silently_replaced():
     registry = PartnerRegistry(":memory:")
     assert registry.confirm_brand_id("cofix", "moscow", "brand-one") is True
@@ -534,17 +575,272 @@ def test_partner_endpoint_checks_owner_and_fails_closed_on_provider_error(tmp_pa
         assert body["status"] == "AVAILABLE"
         assert body["offer"]["offerId"] == "test_cofix_moscow_001"
         assert body["offer"]["walkingMinutes"] == 4
-        assert body["offer"]["action"]["url"].endswith("/branch-1")
+        assert body["offer"]["action"] == {
+            "type": "ADD_TO_ROUTE", "label": "Добавить в маршрут",
+        }
     finally:
         app.dependency_overrides.clear()
         registry.close()
         repository.close()
 
 
-def test_seven_network_name_search_preview_no_db_ids(monkeypatch):
-    """QA preview searches names and does not write commercial partner state."""
-    monkeypatch.setenv("GULYAY_ENV", "test")
-    monkeypatch.setenv("GULYAY_PARTNER_PREVIEW", "1")
+class InsertGeo(FakePartnerGeo):
+    def resolve_suggested_branch(self, city_id, place_id, expected_name):
+        if (city_id, place_id, expected_name) != ("moscow", "drinkit-branch", "Дринкит"):
+            return None
+        return PartnerBranch(
+            dgis_place_id=place_id, dgis_brand_id="brand-drinkit",
+            name="Дринкит на Тверской", lat=55.751, lon=37.612,
+            schedule={"is_24x7": True},
+        )
+
+
+def _insert_endpoint_state(tmp_path, geo, route=None):
+    repository = RouteRepository(tmp_path / "insert.sqlite3")
+    registry = PartnerRegistry(tmp_path / "insert.sqlite3")
+    owner = uuid4()
+    route = route or route_for_api()
+    repository.save_new(route, owner, CreateRoute(
+        cityId="moscow", query="Прогулка по Москве", deviceSessionId=owner,
+    ))
+    state = visiting_state()
+    moment = datetime.now(timezone.utc)
+    fresh_position = state.lastPosition.model_copy(update={
+        "measuredAt": moment,
+    })
+    state = state.model_copy(update={"session": state.session.model_copy(update={
+        "routeId": route.routeId, "routeVersion": route.routeVersion,
+        "startedAt": moment - timedelta(hours=1),
+        "visitStartedAt": moment - timedelta(minutes=2),
+        "visitElapsedSeconds": 120,
+    }), "lastMeasuredAt": fresh_position.measuredAt,
+        "lastPosition": fresh_position})
+    repository.save_walk(state, owner)
+    app.dependency_overrides[get_route_repository] = lambda: repository
+    app.dependency_overrides[get_partner_registry] = lambda: registry
+    app.dependency_overrides[get_geo_provider] = lambda: geo
+    return TestClient(app), repository, registry, owner, route, state
+
+
+def test_insert_suggested_place_updates_route_and_visiting_walk_atomically(tmp_path):
+    client, repository, registry, owner, route, state = _insert_endpoint_state(
+        tmp_path, InsertGeo(duration_seconds=240),
+    )
+    try:
+        response = client.post(
+            f"/v1/walks/{state.session.walkId}/insert-suggested-place",
+            headers={"X-Device-Session": str(owner)},
+            json={"expectedRouteVersion": 1, "partnerBrandId": "drinkit",
+                  "dgisPlaceId": "drinkit-branch"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["route"]["routeVersion"] == 2
+        assert [point["placeId"] for point in body["route"]["points"]] == [
+            "point", "drinkit-branch",
+        ]
+        assert body["walk"]["routeVersion"] == 2
+        assert body["walk"]["phase"] == "VISITING"
+        assert body["walk"]["currentPointOrder"] == 1
+        assert body["walk"]["visitStartedAt"] is not None
+        persisted_route = repository.get(route.routeId, owner)[0]
+        persisted_walk = repository.get_walk(state.session.walkId, owner)
+        assert persisted_route.routeVersion == persisted_walk.session.routeVersion == 2
+        assert persisted_walk.session.visitStartedAt == state.session.visitStartedAt
+        assert persisted_walk.session.visitElapsedSeconds == 120
+        first_exit_at = datetime.now(timezone.utc) + timedelta(seconds=1)
+        outside = WalkPosition(
+            lat=55.80, lon=37.70, accuracyMeters=10,
+            measuredAt=first_exit_at,
+        )
+        leaving, _ = register_position(
+            persisted_walk, persisted_route, outside, now=first_exit_at,
+        )
+        left, progress = register_position(
+            leaving, persisted_route,
+            outside.model_copy(update={
+                "measuredAt": first_exit_at + timedelta(seconds=6),
+            }),
+            now=first_exit_at + timedelta(seconds=6),
+        )
+        assert progress.pointExited is True
+        assert left.session.phase == "MOVING"
+        assert left.session.currentPointOrder == 2
+        assert persisted_route.points[1].placeId == "drinkit-branch"
+        reopened = RouteRepository(tmp_path / "insert.sqlite3")
+        try:
+            assert reopened.get(route.routeId, owner)[0].routeVersion == 2
+            restored_walk = reopened.get_walk(state.session.walkId, owner)
+            assert restored_walk.session.routeVersion == 2
+            assert restored_walk.session.phase == "VISITING"
+        finally:
+            reopened.close()
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+def test_insert_reuses_completed_prefix_and_preserves_suffix_order():
+    source = route_for_api()
+    points = [RoutePoint(
+        order=index, placeId=f"p{index}", name=f"Точка {index}",
+        lat=55.74 + index * .01, lon=37.60 + index * .01,
+        visitMinutes=20, scheduleStatus="OPEN", isFood=False,
+    ) for index in range(1, 4)]
+    legs = [RouteLeg(
+        fromOrder=index - 1, toOrder=index, distanceMeters=100 * index,
+        durationSeconds=60 * index,
+        geometry=[[37.59 + index * .01, 55.73 + index * .01],
+                  [37.60 + index * .01, 55.74 + index * .01]],
+    ) for index in range(1, 4)]
+    source = source.model_copy(update={"points": points, "legs": legs})
+    geo = FakePartnerGeo(branches=[], duration_seconds=180)
+    branch = PartnerBranch(
+        "drinkit", "brand-drinkit", "Дринкит", 55.765, 37.625,
+        {"is_24x7": True},
+    )
+
+    changed = insert_suggested_place(source, branch, "COFFEE", 2, geo, NOW)
+
+    assert [point.placeId for point in changed.points] == ["p1", "p2", "drinkit", "p3"]
+    assert [(leg.fromOrder, leg.toOrder) for leg in changed.legs] == [
+        (0, 1), (1, 2), (2, 3), (3, 4),
+    ]
+    assert changed.legs[:2] == source.legs[:2]
+    assert geo.routing_calls == 2
+
+
+def test_insert_routing_failure_leaves_route_and_walk_unchanged(tmp_path):
+    client, repository, registry, owner, route, state = _insert_endpoint_state(
+        tmp_path, InsertGeo(duration_seconds=None),
+    )
+    try:
+        response = client.post(
+            f"/v1/walks/{state.session.walkId}/insert-suggested-place",
+            headers={"X-Device-Session": str(owner)},
+            json={"expectedRouteVersion": 1, "partnerBrandId": "drinkit",
+                  "dgisPlaceId": "drinkit-branch"},
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "ROUTE_NOT_FOUND"
+        assert repository.get(route.routeId, owner)[0].routeVersion == 1
+        assert repository.get_walk(state.session.walkId, owner).session.routeVersion == 1
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+def test_atomic_repository_replace_rolls_back_if_walk_compare_and_swap_fails(tmp_path):
+    repository = RouteRepository(tmp_path / "atomic.sqlite3")
+    owner = uuid4()
+    route = route_for_api()
+    create = CreateRoute(cityId="moscow", query="Прогулка по Москве",
+                         deviceSessionId=owner)
+    repository.save_new(route, owner, create)
+    state = visiting_state().model_copy(update={"session": visiting_state().session.model_copy(
+        update={"routeId": route.routeId, "routeVersion": 1},
+    )})
+    repository.save_walk(state, owner)
+    replacement = route.model_copy(update={"routeVersion": 2})
+    missing_walk = state.model_copy(update={"session": state.session.model_copy(update={
+        "walkId": uuid4(), "routeVersion": 2,
+    })})
+
+    assert repository.replace_route_and_walk(
+        replacement, missing_walk, owner, create, 1,
+    ) is False
+    assert repository.get(route.routeId, owner)[0].routeVersion == 1
+    assert repository.get_version(route.routeId, owner, 2) is None
+    repository.close()
+
+
+@pytest.mark.parametrize("version,place_id,error", [
+    (2, "drinkit-branch", "VERSION_CONFLICT"),
+    (1, "point", "PLACE_ALREADY_IN_ROUTE"),
+])
+def test_insert_rejects_stale_version_and_duplicate_without_mutation(
+        tmp_path, version, place_id, error):
+    client, repository, registry, owner, route, state = _insert_endpoint_state(
+        tmp_path, InsertGeo(duration_seconds=240),
+    )
+    try:
+        response = client.post(
+            f"/v1/walks/{state.session.walkId}/insert-suggested-place",
+            headers={"X-Device-Session": str(owner)},
+            json={"expectedRouteVersion": version, "partnerBrandId": "drinkit",
+                  "dgisPlaceId": place_id},
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == error
+        assert repository.get(route.routeId, owner)[0].routeVersion == 1
+        assert repository.get_walk(state.session.walkId, owner).session.routeVersion == 1
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+def test_insert_rejects_route_at_eight_point_limit(tmp_path):
+    base = route_for_api()
+    points = [RoutePoint(
+        order=index, placeId=f"point-{index}", name=f"Точка {index}",
+        lat=55.75 + index * .001, lon=37.61, visitMinutes=20,
+        scheduleStatus="OPEN", isFood=False,
+    ) for index in range(1, 9)]
+    legs = [RouteLeg(
+        fromOrder=index - 1, toOrder=index, distanceMeters=100,
+        durationSeconds=60,
+        geometry=[[37.61, 55.749 + index * .001],
+                  [37.61, 55.75 + index * .001]],
+    ) for index in range(1, 9)]
+    full = base.model_copy(update={"points": points, "legs": legs})
+    client, repository, registry, owner, route, state = _insert_endpoint_state(
+        tmp_path, InsertGeo(duration_seconds=240), full,
+    )
+    try:
+        response = client.post(
+            f"/v1/walks/{state.session.walkId}/insert-suggested-place",
+            headers={"X-Device-Session": str(owner)},
+            json={"expectedRouteVersion": 1, "partnerBrandId": "drinkit",
+                  "dgisPlaceId": "drinkit-branch"},
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "POINT_LIMIT_REACHED"
+        assert repository.get(route.routeId, owner)[0].routeVersion == 1
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+def test_insert_respects_explicit_duration_without_partial_save(tmp_path):
+    limited = route_for_api().model_copy(update={
+        "requestedMinutes": 60, "durationSource": "filter",
+        "durationMode": "MAXIMUM", "maxDurationMinutes": 60,
+    })
+    client, repository, registry, owner, route, state = _insert_endpoint_state(
+        tmp_path, InsertGeo(duration_seconds=240), limited,
+    )
+    try:
+        response = client.post(
+            f"/v1/walks/{state.session.walkId}/insert-suggested-place",
+            headers={"X-Device-Session": str(owner)},
+            json={"expectedRouteVersion": 1, "partnerBrandId": "drinkit",
+                  "dgisPlaceId": "drinkit-branch"},
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "TIME_BUDGET_CONFIRMATION_REQUIRED"
+        assert repository.get(route.routeId, owner)[0].routeVersion == 1
+        assert repository.get_walk(state.session.walkId, owner).session.routeVersion == 1
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+def test_seven_network_name_search_is_noncommercial_and_writes_no_db_ids():
     registry = PartnerRegistry(":memory:")
 
     class PreviewGeo(FakePartnerGeo):
@@ -567,7 +863,7 @@ def test_seven_network_name_search_preview_no_db_ids(monkeypatch):
     assert offer is not None
     assert offer.partnerBrandId == "drinkit"
     assert offer.isCommercial is False
-    assert offer.action.url == "https://2gis.ru/moscow/firm/actual-2gis-place"
+    assert offer.action.type == "ADD_TO_ROUTE"
     assert geo.routing_calls == 1
     assert len(geo.names) == 7
     assert "Cofix" not in geo.names
@@ -577,7 +873,7 @@ def test_seven_network_name_search_preview_no_db_ids(monkeypatch):
     registry.close()
 
 
-def test_name_search_preview_is_explicit_and_respects_25_minutes(monkeypatch):
+def test_name_search_is_available_in_production_and_respects_25_minutes(monkeypatch):
     registry = PartnerRegistry(":memory:")
 
     class PreviewGeo(FakePartnerGeo):
@@ -588,18 +884,12 @@ def test_name_search_preview_is_explicit_and_respects_25_minutes(monkeypatch):
             )] if name == "Дринкит" else []
 
     geo = PreviewGeo(duration_seconds=1500)
-    monkeypatch.setenv("GULYAY_ENV", "test")
+    monkeypatch.setenv("GULYAY_ENV", "production")
     monkeypatch.delenv("GULYAY_PARTNER_PREVIEW", raising=False)
-    assert PartnerOfferSelector(registry, geo).select(
-        visiting_state(), "moscow", NOW) is None
-    monkeypatch.setenv("GULYAY_PARTNER_PREVIEW", "1")
     offer = PartnerOfferSelector(registry, geo).select(
         visiting_state(), "moscow", NOW)
     assert offer is not None and offer.walkingMinutes == 25
     geo.duration_seconds = 1501
-    assert PartnerOfferSelector(registry, geo).select(
-        visiting_state(), "moscow", NOW) is None
-    monkeypatch.setenv("GULYAY_ENV", "production")
     assert PartnerOfferSelector(registry, geo).select(
         visiting_state(), "moscow", NOW) is None
     registry.close()

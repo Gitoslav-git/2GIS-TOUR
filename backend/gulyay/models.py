@@ -431,9 +431,8 @@ class WalkState(StrictModel):
 
 
 class PartnerOfferAction(StrictModel):
-    type: Literal["OPEN_DGIS"]
+    type: Literal["ADD_TO_ROUTE"]
     label: str = Field(min_length=1, max_length=80)
-    url: str = Field(min_length=1, max_length=500, pattern=r"^https://2gis\.ru/")
 
 
 class PartnerOffer(StrictModel):
@@ -452,3 +451,14 @@ class PartnerOffer(StrictModel):
 class PartnerOfferResponse(StrictModel):
     status: Literal["AVAILABLE", "NONE", "PROVIDER_UNAVAILABLE"]
     offer: PartnerOffer | None = None
+
+
+class InsertSuggestedPlaceRequest(StrictModel):
+    expectedRouteVersion: int = Field(ge=1)
+    partnerBrandId: str = Field(min_length=1, max_length=80)
+    dgisPlaceId: str = Field(min_length=1, max_length=120)
+
+
+class InsertSuggestedPlaceResponse(StrictModel):
+    route: Route
+    walk: WalkSession

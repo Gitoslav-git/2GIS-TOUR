@@ -227,30 +227,29 @@ public class MainActivityRecoveryTest {
         assertTrue(VisitingPresentation.shouldShowPartnerOffer(
                 new VisitingPresentation.PartnerOffer(
                         "Зайти за кофе?", "Без скидок", "Cofix на Тверской",
-                        6, "Партнёрское предложение", "Открыть в 2ГИС",
-                        "https://2gis.ru/moscow/firm/branch-1")));
+                        6, "Партнёрское предложение", "ADD_TO_ROUTE",
+                        "Добавить в маршрут")));
         assertTrue(VisitingPresentation.shouldShowRemainingPoints(true));
         assertTrue(VisitingPresentation.shouldShowRemainingPoints(false));
     }
 
-    @Test public void partnerOfferRequiresCommercialDgisActionAndConfirmedFields() {
+    @Test public void partnerOfferRequiresInsertActionAndConfirmedFields() {
         ApiClient.PartnerOffer apiOffer = new ApiClient.PartnerOffer(
                 "offer", "cofix", "branch-1", "Зайти за кофе?", "Без скидок",
-                "Cofix", 4, true, "Открыть в 2ГИС",
-                "https://2gis.ru/moscow/firm/branch-1");
+                "Cofix", 4, true, "ADD_TO_ROUTE", "Добавить в маршрут");
         VisitingPresentation.PartnerOffer offer = VisitingPresentation.PartnerOffer.from(apiOffer);
         assertTrue(VisitingPresentation.shouldShowPartnerOffer(offer));
         assertFalse(VisitingPresentation.shouldShowPartnerOffer(
                 new VisitingPresentation.PartnerOffer(
                         "Зайти", "", "Cofix", 4, "Партнёрское предложение",
-                        "Открыть", "https://example.com")));
+                        "OPEN_DGIS", "Открыть")));
         VisitingPresentation.PartnerOffer preview =
                 VisitingPresentation.PartnerOffer.from(new ApiClient.PartnerOffer(
                         "preview", "drinkit", "branch-1", "Зайти", "Не реклама",
-                        "Дринкит", 4, false, "Открыть",
-                        "https://2gis.ru/moscow/firm/branch-1"));
+                        "Дринкит", 4, false, "ADD_TO_ROUTE",
+                        "Добавить в маршрут"));
         assertTrue(VisitingPresentation.shouldShowPartnerOffer(preview));
-        assertEquals("ТЕСТОВЫЙ ПОИСК · НЕ РЕКЛАМА", preview.disclosure);
+        assertEquals("РЕКОМЕНДАЦИЯ РЯДОМ · НЕ РЕКЛАМА", preview.disclosure);
     }
 
     @Test public void stalePartnerOfferResponseCannotCrossPointOrWalkState() {

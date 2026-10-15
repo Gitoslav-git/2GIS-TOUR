@@ -4,7 +4,6 @@ import android.Manifest;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.Dialog;
-import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -16,7 +15,6 @@ import android.graphics.Typeface;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.Debug;
 import android.os.Handler;
@@ -149,6 +147,7 @@ public final class MapActivity extends ComponentActivity {
     private TextView partnerDisclosure;
     private TextView partnerOfferView;
     private Button partnerOfferButton;
+    private boolean partnerOfferInsertInFlight;
     private boolean compactScreen;
     private final List<ApiClient.PlaceOption> editingPoints = new ArrayList<>();
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -374,8 +373,11 @@ public final class MapActivity extends ComponentActivity {
         partnerOfferView.setPadding(0, UiKit.dp(this, 5), 0, UiKit.dp(this, 7));
         partnerOfferCard.addView(partnerOfferView);
         partnerOfferButton = UiKit.button(
-                this, "Открыть в 2ГИС", UiKit.GREEN_DARK, 0xFFFFFFFF);
-        partnerOfferButton.setOnClickListener(view -> openPartnerOffer());
+                this, "Добавить в маршрут", UiKit.GREEN_DARK, 0xFFFFFFFF);
+        View.OnClickListener partnerClick = view -> insertPartnerOffer();
+        partnerOfferButton.setOnClickListener(partnerClick);
+        partnerOfferCard.setOnClickListener(partnerClick);
+        partnerOfferCard.setClickable(true);
         partnerOfferCard.addView(partnerOfferButton, new LinearLayout.LayoutParams(-1, -2));
         partnerOfferCard.setVisibility(View.GONE);
         sheet.addView(partnerOfferCard, new LinearLayout.LayoutParams(-1, -2));
@@ -1625,7 +1627,7 @@ public final class MapActivity extends ComponentActivity {
     private void renderPartnerOffer(VisitingPresentation.PartnerOffer offer) {
         if (!VisitingPresentation.shouldShowPartnerOffer(offer)) {
             partnerOfferView.setText("");
-            partnerOfferButton.setText("Открыть в 2ГИС");
+            partnerOfferButton.setText("Добавить в маршрут");
             partnerDisclosure.setText("");
             partnerOfferCard.setVisibility(View.GONE);
             return;
@@ -1695,15 +1697,77 @@ public final class MapActivity extends ComponentActivity {
         renderPartnerOffer(null);
     }
 
-    private void openPartnerOffer() {
+    private void insertPartnerOffer() {
         VisitingPresentation.PartnerOffer offer = VisitingPresentation.PartnerOffer.from(
                 routeViewModel.partnerOffer);
-        if (!VisitingPresentation.shouldShowPartnerOffer(offer)) return;
-        try {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(offer.actionUrl)));
-        } catch (ActivityNotFoundException error) {
-            Toast.makeText(this, "Не удалось открыть 2ГИС", Toast.LENGTH_SHORT).show();
-        }
+        if (partnerOfferInsertInFlight || route == null || walk == null
+                || !VisitingPresentation.shouldShowPartnerOffer(offer)) return;
+        ApiClient.PartnerOffer selected = routeViewModel.partnerOffer;
+        partnerOfferInsertInFlight = true;
+        partnerOfferRequestGeneration++;
+        partnerOfferCard.setEnabled(false);
+        partnerOfferButton.setEnabled(false);
+        partnerOfferButton.setText("Добавляем…");
+        int baseVersion = route.routeVersion;
+        int pointOrder = walk.currentPointOrder;
+        String walkId = walk.walkId;
+        String cityId = getIntent().getStringExtra(EXTRA_CITY_ID);
+        String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+        network.execute(() -> {
+            ApiClient.SuggestedPlaceResult response;
+            try {
+                response = ApiClient.insertSuggestedPlace(
+                        walkId, baseVersion, cityId, selected, sessionId);
+            } catch (Exception error) {
+                response = new ApiClient.SuggestedPlaceResult(false,
+                        "Не удалось добавить заведение. Маршрут не изменён.",
+                        null, null, null);
+            }
+            ApiClient.SuggestedPlaceResult finalResponse = response;
+            runOnUiThread(() -> {
+                partnerOfferInsertInFlight = false;
+                if (isFinishing() || isDestroyed()) return;
+                partnerOfferCard.setEnabled(true);
+                partnerOfferButton.setEnabled(true);
+                if (!finalResponse.success) {
+                    partnerOfferButton.setText(offer.actionLabel);
+                    Toast.makeText(this, finalResponse.message, Toast.LENGTH_LONG).show();
+                    if ("VERSION_CONFLICT".equals(finalResponse.errorCode)) loadRoute();
+                    return;
+                }
+                getIntent().putExtra(EXTRA_ROUTE_VERSION,
+                        finalResponse.route.routeVersion);
+                getIntent().putExtra(EXTRA_ROUTE_SNAPSHOT,
+                        ApiClient.routeSnapshot(finalResponse.route));
+                boolean sameState = walk != null && walkId.equals(walk.walkId)
+                        && pointOrder == walk.currentPointOrder
+                        && baseVersion == route.routeVersion
+                        && "ACTIVE".equals(walk.status)
+                        && "VISITING".equals(walk.phase);
+                if (!sameState) {
+                    loadRoute();
+                    return;
+                }
+                route = finalResponse.route;
+                walk = finalResponse.walk;
+                routeViewModel.route = route;
+                routeViewModel.walk = walk;
+                renderedVisitingStructureKey = null;
+                partnerOfferRequestGeneration++;
+                routeViewModel.partnerOffer = null;
+                routeViewModel.partnerOfferKey = PartnerOfferRequestPolicy.key(
+                        walk.walkId, walk.currentPointOrder);
+                routeViewModel.partnerOfferLastRequestElapsedMillis =
+                        SystemClock.elapsedRealtime();
+                routeViewModel.partnerOfferLastStatus = "INSERTED";
+                renderPartnerOffer(null);
+                showWalkStatus();
+                renderRoute(true);
+                syncLocationTracking();
+                Toast.makeText(this, "Заведение добавлено в маршрут",
+                        Toast.LENGTH_SHORT).show();
+            });
+        });
     }
 
     private void resetVisitingUi() {

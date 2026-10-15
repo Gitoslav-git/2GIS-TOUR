@@ -7,13 +7,11 @@ activated the registry row, and inserted a currently active offer.
 from __future__ import annotations
 
 import math
-import os
 import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .catalog import default_catalog_path
@@ -81,6 +79,7 @@ class CommercialOffer:
     valid_from: datetime
     valid_until: datetime
     button_text: str
+    is_commercial: bool = True
 
 
 class PartnerRegistry:
@@ -309,14 +308,15 @@ class PartnerRegistry:
         )
 
 
-def _name_search_preview_offers(moment: datetime) -> list[CommercialOffer]:
-    """Transient preview only; these networks are not commercial partners."""
+def nearby_suggestion_offers(moment: datetime) -> list[CommercialOffer]:
+    """Transient non-commercial suggestions; they never mutate partner state."""
     return [CommercialOffer(
-        offer_id=f"preview_{partner_id}_moscow", partner_brand_id=partner_id,
+        offer_id=f"nearby_{partner_id}_moscow", partner_brand_id=partner_id,
         city_id="moscow", segment=segment, dgis_brand_id=None,
         search_query=name, title="Зайти по пути?",
-        description="Тестовый поиск заведений. Не реклама и не партнёрская акция.",
-        valid_from=moment, valid_until=moment, button_text="Открыть в 2ГИС",
+        description="Рекомендация рядом с текущей точкой прогулки.",
+        valid_from=moment, valid_until=moment, button_text="Добавить в маршрут",
+        is_commercial=False,
     ) for partner_id, name, segment in NAME_SEARCH_PILOT]
 
 
@@ -326,18 +326,19 @@ class PartnerOfferSelector:
         self.geo = geo
 
     def select(self, state: WalkState, city_id: str,
-               now: datetime | None = None) -> PartnerOffer | None:
+               now: datetime | None = None,
+               excluded_place_ids: set[str] | None = None) -> PartnerOffer | None:
         moment = _utc(now or datetime.now(timezone.utc))
         session = state.session
         if session.status != "ACTIVE" or session.phase != "VISITING":
             return None
 
-        # This database check intentionally precedes every 2GIS operation.
-        preview = (city_id == "moscow"
-                   and os.getenv("GULYAY_ENV") in {"test", "development"}
-                   and os.getenv("GULYAY_PARTNER_PREVIEW") == "1")
-        offers = (_name_search_preview_offers(moment) if preview else
-                  self.registry.eligible_offers(city_id, moment))
+        # Commercial offers remain registry-controlled. The seven-name nearby
+        # recommendation is non-commercial and intentionally keeps that state
+        # separate from candidate/partner records.
+        offers = self.registry.eligible_offers(city_id, moment)
+        if not offers and city_id == "moscow":
+            offers = nearby_suggestion_offers(moment)
         if not offers:
             return None
         position = state.lastPosition
@@ -349,17 +350,21 @@ class PartnerOfferSelector:
             return None
 
         origin = (position.lat, position.lon)
-        # Search only verified active brands, merge their nearby branches, then
-        # spend a single bounded routing budget across the combined pool.
+        excluded = excluded_place_ids or set()
+        # Merge nearby commercial and non-commercial branches, then spend a
+        # single bounded routing budget across the combined pool.
         grouped: dict[str, list[CommercialOffer]] = {}
         for offer in offers:
-            group_key = offer.search_query if preview else (offer.dgis_brand_id or "")
+            group_key = offer.dgis_brand_id or offer.search_query
             grouped.setdefault(group_key, []).append(offer)
         candidates: list[tuple[float, CommercialOffer, PartnerBranch]] = []
         for key, brand_offers in grouped.items():
+            name_search = brand_offers[0].dgis_brand_id is None
             branches = (self.geo.search_partner_branches_by_name(city_id, key, origin)
-                        if preview else self.geo.search_partner_branches(city_id, key, origin))
+                        if name_search else self.geo.search_partner_branches(city_id, key, origin))
             for branch in branches[:BRANCHES_PER_BRAND_LIMIT]:
+                if branch.dgis_place_id in excluded:
+                    continue
                 direct_distance = _haversine(origin, (branch.lat, branch.lon))
                 if direct_distance > GEOGRAPHIC_PREFILTER_METERS:
                     continue
@@ -369,7 +374,7 @@ class PartnerOfferSelector:
             value[0], value[1].offer_id, value[2].dgis_place_id,
         ))
 
-        choices: list[tuple[tuple[int, int, int, str], CommercialOffer,
+        choices: list[tuple[tuple[int, int, int, int, str], CommercialOffer,
                             PartnerBranch, int]] = []
         routed_branches: dict[str, object] = {}
         routing_attempts = 0
@@ -397,12 +402,12 @@ class PartnerOfferSelector:
                 continue
             minutes = max(1, math.ceil(leg.durationSeconds / 60))
             score = (int(minutes > PREFERRED_WALKING_MINUTES[offer.segment]),
-                     leg.durationSeconds, leg.distanceMeters, offer.offer_id)
+                     leg.durationSeconds, leg.distanceMeters,
+                     int(not offer.is_commercial), offer.offer_id)
             choices.append((score, offer, branch, minutes))
         if not choices:
             return None
         _, offer, branch, minutes = min(choices, key=lambda choice: choice[0])
-        safe_place_id = quote(branch.dgis_place_id, safe="")
         return PartnerOffer(
             offerId=offer.offer_id,
             partnerBrandId=offer.partner_brand_id,
@@ -411,10 +416,9 @@ class PartnerOfferSelector:
             description=offer.description,
             venueName=branch.name,
             walkingMinutes=minutes,
-            isCommercial=not preview,
+            isCommercial=offer.is_commercial,
             action=PartnerOfferAction(
-                type="OPEN_DGIS", label=offer.button_text,
-                url=f"https://2gis.ru/{city_id}/firm/{safe_place_id}",
+                type="ADD_TO_ROUTE", label="Добавить в маршрут",
             ),
         )
 

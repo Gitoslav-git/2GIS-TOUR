@@ -35,6 +35,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -144,8 +145,11 @@ public final class MapActivity extends ComponentActivity {
     private TextView visitingNextTitle;
     private TextView visitingNextMeta;
     private LinearLayout partnerOfferCard;
+    private ImageView partnerOfferImage;
     private TextView partnerDisclosure;
     private TextView partnerOfferView;
+    private TextView partnerOfferMeta;
+    private TextView partnerOfferDismiss;
     private Button partnerOfferButton;
     private boolean partnerOfferInsertInFlight;
     private boolean compactScreen;
@@ -283,8 +287,8 @@ public final class MapActivity extends ComponentActivity {
 
         LinearLayout sheet = new LinearLayout(this);
         sheet.setOrientation(LinearLayout.VERTICAL);
-        sheet.setPadding(UiKit.dp(this, 16), UiKit.dp(this, compact ? 7 : 9),
-                UiKit.dp(this, 16), UiKit.dp(this, compact ? 8 : 12));
+        sheet.setPadding(UiKit.dp(this, 16), UiKit.dp(this, compact ? 6 : 7),
+                UiKit.dp(this, 16), UiKit.dp(this, 8));
         sheet.setBackground(UiKit.rounded(0xFFFFFFFF, 26, this));
         page.addView(sheet, new LinearLayout.LayoutParams(-1, 0, compact ? 0.53f : 0.46f));
 
@@ -331,8 +335,8 @@ public final class MapActivity extends ComponentActivity {
         visitingNextCard = new LinearLayout(this);
         visitingNextCard.setOrientation(LinearLayout.HORIZONTAL);
         visitingNextCard.setGravity(Gravity.CENTER_VERTICAL);
-        visitingNextCard.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 10),
-                UiKit.dp(this, 14), UiKit.dp(this, 10));
+        visitingNextCard.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 6),
+                UiKit.dp(this, 14), UiKit.dp(this, 6));
         visitingNextCard.setBackground(UiKit.bordered(0xFFF5F8F6, 0xFFE0E9E3, 14, this));
         visitingNextIcon = UiKit.label(this, "›", 24, UiKit.GREEN_DARK);
         visitingNextIcon.setGravity(Gravity.CENTER);
@@ -356,29 +360,65 @@ public final class MapActivity extends ComponentActivity {
         visitingNextCard.addView(visitingNextText, nextTextParams);
         visitingNextCard.setVisibility(View.GONE);
         LinearLayout.LayoutParams nextCardParams = new LinearLayout.LayoutParams(-1, -2);
-        nextCardParams.topMargin = UiKit.dp(this, 2);
-        nextCardParams.bottomMargin = UiKit.dp(this, 6);
+        nextCardParams.topMargin = UiKit.dp(this, 1);
+        nextCardParams.bottomMargin = UiKit.dp(this, 3);
         sheet.addView(visitingNextCard, nextCardParams);
 
         partnerOfferCard = new LinearLayout(this);
-        partnerOfferCard.setOrientation(LinearLayout.VERTICAL);
-        partnerOfferCard.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 11),
-                UiKit.dp(this, 14), UiKit.dp(this, 11));
-        partnerOfferCard.setBackground(UiKit.rounded(0xFFFFF6DF, 14, this));
-        partnerDisclosure = UiKit.label(
-                this, "ПАРТНЁРСКОЕ ПРЕДЛОЖЕНИЕ", 11, UiKit.RED_SOFT);
+        partnerOfferCard.setOrientation(LinearLayout.HORIZONTAL);
+        partnerOfferCard.setGravity(Gravity.CENTER_VERTICAL);
+        partnerOfferCard.setPadding(UiKit.dp(this, 7), UiKit.dp(this, 7),
+                UiKit.dp(this, 7), UiKit.dp(this, 7));
+        partnerOfferCard.setBackground(UiKit.bordered(
+                0xFFFFFBF4, 0xFFFFC778, 14, this));
+        partnerOfferImage = new ImageView(this);
+        partnerOfferImage.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        partnerOfferImage.setContentDescription("Иллюстрация категории заведения");
+        partnerOfferCard.addView(partnerOfferImage, new LinearLayout.LayoutParams(
+                UiKit.dp(this, compact ? 58 : 66), UiKit.dp(this, compact ? 58 : 66)));
+
+        LinearLayout partnerText = new LinearLayout(this);
+        partnerText.setOrientation(LinearLayout.VERTICAL);
+        partnerText.setPadding(UiKit.dp(this, 8), 0, UiKit.dp(this, 6), 0);
+        LinearLayout disclosureRow = new LinearLayout(this);
+        disclosureRow.setOrientation(LinearLayout.HORIZONTAL);
+        disclosureRow.setGravity(Gravity.CENTER_VERTICAL);
+        partnerDisclosure = UiKit.label(this, "Рядом по пути", 10, 0xFFD97800);
         partnerDisclosure.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        partnerOfferCard.addView(partnerDisclosure);
-        partnerOfferView = UiKit.label(this, "", 13, UiKit.TEXT);
-        partnerOfferView.setPadding(0, UiKit.dp(this, 5), 0, UiKit.dp(this, 7));
-        partnerOfferCard.addView(partnerOfferView);
+        partnerDisclosure.setPadding(UiKit.dp(this, 7), UiKit.dp(this, 2),
+                UiKit.dp(this, 7), UiKit.dp(this, 2));
+        partnerDisclosure.setBackground(UiKit.rounded(0xFFFFE9C8, 9, this));
+        disclosureRow.addView(partnerDisclosure, new LinearLayout.LayoutParams(-2, -2));
+        disclosureRow.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+        partnerOfferDismiss = UiKit.label(this, "×", 17, UiKit.MUTED);
+        partnerOfferDismiss.setGravity(Gravity.CENTER);
+        partnerOfferDismiss.setContentDescription("Скрыть рекомендацию на этой точке");
+        partnerOfferDismiss.setOnClickListener(view -> dismissPartnerOffer());
+        disclosureRow.addView(partnerOfferDismiss, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 28), UiKit.dp(this, 28)));
+        partnerText.addView(disclosureRow, new LinearLayout.LayoutParams(-1, -2));
+        partnerOfferView = UiKit.label(this, "", compact ? 14 : 15, UiKit.TEXT);
+        partnerOfferView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        partnerOfferView.setMaxLines(2);
+        partnerOfferView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        partnerText.addView(partnerOfferView);
+        partnerOfferMeta = UiKit.label(this, "", compact ? 10 : 11, UiKit.MUTED);
+        partnerOfferMeta.setSingleLine(true);
+        partnerOfferMeta.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        partnerText.addView(partnerOfferMeta);
+        partnerOfferCard.addView(partnerText, new LinearLayout.LayoutParams(0, -2, 1));
         partnerOfferButton = UiKit.button(
                 this, "Добавить в маршрут", UiKit.GREEN_DARK, 0xFFFFFFFF);
+        partnerOfferButton.setTextSize(compact ? 10 : 11);
+        partnerOfferButton.setMaxLines(2);
+        partnerOfferButton.setPadding(UiKit.dp(this, 5), UiKit.dp(this, 5),
+                UiKit.dp(this, 5), UiKit.dp(this, 5));
         View.OnClickListener partnerClick = view -> insertPartnerOffer();
         partnerOfferButton.setOnClickListener(partnerClick);
         partnerOfferCard.setOnClickListener(partnerClick);
         partnerOfferCard.setClickable(true);
-        partnerOfferCard.addView(partnerOfferButton, new LinearLayout.LayoutParams(-1, -2));
+        partnerOfferCard.addView(partnerOfferButton, new LinearLayout.LayoutParams(
+                UiKit.dp(this, compact ? 92 : 106), UiKit.dp(this, compact ? 52 : 58)));
         partnerOfferCard.setVisibility(View.GONE);
         sheet.addView(partnerOfferCard, new LinearLayout.LayoutParams(-1, -2));
 
@@ -883,11 +923,17 @@ public final class MapActivity extends ComponentActivity {
             pointList.addView(row, new LinearLayout.LayoutParams(
                     -1, UiKit.dp(this, 54)));
         }
-        if (walk != null && "VISITING".equals(walk.phase)) {
-            pointListScroll.setVisibility(pointList.getChildCount() > 0
-                    ? View.VISIBLE : View.GONE);
-        }
+        updatePointListVisibility();
         pointListScroll.post(() -> pointListScroll.scrollTo(0, 0));
+    }
+
+    private void updatePointListVisibility() {
+        boolean offerVisible = partnerOfferCard != null
+                && partnerOfferCard.getVisibility() == View.VISIBLE;
+        boolean visiting = walk != null && "VISITING".equals(walk.phase);
+        boolean hasVisiblePoints = !visiting || pointList.getChildCount() > 0;
+        pointListScroll.setVisibility(!offerVisible && hasVisiblePoints
+                ? View.VISIBLE : View.GONE);
     }
 
     private String travelToPoint(int pointIndex) {
@@ -1582,31 +1628,31 @@ public final class MapActivity extends ComponentActivity {
                 route, walk, Math.max(0, walk.visitElapsedSeconds), null);
         nextLabel.setText(model.pointLabel.toUpperCase(java.util.Locale.getDefault()));
         routeSummary.setText(model.pointName);
-        status.setTextSize(compactScreen ? 29 : 33);
+        status.setTextSize(compactScreen ? 27 : 30);
         status.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         status.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-        status.setIncludeFontPadding(true);
+        status.setIncludeFontPadding(false);
         status.setMinLines(2);
         status.setMaxLines(2);
-        status.setLineSpacing(0f, 1f);
-        int timerHeight = UiKit.dp(this, compactScreen ? 90 : 96);
+        status.setLineSpacing(-UiKit.dp(this, 2), 1f);
+        int timerHeight = UiKit.dp(this, compactScreen ? 68 : 74);
         status.setMinHeight(timerHeight);
-        status.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 8),
-                UiKit.dp(this, 16), UiKit.dp(this, 12));
+        status.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 2),
+                UiKit.dp(this, 16), UiKit.dp(this, 6));
         status.setBackground(UiKit.rounded(0xFFEAF7EE, 16, this));
         status.setTextColor(UiKit.GREEN_DARK);
         status.setCompoundDrawables(makeVisitClockIcon(), null, null, null);
         status.setCompoundDrawablePadding(UiKit.dp(this, 13));
         LinearLayout.LayoutParams timerParams = new LinearLayout.LayoutParams(-1, timerHeight);
-        timerParams.topMargin = UiKit.dp(this, 8);
-        timerParams.bottomMargin = UiKit.dp(this, 6);
+        timerParams.topMargin = UiKit.dp(this, 4);
+        timerParams.bottomMargin = UiKit.dp(this, 2);
         status.setLayoutParams(timerParams);
 
         visitingNextCard.setVisibility(model.showNext ? View.VISIBLE : View.GONE);
         visitingNextTitle.setText(model.nextTitle);
         visitingNextMeta.setText(model.nextMeta);
         visitingNextMeta.setVisibility(model.nextMeta.isEmpty() ? View.GONE : View.VISIBLE);
-        pointListScroll.setVisibility(View.VISIBLE);
+        updatePointListVisibility();
         renderPartnerOffer(model.partnerOffer);
         renderVisitArrivalCard(pointName);
     }
@@ -1627,20 +1673,23 @@ public final class MapActivity extends ComponentActivity {
     private void renderPartnerOffer(VisitingPresentation.PartnerOffer offer) {
         if (!VisitingPresentation.shouldShowPartnerOffer(offer)) {
             partnerOfferView.setText("");
+            partnerOfferMeta.setText("");
             partnerOfferButton.setText("Добавить в маршрут");
             partnerDisclosure.setText("");
             partnerOfferCard.setVisibility(View.GONE);
+            updatePointListVisibility();
             return;
         }
-        String details = offer.title + "\n" + offer.venueName + " · "
-                + offer.walkingMinutes + " мин пешком";
-        if (offer.description != null && !offer.description.trim().isEmpty()) {
-            details += "\n" + offer.description;
-        }
-        partnerOfferView.setText(details);
+        String venueType = "COFFEE".equals(offer.category) ? "Кофейня" : "Ресторан";
+        partnerOfferView.setText(offer.title);
+        partnerOfferMeta.setText(venueType + " «" + offer.venueName + "» · "
+                + offer.walkingMinutes + " мин пешком");
         partnerDisclosure.setText(offer.disclosure);
         partnerOfferButton.setText(offer.actionLabel);
+        partnerOfferImage.setImageResource("COFFEE".equals(offer.category)
+                ? R.drawable.recommendation_coffee : R.drawable.recommendation_restaurant);
         partnerOfferCard.setVisibility(View.VISIBLE);
+        updatePointListVisibility();
     }
 
     private void syncPartnerOffer() {
@@ -1766,6 +1815,52 @@ public final class MapActivity extends ComponentActivity {
                 syncLocationTracking();
                 Toast.makeText(this, "Заведение добавлено в маршрут",
                         Toast.LENGTH_SHORT).show();
+            });
+        });
+    }
+
+    private void dismissPartnerOffer() {
+        VisitingPresentation.PartnerOffer offer = VisitingPresentation.PartnerOffer.from(
+                routeViewModel.partnerOffer);
+        if (partnerOfferInsertInFlight || walk == null
+                || !VisitingPresentation.shouldShowPartnerOffer(offer)) return;
+        partnerOfferInsertInFlight = true;
+        partnerOfferRequestGeneration++;
+        partnerOfferCard.setEnabled(false);
+        partnerOfferButton.setEnabled(false);
+        partnerOfferDismiss.setEnabled(false);
+        String walkId = walk.walkId;
+        int pointOrder = walk.currentPointOrder;
+        String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+        network.execute(() -> {
+            boolean dismissed;
+            try {
+                dismissed = ApiClient.dismissPartnerOffer(walkId, sessionId);
+            } catch (Exception error) {
+                dismissed = false;
+            }
+            boolean finalDismissed = dismissed;
+            runOnUiThread(() -> {
+                partnerOfferInsertInFlight = false;
+                if (isFinishing() || isDestroyed()) return;
+                partnerOfferCard.setEnabled(true);
+                partnerOfferButton.setEnabled(true);
+                partnerOfferDismiss.setEnabled(true);
+                if (!finalDismissed) {
+                    Toast.makeText(this, "Не удалось скрыть рекомендацию. Попробуйте ещё раз.",
+                            Toast.LENGTH_LONG).show();
+                    return;
+                }
+                if (walk != null && walkId.equals(walk.walkId)
+                        && pointOrder == walk.currentPointOrder) {
+                    routeViewModel.partnerOffer = null;
+                    routeViewModel.partnerOfferKey = PartnerOfferRequestPolicy.key(
+                            walk.walkId, walk.currentPointOrder);
+                    routeViewModel.partnerOfferLastRequestElapsedMillis =
+                            SystemClock.elapsedRealtime();
+                    routeViewModel.partnerOfferLastStatus = "DISMISSED";
+                    renderPartnerOffer(null);
+                }
             });
         });
     }

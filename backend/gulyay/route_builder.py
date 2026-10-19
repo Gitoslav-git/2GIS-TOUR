@@ -1098,6 +1098,7 @@ def insert_suggested_place(source: Route, branch: PartnerBranch, segment: str,
         order=current_order + 1, placeId=branch.dgis_place_id,
         name=branch.name, lat=branch.lat, lon=branch.lon,
         visitMinutes=visit_minutes, scheduleStatus=inserted_status, isFood=True,
+        pointType=segment,
     ))
     legs.append(inserted_leg.model_copy(update={
         "fromOrder": current_order, "toOrder": current_order + 1,

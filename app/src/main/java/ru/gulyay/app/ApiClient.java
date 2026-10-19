@@ -431,13 +431,13 @@ final class ApiClient {
 
     static final class PartnerOffer {
         final String offerId, partnerBrandId, dgisPlaceId;
-        final String title, description, venueName;
+        final String title, description, venueName, category;
         final int walkingMinutes;
         final boolean commercial;
         final String actionType, actionLabel;
 
         PartnerOffer(String offerId, String partnerBrandId, String dgisPlaceId,
-                     String title, String description, String venueName,
+                     String title, String description, String venueName, String category,
                      int walkingMinutes, boolean commercial,
                      String actionType, String actionLabel) {
             this.offerId = offerId;
@@ -446,6 +446,7 @@ final class ApiClient {
             this.title = title;
             this.description = description;
             this.venueName = venueName;
+            this.category = category;
             this.walkingMinutes = walkingMinutes;
             this.commercial = commercial;
             this.actionType = actionType;
@@ -543,9 +544,34 @@ final class ApiClient {
                     value.getString("offerId"), value.getString("partnerBrandId"),
                     value.getString("dgisPlaceId"), value.getString("title"),
                     value.getString("description"), value.getString("venueName"),
+                    value.getString("category"),
                     value.getInt("walkingMinutes"), value.optBoolean("isCommercial", false),
                     action.getString("type"), action.getString("label"));
             return new PartnerOfferResult(true, offerStatus, offer);
+        } catch (Exception error) {
+            BackendConfig.logFailure(method, path, startedAt, error);
+            throw error;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    static boolean dismissPartnerOffer(String walkId, String sessionId) throws Exception {
+        String path = "/v1/walks/" + walkId + "/partner-offer/dismiss";
+        String method = "POST";
+        long startedAt = BackendConfig.logRequest(method, path);
+        HttpURLConnection connection = null;
+        try {
+            connection = open(path, method, sessionId);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            try (java.io.OutputStream output = connection.getOutputStream()) {
+                output.write("{}".getBytes(StandardCharsets.UTF_8));
+            }
+            int status = connection.getResponseCode();
+            BackendConfig.logResponse(method, path, status, startedAt);
+            readJson(connection, status);
+            return status < 400;
         } catch (Exception error) {
             BackendConfig.logFailure(method, path, startedAt, error);
             throw error;

@@ -10,17 +10,19 @@ final class VisitingPresentation {
         final String title;
         final String description;
         final String venueName;
+        final String category;
         final int walkingMinutes;
         final String disclosure;
         final String actionType;
         final String actionLabel;
 
-        PartnerOffer(String title, String description, String venueName,
+        PartnerOffer(String title, String description, String venueName, String category,
                      int walkingMinutes, String disclosure,
                      String actionType, String actionLabel) {
             this.title = title;
             this.description = description;
             this.venueName = venueName;
+            this.category = category;
             this.walkingMinutes = walkingMinutes;
             this.disclosure = disclosure;
             this.actionType = actionType;
@@ -30,9 +32,9 @@ final class VisitingPresentation {
         static PartnerOffer from(ApiClient.PartnerOffer offer) {
             if (offer == null) return null;
             return new PartnerOffer(
-                    offer.title, offer.description, offer.venueName,
+                    offer.title, offer.description, offer.venueName, offer.category,
                     offer.walkingMinutes, offer.commercial
-                            ? "Партнёрское предложение" : "РЕКОМЕНДАЦИЯ РЯДОМ · НЕ РЕКЛАМА",
+                            ? "Партнёр рядом" : "Рядом по пути",
                     offer.actionType, offer.actionLabel);
         }
     }
@@ -85,6 +87,8 @@ final class VisitingPresentation {
         return offer != null
                 && present(offer.title)
                 && present(offer.venueName)
+                && ("COFFEE".equals(offer.category)
+                    || "RESTAURANT".equals(offer.category))
                 && offer.walkingMinutes > 0
                 && present(offer.disclosure)
                 && present(offer.actionLabel)

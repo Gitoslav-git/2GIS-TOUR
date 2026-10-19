@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import math
 import secrets
 import threading
 import time
@@ -23,8 +24,9 @@ from .intent import (IntentAuthenticationError, IntentInvalidResponse,
                      OpenAIIntentProvider, configured_model, interpret)
 from .models import (City, CreateRoute, GuestHistoryItem, InsertSuggestedPlaceRequest,
                      InsertSuggestedPlaceResponse, PartnerOfferResponse, PlaceSummary,
-                     QueryPreview, Route, RouteRevision, StartWalk, WalkAction,
-                     WalkPosition, WalkProgress, WalkSession)
+                     QueryPreview, RecommendationDecision, RecommendationSelection,
+                     Route, RouteRevision, StartWalk, WalkAction, WalkPosition,
+                     WalkProgress, WalkSession, WalkState)
 from .partners import (MAX_POSITION_ACCURACY_METERS, MAX_POSITION_AGE_SECONDS,
                        NAME_SEARCH_PILOT, PartnerOfferSelector, PartnerRegistry)
 from .planning_debug import planning_log
@@ -55,6 +57,7 @@ SOURCE_REQUESTS: dict[str, deque[float]] = defaultdict(deque)
 PROVIDER_HEALTH_CACHE: dict[str, tuple[float, str]] = {}
 PROVIDER_HEALTH_LOCK = threading.Lock()
 SOURCE_RATE_SALT = os.getenv("SOURCE_RATE_SALT") or secrets.token_hex(16)
+RECOMMENDATION_SELECTION_TTL_SECONDS = 10 * 60
 
 
 def failure(code: str, message: str, status: int, request_id: str | None = None,
@@ -347,6 +350,61 @@ def get_walk(walk_id: UUID, x_device_session: UUID | None = Header(default=None)
     return session_at(state)
 
 
+def _recommendation_context(
+        state: WalkState, route: Route, moment: datetime,
+        require_position: bool = True,
+) -> tuple[str, set[str]] | None:
+    """Cheap persisted checks which must run before any recommendation API call."""
+    session = state.session
+    order = session.currentPointOrder
+    if (session.status != "ACTIVE" or session.phase != "VISITING"
+            or order is None or not 1 <= order <= len(route.points)):
+        return None
+    point = route.points[order - 1]
+    if point.pointType != "TOUR":
+        return None
+    if any(item.pointPlaceId == point.placeId
+           for item in state.recommendations.decisions):
+        return None
+    if point.placeId in state.recommendations.exhaustedPointPlaceIds:
+        return None
+    allowed = {"COFFEE", "RESTAURANT"} - set(
+        state.recommendations.usedCategories)
+    if not allowed:
+        return None
+    if require_position:
+        position = state.lastPosition
+        measured = position.measuredAt.astimezone(timezone.utc) if position else None
+        age = ((moment - measured).total_seconds()
+               if measured else MAX_POSITION_AGE_SECONDS + 1)
+        if (position is None or position.accuracyMeters > MAX_POSITION_ACCURACY_METERS
+                or age < -5 or age > MAX_POSITION_AGE_SECONDS):
+            return None
+    return point.placeId, allowed
+
+
+def _accepted_recommendation(state: WalkState, partner_brand_id: str,
+                             dgis_place_id: str) -> bool:
+    return any(
+        item.decision == "ACCEPTED"
+        and item.partnerBrandId == partner_brand_id
+        and item.dgisPlaceId == dgis_place_id
+        for item in state.recommendations.decisions
+    )
+
+
+def _selection_is_current(state: WalkState, selection: RecommendationSelection,
+                          moment: datetime) -> bool:
+    position = state.lastPosition
+    age = (moment - selection.selectedAt.astimezone(timezone.utc)).total_seconds()
+    if position is None or age < -5 or age > RECOMMENDATION_SELECTION_TTL_SECONDS:
+        return False
+    mean_latitude = math.radians((selection.originLat + position.lat) / 2)
+    north = (position.lat - selection.originLat) * 111_320
+    east = (position.lon - selection.originLon) * 111_320 * math.cos(mean_latitude)
+    return math.hypot(north, east) <= 250
+
+
 @app.get("/v1/walks/{walk_id}/partner-offer", response_model=PartnerOfferResponse)
 def get_partner_offer(
         walk_id: UUID,
@@ -365,18 +423,120 @@ def get_partner_offer(
     )
     if route is None:
         return failure("VERSION_CONFLICT", "Версия маршрута недоступна", 409)
+    moment = datetime.now(timezone.utc)
+    context = _recommendation_context(state, route, moment)
+    if context is None:
+        return PartnerOfferResponse(status="NONE", offer=None)
+    point_place_id, allowed_categories = context
+    selected = state.recommendations.selected
+    if selected is not None and selected.pointPlaceId == point_place_id:
+        commercial_active = (not selected.offer.isCommercial or any(
+            offer.offer_id == selected.offer.offerId
+            for offer in registry.eligible_offers(route.cityId, moment)
+        ))
+        if (selected.offer.category in allowed_categories and commercial_active
+                and _selection_is_current(state, selected, moment)):
+            return PartnerOfferResponse(status="AVAILABLE", offer=selected.offer)
+        # Never rotate to a different venue on the same tourist point.
+        return PartnerOfferResponse(status="NONE", offer=None)
     try:
         offer = PartnerOfferSelector(registry, geo).select(
-            state, route.cityId,
+            state, route.cityId, moment,
             excluded_place_ids={point.placeId for point in route.points},
+            allowed_categories=allowed_categories,
         )
     except GeoUnavailable:
         # This optional provider failure is explicit in the response but remains
         # a successful walk request: Android hides the card and keeps navigating.
         return PartnerOfferResponse(status="PROVIDER_UNAVAILABLE", offer=None)
-    return PartnerOfferResponse(
-        status="AVAILABLE" if offer is not None else "NONE", offer=offer,
+    if offer is None:
+        with STATE_LOCK:
+            latest = repository.get_walk(walk_id, x_device_session)
+            latest_route = (repository.get_version(
+                latest.session.routeId, x_device_session, latest.session.routeVersion,
+            ) if latest is not None else None)
+            latest_context = (_recommendation_context(latest, latest_route, moment)
+                              if latest is not None and latest_route is not None else None)
+            if latest_context is not None and latest_context[0] == point_place_id:
+                exhausted = list(dict.fromkeys([
+                    *latest.recommendations.exhaustedPointPlaceIds, point_place_id,
+                ]))
+                recommendations = latest.recommendations.model_copy(update={
+                    "exhaustedPointPlaceIds": exhausted, "selected": None,
+                })
+                repository.replace_walk(latest.model_copy(update={
+                    "recommendations": recommendations,
+                }), x_device_session)
+        return PartnerOfferResponse(status="NONE", offer=None)
+    position = state.lastPosition
+    assert position is not None
+    selection = RecommendationSelection(
+        pointPlaceId=point_place_id, selectedAt=moment,
+        originLat=position.lat, originLon=position.lon, offer=offer,
     )
+    with STATE_LOCK:
+        latest = repository.get_walk(walk_id, x_device_session)
+        latest_route = (repository.get_version(
+            latest.session.routeId, x_device_session, latest.session.routeVersion,
+        ) if latest is not None else None)
+        latest_context = (_recommendation_context(latest, latest_route, moment)
+                          if latest is not None and latest_route is not None else None)
+        if latest_context is None or latest_context[0] != point_place_id:
+            return PartnerOfferResponse(status="NONE", offer=None)
+        existing = latest.recommendations.selected
+        if existing is not None and existing.pointPlaceId == point_place_id:
+            if (existing.offer.category in latest_context[1]
+                    and _selection_is_current(latest, existing, moment)):
+                return PartnerOfferResponse(status="AVAILABLE", offer=existing.offer)
+            return PartnerOfferResponse(status="NONE", offer=None)
+        updated_recommendations = latest.recommendations.model_copy(update={
+            "selected": selection,
+        })
+        if not repository.replace_walk(latest.model_copy(update={
+                "recommendations": updated_recommendations,
+        }), x_device_session):
+            return PartnerOfferResponse(status="NONE", offer=None)
+    return PartnerOfferResponse(status="AVAILABLE", offer=offer)
+
+
+@app.post("/v1/walks/{walk_id}/partner-offer/dismiss",
+          response_model=PartnerOfferResponse)
+def dismiss_partner_offer(
+        walk_id: UUID,
+        x_device_session: UUID | None = Header(default=None),
+        repository: RouteRepository = Depends(get_route_repository),
+) -> PartnerOfferResponse | JSONResponse:
+    if x_device_session is None:
+        return failure("NOT_FOUND", "Прогулка не найдена", 404)
+    with STATE_LOCK:
+        state = repository.get_walk(walk_id, x_device_session)
+        if state is None:
+            return failure("NOT_FOUND", "Прогулка не найдена", 404)
+        route = repository.get_version(
+            state.session.routeId, x_device_session, state.session.routeVersion,
+        )
+        if route is None:
+            return failure("VERSION_CONFLICT", "Версия маршрута недоступна", 409)
+        context = _recommendation_context(
+            state, route, datetime.now(timezone.utc), require_position=False,
+        )
+        selected = state.recommendations.selected
+        if context is None or selected is None or selected.pointPlaceId != context[0]:
+            return PartnerOfferResponse(status="NONE", offer=None)
+        decisions = [*state.recommendations.decisions, RecommendationDecision(
+            pointPlaceId=context[0], decision="DISMISSED",
+            category=selected.offer.category,
+            partnerBrandId=selected.offer.partnerBrandId,
+            dgisPlaceId=selected.offer.dgisPlaceId,
+            decidedAt=datetime.now(timezone.utc),
+        )]
+        recommendations = state.recommendations.model_copy(update={
+            "decisions": decisions, "selected": None,
+        })
+        repository.replace_walk(state.model_copy(update={
+            "recommendations": recommendations,
+        }), x_device_session)
+    return PartnerOfferResponse(status="NONE", offer=None)
 
 
 @app.post("/v1/walks/{walk_id}/insert-suggested-place",
@@ -405,6 +565,10 @@ def insert_walk_suggested_place(
     if route_state is None:
         return failure("NOT_FOUND", "Маршрут не найден", 404, request_id)
     current, source = route_state
+    if (_accepted_recommendation(
+            state, payload.partnerBrandId, payload.dgisPlaceId)
+            and any(point.placeId == payload.dgisPlaceId for point in current.points)):
+        return InsertSuggestedPlaceResponse(route=current, walk=session_at(state))
     if (payload.expectedRouteVersion != current.routeVersion
             or state.session.routeVersion != current.routeVersion):
         return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
@@ -423,6 +587,11 @@ def insert_walk_suggested_place(
     current_order = state.session.currentPointOrder
     if current_order is None or not 1 <= current_order <= len(current.points):
         return failure("WALK_INVALID_STATE", "Текущая точка прогулки недоступна", 409,
+                       request_id)
+    point_place_id = current.points[current_order - 1].placeId
+    context = _recommendation_context(state, current, datetime.now(timezone.utc))
+    if context is None or context[0] != point_place_id:
+        return failure("SUGGESTION_NOT_ALLOWED", "На этой точке рекомендации недоступны", 409,
                        request_id)
     if len(current.points) >= 8:
         return failure("POINT_LIMIT_REACHED", "В маршруте может быть не больше восьми точек",
@@ -443,6 +612,16 @@ def insert_walk_suggested_place(
         return failure("SUGGESTION_NOT_ALLOWED", "Рекомендация больше недоступна", 409,
                        request_id)
     expected_name, segment = brand
+    if segment not in context[1]:
+        return failure("SUGGESTION_NOT_ALLOWED", "Эта категория уже использована", 409,
+                       request_id)
+    selected = state.recommendations.selected
+    if (selected is not None and selected.pointPlaceId == point_place_id
+            and (selected.offer.partnerBrandId != payload.partnerBrandId
+                 or selected.offer.dgisPlaceId != payload.dgisPlaceId
+                 or selected.offer.category != segment)):
+        return failure("SUGGESTION_EXPIRED", "Предложение больше не актуально", 409,
+                       request_id)
 
     try:
         branch = geo.resolve_suggested_branch(
@@ -472,16 +651,17 @@ def insert_walk_suggested_place(
                        422, request_id)
 
     delta = replacement.totalMinutes - current.totalMinutes
-    updated_session = state.session.model_copy(update={
-        "routeVersion": replacement.routeVersion,
-        "estimatedRemainingMinutes": max(
-            0, state.session.estimatedRemainingMinutes + delta,
-        ),
-    })
-    updated_walk = state.model_copy(update={"session": updated_session})
     with STATE_LOCK:
         latest_walk = repository.get_walk(walk_id, x_device_session)
         latest_route = repository.get(current.routeId, x_device_session)
+        if (latest_walk is not None and latest_route is not None
+                and _accepted_recommendation(
+                    latest_walk, payload.partnerBrandId, payload.dgisPlaceId)
+                and any(point.placeId == payload.dgisPlaceId
+                        for point in latest_route[0].points)):
+            return InsertSuggestedPlaceResponse(
+                route=latest_route[0], walk=session_at(latest_walk),
+            )
         if (latest_walk is None or latest_route is None
                 or latest_route[0].routeVersion != current.routeVersion
                 or latest_walk.session.routeVersion != current.routeVersion
@@ -491,6 +671,39 @@ def insert_walk_suggested_place(
             latest_version = latest_route[0].routeVersion if latest_route else current.routeVersion
             return failure("VERSION_CONFLICT", "Маршрут или прогулка уже изменились", 409,
                            request_id, {"currentVersion": latest_version})
+        latest_context = _recommendation_context(
+            latest_walk, latest_route[0], datetime.now(timezone.utc),
+        )
+        if latest_context is None or latest_context[0] != point_place_id:
+            return failure("SUGGESTION_NOT_ALLOWED", "Рекомендация больше недоступна", 409,
+                           request_id)
+        latest_selected = latest_walk.recommendations.selected
+        if (latest_selected is not None
+                and latest_selected.pointPlaceId == point_place_id
+                and (latest_selected.offer.partnerBrandId != payload.partnerBrandId
+                     or latest_selected.offer.dgisPlaceId != payload.dgisPlaceId
+                     or latest_selected.offer.category != segment)):
+            return failure("SUGGESTION_EXPIRED", "Предложение больше не актуально", 409,
+                           request_id)
+        decisions = [*latest_walk.recommendations.decisions, RecommendationDecision(
+            pointPlaceId=point_place_id, decision="ACCEPTED", category=segment,
+            partnerBrandId=payload.partnerBrandId, dgisPlaceId=payload.dgisPlaceId,
+            decidedAt=datetime.now(timezone.utc),
+        )]
+        categories = [*latest_walk.recommendations.usedCategories, segment]
+        recommendations = latest_walk.recommendations.model_copy(update={
+            "usedCategories": list(dict.fromkeys(categories)),
+            "decisions": decisions, "selected": None,
+        })
+        updated_session = latest_walk.session.model_copy(update={
+            "routeVersion": replacement.routeVersion,
+            "estimatedRemainingMinutes": max(
+                0, latest_walk.session.estimatedRemainingMinutes + delta,
+            ),
+        })
+        updated_walk = latest_walk.model_copy(update={
+            "session": updated_session, "recommendations": recommendations,
+        })
         if not repository.replace_route_and_walk(
                 replacement, updated_walk, x_device_session, source,
                 current.routeVersion):

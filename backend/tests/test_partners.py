@@ -10,7 +10,8 @@ from gulyay.api import (app, get_geo_provider, get_partner_registry,
 from gulyay.geo import (DgisGeoProvider, GeoRouteNotFound, GeoUnavailable,
                         PartnerBranch, clear_geo_caches)
 from gulyay.models import (CreateRoute, Filters, Route, RouteLeg, RoutePoint,
-                           SearchArea, WalkPosition, WalkSession, WalkState)
+                           SearchArea, WalkPosition, WalkRecommendationState,
+                           WalkSession, WalkState)
 from gulyay.partners import PARTNER_BRANDS, PartnerOfferSelector, PartnerRegistry
 from gulyay.partner_test_fixture import BRAND_IDS, _brand_id_map
 from gulyay.repository import RouteRepository
@@ -646,6 +647,10 @@ def test_insert_suggested_place_updates_route_and_visiting_walk_atomically(tmp_p
         persisted_route = repository.get(route.routeId, owner)[0]
         persisted_walk = repository.get_walk(state.session.walkId, owner)
         assert persisted_route.routeVersion == persisted_walk.session.routeVersion == 2
+        assert persisted_route.points[1].pointType == "COFFEE"
+        assert persisted_walk.recommendations.usedCategories == ["COFFEE"]
+        assert persisted_walk.recommendations.decisions[0].pointPlaceId == "point"
+        assert persisted_walk.recommendations.decisions[0].decision == "ACCEPTED"
         assert persisted_walk.session.visitStartedAt == state.session.visitStartedAt
         assert persisted_walk.session.visitElapsedSeconds == 120
         first_exit_at = datetime.now(timezone.utc) + timedelta(seconds=1)
@@ -667,6 +672,25 @@ def test_insert_suggested_place_updates_route_and_visiting_walk_atomically(tmp_p
         assert left.session.phase == "MOVING"
         assert left.session.currentPointOrder == 2
         assert persisted_route.points[1].placeId == "drinkit-branch"
+        retry = client.post(
+            f"/v1/walks/{state.session.walkId}/insert-suggested-place",
+            headers={"X-Device-Session": str(owner)},
+            json={"expectedRouteVersion": 1, "partnerBrandId": "drinkit",
+                  "dgisPlaceId": "drinkit-branch"},
+        )
+        assert retry.status_code == 200
+        assert retry.json()["route"]["routeVersion"] == 2
+        assert [point["placeId"] for point in retry.json()["route"]["points"]].count(
+            "drinkit-branch") == 1
+        calls = (app.dependency_overrides[get_geo_provider]().search_calls,
+                 app.dependency_overrides[get_geo_provider]().routing_calls)
+        no_repeat = client.get(
+            f"/v1/walks/{state.session.walkId}/partner-offer",
+            headers={"X-Device-Session": str(owner)},
+        )
+        assert no_repeat.json() == {"status": "NONE", "offer": None}
+        assert (app.dependency_overrides[get_geo_provider]().search_calls,
+                app.dependency_overrides[get_geo_provider]().routing_calls) == calls
         reopened = RouteRepository(tmp_path / "insert.sqlite3")
         try:
             assert reopened.get(route.routeId, owner)[0].routeVersion == 2
@@ -675,6 +699,196 @@ def test_insert_suggested_place_updates_route_and_visiting_walk_atomically(tmp_p
             assert restored_walk.session.phase == "VISITING"
         finally:
             reopened.close()
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+def test_legacy_route_points_migrate_to_persisted_provenance():
+    base = {"order": 1, "placeId": "legacy", "name": "Старая точка",
+            "lat": 55.75, "lon": 37.61, "visitMinutes": 20,
+            "scheduleStatus": "OPEN"}
+    assert RoutePoint.model_validate({**base, "isFood": False}).pointType == "TOUR"
+    assert RoutePoint.model_validate({**base, "isFood": True}).pointType == "FOOD"
+
+
+def _offer_endpoint_state(tmp_path, geo, *, recommendations=None, point_type="TOUR"):
+    repository = RouteRepository(tmp_path / f"offer-{uuid4()}.sqlite3")
+    registry = PartnerRegistry(":memory:")
+    owner = uuid4()
+    route = route_for_api()
+    route = route.model_copy(update={
+        "points": [route.points[0].model_copy(update={"pointType": point_type})],
+    })
+    repository.save_new(route, owner, CreateRoute(
+        cityId="moscow", query="Прогулка по Москве", deviceSessionId=owner,
+    ))
+    state = visiting_state()
+    moment = datetime.now(timezone.utc)
+    position = state.lastPosition.model_copy(update={"measuredAt": moment})
+    state = state.model_copy(update={
+        "session": state.session.model_copy(update={
+            "routeId": route.routeId, "startedAt": moment - timedelta(hours=1),
+            "visitStartedAt": moment - timedelta(minutes=2),
+        }),
+        "lastMeasuredAt": moment, "lastPosition": position,
+        "recommendations": recommendations or WalkRecommendationState(),
+    })
+    repository.save_walk(state, owner)
+    app.dependency_overrides[get_route_repository] = lambda: repository
+    app.dependency_overrides[get_partner_registry] = lambda: registry
+    app.dependency_overrides[get_geo_provider] = lambda: geo
+    return TestClient(app), repository, registry, owner, route, state
+
+
+def test_offer_is_persisted_and_reused_without_another_2gis_search(tmp_path):
+    geo = FakePartnerGeo(branches=[PartnerBranch(
+        dgis_place_id="drinkit-near", dgis_brand_id="", name="Дринкит",
+        lat=55.756, lon=37.617, schedule={"is_24x7": True},
+    )])
+    client, repository, registry, owner, _, state = _offer_endpoint_state(tmp_path, geo)
+    try:
+        url = f"/v1/walks/{state.session.walkId}/partner-offer"
+        headers = {"X-Device-Session": str(owner)}
+        first = client.get(url, headers=headers)
+        calls = (geo.search_calls, geo.routing_calls)
+        second = client.get(url, headers=headers)
+        assert first.json() == second.json()
+        assert first.json()["offer"]["category"] == "COFFEE"
+        assert (geo.search_calls, geo.routing_calls) == calls
+        restored = repository.get_walk(state.session.walkId, owner)
+        assert restored.recommendations.selected.offer.dgisPlaceId == "drinkit-near"
+        reopened = RouteRepository(repository.path)
+        try:
+            app.dependency_overrides[get_route_repository] = lambda: reopened
+            after_restart = client.get(url, headers=headers)
+            assert after_restart.json() == first.json()
+            assert (geo.search_calls, geo.routing_calls) == calls
+        finally:
+            reopened.close()
+        app.dependency_overrides[get_route_repository] = lambda: repository
+        stale_selection = restored.recommendations.selected.model_copy(update={
+            "selectedAt": datetime.now(timezone.utc) - timedelta(minutes=11),
+        })
+        repository.replace_walk(restored.model_copy(update={
+            "recommendations": restored.recommendations.model_copy(update={
+                "selected": stale_selection,
+            }),
+        }), owner)
+        assert client.get(url, headers=headers).json()["status"] == "NONE"
+        assert (geo.search_calls, geo.routing_calls) == calls
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+def test_used_coffee_allows_only_restaurant_search(tmp_path):
+    geo = FakePartnerGeo(branches=[PartnerBranch(
+        dgis_place_id="tanuki-near", dgis_brand_id="", name="Тануки",
+        lat=55.756, lon=37.617, schedule={"is_24x7": True},
+    )])
+    recommendations = WalkRecommendationState(usedCategories=["COFFEE"])
+    client, repository, registry, owner, _, state = _offer_endpoint_state(
+        tmp_path, geo, recommendations=recommendations,
+    )
+    try:
+        response = client.get(
+            f"/v1/walks/{state.session.walkId}/partner-offer",
+            headers={"X-Device-Session": str(owner)},
+        )
+        assert response.json()["offer"]["category"] == "RESTAURANT"
+        assert response.json()["offer"]["partnerBrandId"] == "tanuki"
+        assert geo.search_calls == 4
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+def test_used_restaurant_allows_only_coffee_search(tmp_path):
+    geo = FakePartnerGeo(branches=[PartnerBranch(
+        dgis_place_id="drinkit-near", dgis_brand_id="", name="Дринкит",
+        lat=55.756, lon=37.617, schedule={"is_24x7": True},
+    )])
+    recommendations = WalkRecommendationState(usedCategories=["RESTAURANT"])
+    client, repository, registry, owner, _, state = _offer_endpoint_state(
+        tmp_path, geo, recommendations=recommendations,
+    )
+    try:
+        response = client.get(
+            f"/v1/walks/{state.session.walkId}/partner-offer",
+            headers={"X-Device-Session": str(owner)},
+        )
+        assert response.json()["offer"]["category"] == "COFFEE"
+        assert response.json()["offer"]["partnerBrandId"] == "drinkit"
+        assert geo.search_calls == 3
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+@pytest.mark.parametrize("recommendations,point_type", [
+    (WalkRecommendationState(usedCategories=["COFFEE", "RESTAURANT"]), "TOUR"),
+    (WalkRecommendationState(), "COFFEE"),
+    (WalkRecommendationState(), "FOOD"),
+])
+def test_ineligible_walk_state_skips_all_recommendation_api_calls(
+        tmp_path, recommendations, point_type):
+    geo = FakePartnerGeo()
+    client, repository, registry, owner, _, state = _offer_endpoint_state(
+        tmp_path, geo, recommendations=recommendations, point_type=point_type,
+    )
+    try:
+        response = client.get(
+            f"/v1/walks/{state.session.walkId}/partner-offer",
+            headers={"X-Device-Session": str(owner)},
+        )
+        assert response.json() == {"status": "NONE", "offer": None}
+        assert geo.search_calls == geo.routing_calls == 0
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+
+def test_empty_result_and_explicit_dismiss_stop_repeat_searches(tmp_path):
+    empty_geo = FakePartnerGeo(branches=[])
+    client, repository, registry, owner, _, state = _offer_endpoint_state(
+        tmp_path, empty_geo,
+    )
+    try:
+        url = f"/v1/walks/{state.session.walkId}/partner-offer"
+        headers = {"X-Device-Session": str(owner)}
+        assert client.get(url, headers=headers).json()["status"] == "NONE"
+        calls = empty_geo.search_calls
+        assert calls == 7
+        assert client.get(url, headers=headers).json()["status"] == "NONE"
+        assert empty_geo.search_calls == calls
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+
+    offer_geo = FakePartnerGeo(branches=[PartnerBranch(
+        dgis_place_id="drinkit-near", dgis_brand_id="", name="Дринкит",
+        lat=55.756, lon=37.617, schedule={"is_24x7": True},
+    )])
+    client, repository, registry, owner, _, state = _offer_endpoint_state(
+        tmp_path, offer_geo,
+    )
+    try:
+        url = f"/v1/walks/{state.session.walkId}/partner-offer"
+        headers = {"X-Device-Session": str(owner)}
+        assert client.get(url, headers=headers).json()["status"] == "AVAILABLE"
+        assert client.post(url + "/dismiss", headers=headers, json={}).status_code == 200
+        calls = (offer_geo.search_calls, offer_geo.routing_calls)
+        assert client.get(url, headers=headers).json()["status"] == "NONE"
+        assert (offer_geo.search_calls, offer_geo.routing_calls) == calls
+        restored = repository.get_walk(state.session.walkId, owner)
+        assert restored.recommendations.decisions[0].decision == "DISMISSED"
     finally:
         app.dependency_overrides.clear()
         registry.close()

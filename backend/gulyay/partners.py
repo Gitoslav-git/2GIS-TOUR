@@ -313,7 +313,8 @@ def nearby_suggestion_offers(moment: datetime) -> list[CommercialOffer]:
     return [CommercialOffer(
         offer_id=f"nearby_{partner_id}_moscow", partner_brand_id=partner_id,
         city_id="moscow", segment=segment, dgis_brand_id=None,
-        search_query=name, title="Зайти по пути?",
+        search_query=name,
+        title="Зайти за кофе?" if segment == "COFFEE" else "Зайти поесть?",
         description="Рекомендация рядом с текущей точкой прогулки.",
         valid_from=moment, valid_until=moment, button_text="Добавить в маршрут",
         is_commercial=False,
@@ -327,7 +328,8 @@ class PartnerOfferSelector:
 
     def select(self, state: WalkState, city_id: str,
                now: datetime | None = None,
-               excluded_place_ids: set[str] | None = None) -> PartnerOffer | None:
+               excluded_place_ids: set[str] | None = None,
+               allowed_categories: set[str] | None = None) -> PartnerOffer | None:
         moment = _utc(now or datetime.now(timezone.utc))
         session = state.session
         if session.status != "ACTIVE" or session.phase != "VISITING":
@@ -339,6 +341,8 @@ class PartnerOfferSelector:
         offers = self.registry.eligible_offers(city_id, moment)
         if not offers and city_id == "moscow":
             offers = nearby_suggestion_offers(moment)
+        if allowed_categories is not None:
+            offers = [offer for offer in offers if offer.segment in allowed_categories]
         if not offers:
             return None
         position = state.lastPosition
@@ -416,6 +420,7 @@ class PartnerOfferSelector:
             description=offer.description,
             venueName=branch.name,
             walkingMinutes=minutes,
+            category=offer.segment,
             isCommercial=offer.is_commercial,
             action=PartnerOfferAction(
                 type="ADD_TO_ROUTE", label="Добавить в маршрут",

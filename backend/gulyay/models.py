@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -256,6 +256,17 @@ class RoutePoint(StrictModel):
     visitMinutes: int
     scheduleStatus: Literal["OPEN", "CLOSED", "UNKNOWN"]
     isFood: bool
+    # Stable persisted provenance. Array indexes change when a recommendation is
+    # inserted, so recommendation eligibility must not be inferred from order.
+    pointType: Literal["TOUR", "COFFEE", "RESTAURANT", "FOOD", "OTHER"] = "TOUR"
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_point_type(cls, value):
+        if isinstance(value, dict) and "pointType" not in value:
+            value = dict(value)
+            value["pointType"] = "FOOD" if value.get("isFood") else "TOUR"
+        return value
 
 
 class RouteLeg(StrictModel):
@@ -413,6 +424,54 @@ class WalkProgress(StrictModel):
     distanceMeters: int | None = Field(default=None, ge=0)
 
 
+class PartnerOfferAction(StrictModel):
+    type: Literal["ADD_TO_ROUTE"]
+    label: str = Field(min_length=1, max_length=80)
+
+
+class PartnerOffer(StrictModel):
+    offerId: str = Field(min_length=1, max_length=120)
+    partnerBrandId: str = Field(min_length=1, max_length=80)
+    dgisPlaceId: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=160)
+    description: str = Field(min_length=1, max_length=1000)
+    venueName: str = Field(min_length=1, max_length=240)
+    walkingMinutes: int = Field(ge=1, le=120)
+    category: Literal["COFFEE", "RESTAURANT"]
+    # Preview suggestions are never commercial offers.
+    isCommercial: bool = True
+    action: PartnerOfferAction
+
+
+class RecommendationDecision(StrictModel):
+    pointPlaceId: str = Field(min_length=1, max_length=200)
+    decision: Literal["ACCEPTED", "DISMISSED"]
+    category: Literal["COFFEE", "RESTAURANT"] | None = None
+    partnerBrandId: str | None = Field(default=None, max_length=80)
+    dgisPlaceId: str | None = Field(default=None, max_length=120)
+    decidedAt: datetime
+
+
+class RecommendationSelection(StrictModel):
+    pointPlaceId: str = Field(min_length=1, max_length=200)
+    selectedAt: datetime
+    originLat: float = Field(ge=-90, le=90)
+    originLon: float = Field(ge=-180, le=180)
+    offer: PartnerOffer
+
+
+class WalkRecommendationState(StrictModel):
+    usedCategories: list[Literal["COFFEE", "RESTAURANT"]] = Field(default_factory=list)
+    decisions: list[RecommendationDecision] = Field(default_factory=list)
+    exhaustedPointPlaceIds: list[str] = Field(default_factory=list)
+    selected: RecommendationSelection | None = None
+
+    @field_validator("usedCategories")
+    @classmethod
+    def unique_categories(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(values))
+
+
 class WalkState(StrictModel):
     session: WalkSession
     lastMeasuredAt: datetime | None = None
@@ -428,24 +487,9 @@ class WalkState(StrictModel):
     visitPausedSeconds: int = Field(default=0, ge=0)
     # Legacy equivalent of visitPausedSeconds for final-point-only timers.
     finalPointPausedSeconds: int = Field(default=0, ge=0)
-
-
-class PartnerOfferAction(StrictModel):
-    type: Literal["ADD_TO_ROUTE"]
-    label: str = Field(min_length=1, max_length=80)
-
-
-class PartnerOffer(StrictModel):
-    offerId: str = Field(min_length=1, max_length=120)
-    partnerBrandId: str = Field(min_length=1, max_length=80)
-    dgisPlaceId: str = Field(min_length=1, max_length=120)
-    title: str = Field(min_length=1, max_length=160)
-    description: str = Field(min_length=1, max_length=1000)
-    venueName: str = Field(min_length=1, max_length=240)
-    walkingMinutes: int = Field(ge=1, le=120)
-    # Preview suggestions are never commercial offers.
-    isCommercial: bool = True
-    action: PartnerOfferAction
+    # Stored in walk_json, so limits and point decisions survive both app and
+    # backend restarts without introducing a second state store.
+    recommendations: WalkRecommendationState = Field(default_factory=WalkRecommendationState)
 
 
 class PartnerOfferResponse(StrictModel):

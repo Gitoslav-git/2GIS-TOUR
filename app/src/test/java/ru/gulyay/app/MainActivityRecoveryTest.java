@@ -227,7 +227,7 @@ public class MainActivityRecoveryTest {
         assertTrue(VisitingPresentation.shouldShowPartnerOffer(
                 new VisitingPresentation.PartnerOffer(
                         "Зайти за кофе?", "Без скидок", "Cofix на Тверской",
-                        6, "Партнёрское предложение", "ADD_TO_ROUTE",
+                        "COFFEE", 6, "Партнёр рядом", "ADD_TO_ROUTE",
                         "Добавить в маршрут")));
         assertTrue(VisitingPresentation.shouldShowRemainingPoints(true));
         assertTrue(VisitingPresentation.shouldShowRemainingPoints(false));
@@ -236,20 +236,20 @@ public class MainActivityRecoveryTest {
     @Test public void partnerOfferRequiresInsertActionAndConfirmedFields() {
         ApiClient.PartnerOffer apiOffer = new ApiClient.PartnerOffer(
                 "offer", "cofix", "branch-1", "Зайти за кофе?", "Без скидок",
-                "Cofix", 4, true, "ADD_TO_ROUTE", "Добавить в маршрут");
+                "Cofix", "COFFEE", 4, true, "ADD_TO_ROUTE", "Добавить в маршрут");
         VisitingPresentation.PartnerOffer offer = VisitingPresentation.PartnerOffer.from(apiOffer);
         assertTrue(VisitingPresentation.shouldShowPartnerOffer(offer));
         assertFalse(VisitingPresentation.shouldShowPartnerOffer(
                 new VisitingPresentation.PartnerOffer(
-                        "Зайти", "", "Cofix", 4, "Партнёрское предложение",
+                        "Зайти", "", "Cofix", "COFFEE", 4, "Партнёр рядом",
                         "OPEN_DGIS", "Открыть")));
         VisitingPresentation.PartnerOffer preview =
                 VisitingPresentation.PartnerOffer.from(new ApiClient.PartnerOffer(
                         "preview", "drinkit", "branch-1", "Зайти", "Не реклама",
-                        "Дринкит", 4, false, "ADD_TO_ROUTE",
+                        "Дринкит", "COFFEE", 4, false, "ADD_TO_ROUTE",
                         "Добавить в маршрут"));
         assertTrue(VisitingPresentation.shouldShowPartnerOffer(preview));
-        assertEquals("РЕКОМЕНДАЦИЯ РЯДОМ · НЕ РЕКЛАМА", preview.disclosure);
+        assertEquals("Рядом по пути", preview.disclosure);
     }
 
     @Test public void stalePartnerOfferResponseCannotCrossPointOrWalkState() {

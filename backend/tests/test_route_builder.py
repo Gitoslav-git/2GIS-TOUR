@@ -5,7 +5,7 @@ import pytest
 
 from gulyay.models import (CreateRoute, PlaceCandidate, QueryPreview, RouteLeg,
                            SearchArea, StartLocation)
-from gulyay.route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, _candidate_score, build_route, city_timezone,
+from gulyay.route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, _candidate_score, _retrieve_candidates, build_route, city_timezone,
                                   rebuild_route_with_points, schedule_status_at)
 
 
@@ -83,6 +83,46 @@ def test_borovsk_without_device_location_starts_at_lenin_square_override():
     assert (route.startLat, route.startLon) == (55.207583, 36.484355)
     assert route.startSource == "CITY_NO_GEO_OVERRIDE"
     assert route.approximateStart is True
+
+
+def test_free_only_never_uses_2gis_candidates_with_unknown_cost():
+    class LocalCatalog:
+        def has_city(self, city_id): return True
+        def list_candidates(self, city_id, preview, area):
+            return [candidate("Бесплатный парк", "catalog:free")]
+
+    class UnknownCostGeo(FakeGeo):
+        def __init__(self):
+            super().__init__([candidate("Неизвестная цена", "2gis:unknown")])
+            self.place_searches = 0
+            self.food_searches = 0
+        def search_places(self, city_id, preview, area):
+            self.place_searches += 1
+            return self.candidates
+        def search_food_places(self, city_id, preview, area):
+            self.food_searches += 1
+            return [candidate("Кафе с неизвестной ценой", "2gis:food", food=True)]
+
+    geo = UnknownCostGeo()
+    preview = preferences(freeOnly=True, includeFood=True)
+    area = SearchArea(label="Центр", lat=54.193, lon=37.617,
+                      radiusMeters=3500, source="city")
+
+    catalog_first = _retrieve_candidates(
+        "tula", preview, area, geo, LocalCatalog(), catalog_first=True,
+    )
+    fallback = _retrieve_candidates(
+        "tula", preview, area, geo, LocalCatalog(), catalog_first=False,
+    )
+    no_catalog = _retrieve_candidates(
+        "tula", preview, area, geo, None, catalog_first=False,
+    )
+
+    assert [item.placeId for item in catalog_first] == ["catalog:free"]
+    assert [item.placeId for item in fallback] == ["catalog:free"]
+    assert no_catalog == []
+    assert geo.place_searches == 0
+    assert geo.food_searches == 0
 
 
 def test_borovsk_device_location_does_not_use_city_override():

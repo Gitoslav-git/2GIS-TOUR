@@ -443,14 +443,21 @@ def _retrieve_candidates(city_id: str, preview: QueryPreview, area: SearchArea,
                          geo: GeoProvider, catalog: CatalogPlaceProvider | None,
                          catalog_first: bool) -> list[PlaceCandidate]:
     if catalog is None or not catalog.has_city(city_id):
+        if preview.freeOnly:
+            # 2GIS search results do not carry authoritative admission prices.
+            # Unknown cost cannot satisfy an explicit free-only constraint.
+            return []
         return geo.search_places(city_id, preview, area)
     sights = catalog.list_candidates(city_id, preview, area)
     if not catalog_first:
+        if preview.freeOnly:
+            return sights
         # Do not discard the local data merely because the catalogue is too
         # small to be trusted as the sole source.
         return _merge_candidates(sights, geo.search_places(city_id, preview, area))
     food_search = getattr(geo, "search_food_places", None)
-    food = food_search(city_id, preview, area) if callable(food_search) else []
+    food = (food_search(city_id, preview, area)
+            if callable(food_search) and not preview.freeOnly else [])
     return [*sights, *food]
 
 

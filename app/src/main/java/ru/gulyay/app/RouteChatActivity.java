@@ -36,6 +36,7 @@ public final class RouteChatActivity extends ComponentActivity {
     static final String EXTRA_START_LON = "startLon";
     static final String EXTRA_START_ACCURACY = "startAccuracyMeters";
     static final String EXTRA_START_MEASURED_AT = "startMeasuredAtMillis";
+    static final String EXTRA_FILTERS_JSON = "filtersJson";
     private static final int LOCATION_PERMISSION_REQUEST = 78;
     private static final long LOCATION_TIMEOUT_MILLIS = 20_000L;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
@@ -49,10 +50,13 @@ public final class RouteChatActivity extends ComponentActivity {
     private LocationListener locationListener;
     private Runnable locationTimeout;
     private String pendingNewRouteQuery;
+    private RouteChatFilters routeFilters;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         city = getIntent().getStringExtra(EXTRA_CITY); session = getIntent().getStringExtra(EXTRA_SESSION);
+        routeFilters = RouteChatFilters.fromExtra(
+                getIntent().getStringExtra(EXTRA_FILTERS_JSON));
         if (getIntent().hasExtra(EXTRA_START_LAT) && getIntent().hasExtra(EXTRA_START_LON)) {
             startLocation = new RouteStartLocation(
                     getIntent().getDoubleExtra(EXTRA_START_LAT, 0.0),
@@ -69,8 +73,20 @@ public final class RouteChatActivity extends ComponentActivity {
         LinearLayout composer=new LinearLayout(this); composer.setGravity(Gravity.CENTER_VERTICAL); input=new EditText(this); input.setHint("Напишите, что изменить…"); input.setMinLines(1); input.setMaxLines(4); input.setBackground(UiKit.bordered(0xFFFFFFFF,0xFFE0E6E1,24,this)); composer.addView(input,new LinearLayout.LayoutParams(0,-2,1)); send=UiKit.button(this,"➤",UiKit.GREEN,0xFFFFFFFF); composer.addView(send,new LinearLayout.LayoutParams(UiKit.dp(this,58),UiKit.dp(this,52))); root.addView(composer);
         setContentView(root); back.setOnClickListener(v->onBackPressed()); if(fresh!=null) fresh.setOnClickListener(v->confirmCancelCreate()); send.setOnClickListener(v->submit());
         String first=getIntent().getStringExtra(EXTRA_QUERY);
-        if (routeId == null && first != null && !first.trim().isEmpty()) { user(first); requestInitial(first); }
-        else bot("Что хотите изменить в маршруте?");
+        if (routeId == null && first != null && !first.trim().isEmpty()) {
+            user(first);
+            requestInitial(first);
+        } else if (routeId != null && routeFilters != null
+                && first != null && !first.trim().isEmpty()) {
+            user(first);
+            loading(true);
+            network.execute(() -> call(() -> ApiClient.reviseRoute(
+                    routeId, routeVersion, city, first, session,
+                    startLocation == null ? null : startLocation.lat,
+                    startLocation == null ? null : startLocation.lon,
+                    startLocation == null ? null : startLocation.accuracyMeters,
+                    routeFilters.copyJson())));
+        } else bot("Что хотите изменить в маршруте?");
     }
     private void user(String text){ bubble(text,false); }
     private void bot(String text){ bubble(text,true); }
@@ -94,10 +110,12 @@ public final class RouteChatActivity extends ComponentActivity {
 
     private void createNewRoute(String query, RouteStartLocation location) {
         pendingNewRouteQuery = null;
-        network.execute(() -> call(() -> location == null
-                ? ApiClient.createRoute(city, query, session)
-                : ApiClient.createRoute(city, query, session, location.lat, location.lon,
-                        location.accuracyMeters)));
+        network.execute(() -> call(() -> ApiClient.createRoute(
+                city, query, session,
+                location == null ? null : location.lat,
+                location == null ? null : location.lon,
+                location == null ? null : location.accuracyMeters,
+                routeFilters == null ? null : routeFilters.copyJson())));
     }
 
     private void requestFreshLocation() {

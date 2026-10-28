@@ -74,6 +74,7 @@ public final class MainActivity extends Activity {
     private LinearLayout selectedFilters;
     private Button durationFilterButton, childrenFilterButton, foodFilterButton, unusualFilterButton;
     private boolean filterTwoHours, filterChildren, filterFood, filterUnusual;
+    private boolean quickFiltersDirty;
     private boolean routeFinished;
     // A route lifecycle is server-authoritative.  Preferences only provide a
     // recovery hint after process death until this flag is set by a server read.
@@ -567,6 +568,7 @@ public final class MainActivity extends Activity {
             else if (chip == childrenFilterButton) filterChildren = !filterChildren;
             else if (chip == foodFilterButton) filterFood = !filterFood;
             else if (chip == unusualFilterButton) filterUnusual = !filterUnusual;
+            quickFiltersDirty = true;
             refreshFilterUi();
         });
         chip.setTag(accent);
@@ -621,7 +623,11 @@ public final class MainActivity extends Activity {
         chip.setTextSize(13); chip.setAllCaps(false); chip.setMinWidth(0); chip.setMinHeight(0);
         chip.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
         chip.setBackground(UiKit.bordered(0xFFFFFFFF, accent, 14, this));
-        chip.setOnClickListener(view -> { remove.run(); refreshFilterUi(); });
+        chip.setOnClickListener(view -> {
+            remove.run();
+            quickFiltersDirty = true;
+            refreshFilterUi();
+        });
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, UiKit.dp(this, 32));
         params.rightMargin = UiKit.dp(this, 6); selectedFilters.addView(chip, params);
     }
@@ -701,6 +707,12 @@ public final class MainActivity extends Activity {
         chat.putExtra(RouteChatActivity.EXTRA_CITY, cityId);
         chat.putExtra(RouteChatActivity.EXTRA_QUERY, text);
         chat.putExtra(RouteChatActivity.EXTRA_SESSION, sessionId());
+        boolean editingCurrentRoute = !createNewRoute && routeId != null && !routeFinished
+                && cityId.equals(routeCityId);
+        if (RouteChatFilters.shouldSend(editingCurrentRoute, quickFiltersDirty)) {
+            chat.putExtra(RouteChatActivity.EXTRA_FILTERS_JSON,
+                    selectedFiltersJson().toString());
+        }
         if (currentStartLocationIsUsable()) {
             chat.putExtra(RouteChatActivity.EXTRA_START_LAT, startLat);
             chat.putExtra(RouteChatActivity.EXTRA_START_LON, startLon);
@@ -2311,6 +2323,7 @@ public final class MainActivity extends Activity {
                 ApiClient.Result restored = ApiClient.routeFromSnapshot(routeSnapshot);
                 if (restored != null) { currentPoints.clear(); currentPoints.addAll(restored.points); lastSuccessfulResult = restored.message; }
                 routeFinished = false; routeLocationDirty = false;
+                quickFiltersDirty = false;
                 currentWalkStatus = null; walkStateVerified = true; walkStateError = null;
                 if (routeId != null && routeCityId != null && lastSuccessfulResult != null) {
                     persistRouteState(data.getStringExtra(RouteChatActivity.EXTRA_QUERY));

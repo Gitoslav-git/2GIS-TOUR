@@ -312,7 +312,8 @@ def interpret(payload: CreateRoute, provider: IntentProvider,
                       else parsed.withChildren),
         unusualPlaces=(payload.filters.unusualPlaces if payload.filters.unusualPlaces is not None
                        else parsed.unusualPlaces),
-        freeOnly=payload.filters.freeOnly is True,
+        freeOnly=(payload.filters.freeOnly if payload.filters.freeOnly is not None
+                  else _hard_free_only_requested(payload.query)),
         maxBudgetRub=payload.filters.maxBudgetRub,
         excludedPlaceTypes=payload.filters.excludedPlaceTypes,
         centerOnly=center_only,
@@ -365,6 +366,28 @@ def interpret(payload: CreateRoute, provider: IntentProvider,
         },
     )
     return preview
+
+
+def _hard_free_only_requested(query: str) -> bool:
+    """Recognize explicit cost prohibitions without promoting soft preferences."""
+    text = " ".join(query.casefold().replace("ё", "е").split())
+    # An explicit allowance wins over an earlier preference in the same request.
+    if re.search(r"\bплатн\w*\s+(?:тоже\s+)?(?:можно|допустим\w*|подойдут)\b", text):
+        return False
+    patterns = (
+        r"(?<!\bне\s)\b(?:только|исключительно)\s+(?:[а-я]+\s+){0,2}бесплатн\w*\b",
+        r"\bбез\s+(?:каких-либо\s+)?платн\w*\b",
+        r"\bникак\w*\s+(?:[а-я]+\s+){0,2}платн\w*\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match is None:
+            continue
+        prefix = text[max(0, match.start() - 32):match.start()]
+        if re.search(r"\b(?:желательно|предпочтительно|лучше|по возможности)\b", prefix):
+            continue
+        return True
+    return False
 
 
 def _duration_settings(payload: CreateRoute, parsed: IntentExtraction) -> dict[str, object]:

@@ -307,6 +307,14 @@ final class ApiClient {
     static Result createRoute(String cityId, String query, String sessionId,
                               Double startLat, Double startLon, Double accuracyMeters,
                               JSONObject filters) throws Exception {
+        return send("/v1/routes", createRoutePayload(cityId, query, sessionId,
+                startLat, startLon, accuracyMeters, filters), sessionId, cityId);
+    }
+
+    static JSONObject createRoutePayload(String cityId, String query, String sessionId,
+                                         Double startLat, Double startLon,
+                                         Double accuracyMeters, JSONObject filters)
+            throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("cityId", cityId);
         payload.put("query", query);
@@ -320,7 +328,7 @@ final class ApiClient {
                     ? 100.0 : Math.max(0.0, accuracyMeters));
             payload.put("startLocation", location);
         }
-        return send("/v1/routes", payload, sessionId, cityId);
+        return payload;
     }
 
     static Result reviseRoute(String routeId, int baseVersion, String cityId,

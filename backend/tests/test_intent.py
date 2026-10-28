@@ -142,6 +142,42 @@ def test_filter_takes_precedence_over_text_and_false_is_explicit():
     assert result.json()["withChildren"] is False
 
 
+@pytest.mark.parametrize("query", [
+    "Хочу только бесплатные места",
+    "Маршрут без платных достопримечательностей",
+    "Никаких платных музеев и объектов",
+])
+def test_explicit_free_only_text_becomes_hard_constraint(query):
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed())
+    result = request(query=query)
+    assert result.status_code == 200
+    assert result.json()["freeOnly"] is True
+
+
+@pytest.mark.parametrize("query", [
+    "Желательно бесплатные места",
+    "Бесплатные предпочтительнее, но платные тоже можно",
+    "Не обязательно бесплатно",
+    "Не только бесплатные места",
+    "Желательно без платных музеев",
+    "Маршрут по историческим местам",
+])
+def test_soft_or_negated_free_text_does_not_become_hard_constraint(query):
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed())
+    result = request(query=query)
+    assert result.status_code == 200
+    assert result.json()["freeOnly"] is False
+
+
+@pytest.mark.parametrize("structured,expected", [(True, True), (False, False)])
+def test_structured_free_only_overrides_text(structured, expected):
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed())
+    result = request(query="Хочу только бесплатные места",
+                     filters={"freeOnly": structured})
+    assert result.status_code == 200
+    assert result.json()["freeOnly"] is expected
+
+
 def test_default_duration_is_visible():
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(parsed())
     result = request()

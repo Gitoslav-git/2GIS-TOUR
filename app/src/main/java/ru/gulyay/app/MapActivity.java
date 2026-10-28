@@ -4,8 +4,11 @@ import android.Manifest;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.res.ColorStateList;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -38,14 +41,26 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.activity.ComponentActivity;
+import androidx.coordinatorlayout.widget.CoordinatorLayout;
+import androidx.core.content.ContextCompat;
 import androidx.lifecycle.ViewModel;
 import androidx.lifecycle.ViewModelProvider;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.session.MediaController;
+import androidx.media3.session.SessionToken;
+import com.google.android.material.bottomsheet.BottomSheetBehavior;
+import com.google.common.util.concurrent.ListenableFuture;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import kotlin.Unit;
@@ -103,6 +118,9 @@ public final class MapActivity extends ComponentActivity {
     static final String ACTION_WALK_STOPPED = "walkStopped";
     private static final String ROUTE_LIFECYCLE_PREFERENCES = "route_lifecycle";
     private static final String FINISHED_ROUTE_ID = "finishedRouteId";
+    private static final String PANEL_STATE_PREFIX = "panel_state_";
+    private static final String AUDIO_GUIDE_PREFERENCES = "audio_guide_ui";
+    private static final int AUDIO_NOTIFICATION_REQUEST = 209;
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private TextView status;
@@ -138,6 +156,7 @@ public final class MapActivity extends ComponentActivity {
     private LinearLayout pointHero;
     private LinearLayout pointList;
     private ScrollView pointListScroll;
+    private LinearLayout panelScrollableContent;
     private LinearLayout actions;
     private TextView photoPlaceholder;
     private LinearLayout visitingNextCard;
@@ -152,6 +171,35 @@ public final class MapActivity extends ComponentActivity {
     private TextView partnerOfferDismiss;
     private Button partnerOfferButton;
     private boolean partnerOfferInsertInFlight;
+    private LinearLayout audioCard;
+    private LinearLayout audioNewStoryBanner;
+    private TextView audioNewStoryTitle;
+    private ImageView audioAvailableIcon;
+    private TextView audioStateLabel;
+    private TextView audioStoryTitle;
+    private LinearLayout audioStoryTextContainer;
+    private TextView audioDuration;
+    private Button audioListenButton;
+    private LinearLayout audioPlayerControls;
+    private SeekBar audioSeekBar;
+    private TextView audioElapsed;
+    private TextView audioTotal;
+    private Button audioRewind;
+    private Button audioPlayPause;
+    private Button audioForward;
+    private TextView audioClose;
+    private TextView audioError;
+    private Button audioNextButton;
+    private final AudioGuideCoordinator audioCoordinator = new AudioGuideCoordinator();
+    private final java.util.Map<String, AudioStoryCatalog.AvailableStory> availableAudioStories =
+            new HashMap<>();
+    private final ExecutorService audioIo = Executors.newSingleThreadExecutor();
+    private ListenableFuture<MediaController> audioControllerFuture;
+    private MediaController audioController;
+    private int audioInspectionGeneration;
+    private boolean audioSeekInProgress;
+    private boolean audioStateRestored;
+    private String audioLastError;
     private boolean compactScreen;
     private final List<ApiClient.PlaceOption> editingPoints = new ArrayList<>();
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -179,6 +227,10 @@ public final class MapActivity extends ComponentActivity {
     private float routeMinZoom = 10.5f;
     private boolean mapInitializationStarted;
     private boolean cameraSnapshotFailureLogged;
+    private BottomSheetBehavior<LinearLayout> routeSheetBehavior;
+    private LinearLayout routeSheetView;
+    private String panelRouteKey;
+    private boolean applyingPanelState;
     private int renderedRouteVersion = -1;
     private double latestUserLat = Double.NaN;
     private double latestUserLon = Double.NaN;
@@ -191,6 +243,24 @@ public final class MapActivity extends ComponentActivity {
     private boolean mapGestureActive;
     private int partnerOfferRequestGeneration;
     private final Runnable cameraBoundsGuard = this::enforceRouteCameraBounds;
+    private final Runnable audioProgressTick = new Runnable() {
+        @Override public void run() {
+            renderAudioGuide();
+            expireAudioGuideIfNeeded();
+            if (audioCard != null && audioCard.getVisibility() == View.VISIBLE) {
+                uiHandler.postDelayed(this, 1_000L);
+            }
+        }
+    };
+    private final Player.Listener audioPlayerListener = new Player.Listener() {
+        @Override public void onEvents(Player player, Player.Events events) {
+            syncAudioPlaybackState(player, null);
+        }
+
+        @Override public void onPlayerError(PlaybackException error) {
+            syncAudioPlaybackState(audioController, "Не удалось воспроизвести рассказ");
+        }
+    };
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -199,16 +269,13 @@ public final class MapActivity extends ComponentActivity {
         latestUserLat = getIntent().getDoubleExtra(EXTRA_USER_LAT, Double.NaN);
         latestUserLon = getIntent().getDoubleExtra(EXTRA_USER_LON, Double.NaN);
 
-        FrameLayout root = new FrameLayout(this);
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        root.addView(page, new FrameLayout.LayoutParams(-1, -1));
+        CoordinatorLayout root = new CoordinatorLayout(this);
         boolean compact = getResources().getConfiguration().screenHeightDp <= 720;
         compactScreen = compact;
 
         mapContainer = new FrameLayout(this);
         mapContainer.setBackground(UiKit.rounded(UiKit.MAP, 0, this));
-        page.addView(mapContainer, new LinearLayout.LayoutParams(-1, 0, compact ? 0.47f : 0.54f));
+        root.addView(mapContainer, new CoordinatorLayout.LayoutParams(-1, -1));
         mapPlaceholder = UiKit.label(this,
                 "Карта маршрута\nЗдесь появится фрагмент 2ГИС", 17, UiKit.MUTED);
         mapPlaceholder.setGravity(Gravity.CENTER);
@@ -286,19 +353,29 @@ public final class MapActivity extends ComponentActivity {
         zoomOut.setOnClickListener(view -> changeMapZoom(-1f));
 
         LinearLayout sheet = new LinearLayout(this);
+        routeSheetView = sheet;
         sheet.setOrientation(LinearLayout.VERTICAL);
         sheet.setPadding(UiKit.dp(this, 16), UiKit.dp(this, compact ? 6 : 7),
                 UiKit.dp(this, 16), UiKit.dp(this, 8));
         sheet.setBackground(UiKit.rounded(0xFFFFFFFF, 26, this));
-        page.addView(sheet, new LinearLayout.LayoutParams(-1, 0, compact ? 0.53f : 0.46f));
+        sheet.setClickable(true);
+        sheet.setFocusable(true);
+        CoordinatorLayout.LayoutParams sheetParams = new CoordinatorLayout.LayoutParams(-1, -1);
+        routeSheetBehavior = new BottomSheetBehavior<>();
+        sheetParams.setBehavior(routeSheetBehavior);
+        root.addView(sheet, sheetParams);
 
+        FrameLayout dragHandleArea = new FrameLayout(this);
+        dragHandleArea.setClickable(true);
+        dragHandleArea.setFocusable(true);
+        dragHandleArea.setContentDescription("Потяните, чтобы изменить высоту панели");
         TextView handle = UiKit.label(this, "", 1, 0x00000000);
         handle.setBackground(UiKit.rounded(0xFFC7CDCA, 3, this));
-        LinearLayout.LayoutParams handleParams = new LinearLayout.LayoutParams(
-                UiKit.dp(this, 42), UiKit.dp(this, 5));
-        handleParams.gravity = Gravity.CENTER_HORIZONTAL;
-        handleParams.bottomMargin = UiKit.dp(this, compact ? 5 : 8);
-        sheet.addView(handle, handleParams);
+        FrameLayout.LayoutParams handleParams = new FrameLayout.LayoutParams(
+                UiKit.dp(this, 42), UiKit.dp(this, 5), Gravity.CENTER);
+        dragHandleArea.addView(handle, handleParams);
+        sheet.addView(dragHandleArea, new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, 48)));
 
         nextLabel = UiKit.label(this, "ПЕРВАЯ ТОЧКА", 12, UiKit.GREEN_DARK);
         nextLabel.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -324,13 +401,169 @@ public final class MapActivity extends ComponentActivity {
 
         status = UiKit.label(this, "Строим детали прогулки…", 14, UiKit.MUTED);
         status.setGravity(Gravity.CENTER_VERTICAL);
-        status.setPadding(UiKit.dp(this, 14), 0, UiKit.dp(this, 14), 0);
+        status.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 8),
+                UiKit.dp(this, 14), UiKit.dp(this, 8));
+        status.setMinHeight(UiKit.dp(this, compact ? 40 : 46));
         status.setBackground(UiKit.rounded(0xFFEAF9EF, 12, this));
-        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1,
-                UiKit.dp(this, compact ? 40 : 46));
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
         statusParams.topMargin = UiKit.dp(this, 4);
         statusParams.bottomMargin = UiKit.dp(this, 4);
         sheet.addView(status, statusParams);
+
+        panelScrollableContent = new LinearLayout(this);
+        panelScrollableContent.setOrientation(LinearLayout.VERTICAL);
+        pointListScroll = new ScrollView(this);
+        pointListScroll.setFillViewport(true);
+        pointListScroll.setVerticalScrollBarEnabled(true);
+        pointListScroll.setScrollbarFadingEnabled(false);
+        pointListScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        pointListScroll.setNestedScrollingEnabled(true);
+        pointListScroll.addView(panelScrollableContent, new ScrollView.LayoutParams(-1, -2));
+        sheet.addView(pointListScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        audioCard = new LinearLayout(this);
+        audioCard.setOrientation(LinearLayout.VERTICAL);
+        audioCard.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 12),
+                UiKit.dp(this, 14), UiKit.dp(this, 14));
+        audioCard.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE1E8E3, 20, this));
+        audioCard.setElevation(UiKit.dp(this, 2));
+        audioCard.setVisibility(View.GONE);
+
+        audioNewStoryBanner = new LinearLayout(this);
+        audioNewStoryBanner.setOrientation(LinearLayout.HORIZONTAL);
+        audioNewStoryBanner.setGravity(Gravity.CENTER_VERTICAL);
+        audioNewStoryBanner.setPadding(UiKit.dp(this, 10), UiKit.dp(this, 9),
+                UiKit.dp(this, 8), UiKit.dp(this, 9));
+        audioNewStoryBanner.setBackground(UiKit.rounded(0xFFEAF8EF, 16, this));
+        ImageView pendingIcon = new ImageView(this);
+        pendingIcon.setImageResource(R.drawable.ic_audio_headphones);
+        pendingIcon.setContentDescription(null);
+        pendingIcon.setPadding(UiKit.dp(this, 10), UiKit.dp(this, 10),
+                UiKit.dp(this, 10), UiKit.dp(this, 10));
+        pendingIcon.setBackground(UiKit.rounded(0xFFF5FCF7, 24, this));
+        audioNewStoryBanner.addView(pendingIcon, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 48), UiKit.dp(this, 48)));
+        LinearLayout pendingText = new LinearLayout(this);
+        pendingText.setOrientation(LinearLayout.VERTICAL);
+        pendingText.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 8), 0);
+        TextView pendingLabel = UiKit.label(this, "Доступна новая история!",
+                compact ? 14 : 15, UiKit.GREEN_DARK);
+        pendingLabel.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        pendingText.addView(pendingLabel, new LinearLayout.LayoutParams(-1, -2));
+        audioNewStoryTitle = UiKit.label(this, "", compact ? 15 : 16, UiKit.TEXT);
+        audioNewStoryTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        audioNewStoryTitle.setMaxLines(2);
+        audioNewStoryTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        pendingText.addView(audioNewStoryTitle, new LinearLayout.LayoutParams(-1, -2));
+        audioNewStoryBanner.addView(pendingText, new LinearLayout.LayoutParams(0, -2, 1));
+        audioNextButton = UiKit.button(this, "▶▶", UiKit.GREEN, 0xFFFFFFFF);
+        audioNextButton.setTextSize(compact ? 16 : 18);
+        audioNextButton.setContentDescription("Включить новую историю");
+        audioNewStoryBanner.addView(audioNextButton, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 58), UiKit.dp(this, 52)));
+        audioNewStoryBanner.setVisibility(View.GONE);
+        LinearLayout.LayoutParams bannerParams = new LinearLayout.LayoutParams(-1, -2);
+        bannerParams.bottomMargin = UiKit.dp(this, 10);
+        audioCard.addView(audioNewStoryBanner, bannerParams);
+
+        LinearLayout audioHeader = new LinearLayout(this);
+        audioHeader.setOrientation(LinearLayout.HORIZONTAL);
+        audioHeader.setGravity(Gravity.CENTER_VERTICAL);
+        audioStateLabel = UiKit.label(this, "Аудиогид", compact ? 16 : 17,
+                UiKit.GREEN_DARK);
+        audioStateLabel.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        audioHeader.addView(audioStateLabel, new LinearLayout.LayoutParams(0, -2, 1));
+        audioClose = UiKit.label(this, "×", 24, 0xFF77807C);
+        audioClose.setGravity(Gravity.CENTER);
+        audioClose.setContentDescription("Закрыть аудиогид");
+        audioHeader.addView(audioClose, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 48), UiKit.dp(this, 48)));
+        audioCard.addView(audioHeader, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout audioStoryRow = new LinearLayout(this);
+        audioStoryRow.setOrientation(LinearLayout.HORIZONTAL);
+        audioStoryRow.setGravity(Gravity.CENTER_VERTICAL);
+        audioAvailableIcon = new ImageView(this);
+        audioAvailableIcon.setImageResource(R.drawable.ic_audio_headphones);
+        audioAvailableIcon.setContentDescription("История аудиогида доступна");
+        audioAvailableIcon.setPadding(UiKit.dp(this, 15), UiKit.dp(this, 15),
+                UiKit.dp(this, 15), UiKit.dp(this, 15));
+        audioAvailableIcon.setBackground(UiKit.rounded(0xFFEAF8EF, 32, this));
+        audioStoryRow.addView(audioAvailableIcon, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 64), UiKit.dp(this, 64)));
+        audioStoryTextContainer = new LinearLayout(this);
+        audioStoryTextContainer.setOrientation(LinearLayout.VERTICAL);
+        audioStoryTextContainer.setPadding(UiKit.dp(this, 12), 0, 0, 0);
+        audioStoryTitle = UiKit.label(this, "", compact ? 18 : 20, UiKit.TEXT);
+        audioStoryTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        audioStoryTitle.setMaxLines(2);
+        audioStoryTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        audioStoryTextContainer.addView(audioStoryTitle,
+                new LinearLayout.LayoutParams(-1, -2));
+        audioDuration = UiKit.label(this, "", compact ? 14 : 15, UiKit.MUTED);
+        LinearLayout.LayoutParams durationParams = new LinearLayout.LayoutParams(-1, -2);
+        durationParams.topMargin = UiKit.dp(this, 3);
+        audioStoryTextContainer.addView(audioDuration, durationParams);
+        audioStoryRow.addView(audioStoryTextContainer,
+                new LinearLayout.LayoutParams(0, -2, 1));
+        audioCard.addView(audioStoryRow, new LinearLayout.LayoutParams(-1, -2));
+
+        audioListenButton = UiKit.button(this, "Слушать", UiKit.GREEN_DARK, 0xFFFFFFFF);
+        audioListenButton.setTextSize(compact ? 16 : 17);
+        LinearLayout.LayoutParams listenParams = new LinearLayout.LayoutParams(-1,
+                UiKit.dp(this, compact ? 48 : 52));
+        listenParams.topMargin = UiKit.dp(this, 12);
+        audioCard.addView(audioListenButton, listenParams);
+
+        audioPlayerControls = new LinearLayout(this);
+        audioPlayerControls.setOrientation(LinearLayout.VERTICAL);
+        audioSeekBar = new SeekBar(this);
+        audioSeekBar.setMax(1_000);
+        audioSeekBar.setProgressTintList(ColorStateList.valueOf(0xFF079B62));
+        audioSeekBar.setProgressBackgroundTintList(ColorStateList.valueOf(0xFFD9DEDB));
+        audioSeekBar.setThumbTintList(ColorStateList.valueOf(0xFF079B62));
+        audioSeekBar.setContentDescription("Позиция воспроизведения аудиогида");
+        audioPlayerControls.addView(audioSeekBar, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout audioTimes = new LinearLayout(this);
+        audioTimes.setOrientation(LinearLayout.HORIZONTAL);
+        audioElapsed = UiKit.label(this, "0:00", compact ? 13 : 14, UiKit.MUTED);
+        audioTotal = UiKit.label(this, "0:00", compact ? 13 : 14, UiKit.MUTED);
+        audioTotal.setGravity(Gravity.END);
+        audioTimes.addView(audioElapsed, new LinearLayout.LayoutParams(0, -2, 1));
+        audioTimes.addView(audioTotal, new LinearLayout.LayoutParams(0, -2, 1));
+        audioPlayerControls.addView(audioTimes, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout audioButtons = new LinearLayout(this);
+        audioButtons.setOrientation(LinearLayout.HORIZONTAL);
+        audioButtons.setGravity(Gravity.CENTER);
+        audioRewind = compactAudioButton("↶  −15");
+        audioPlayPause = compactAudioButton("▶");
+        audioForward = compactAudioButton("↷  +15");
+        audioPlayPause.setTextSize(19);
+        audioPlayPause.setBackground(UiKit.rounded(0xFFDDF4E5, 15, this));
+        audioRewind.setContentDescription("Назад на 15 секунд");
+        audioPlayPause.setContentDescription("Воспроизвести или поставить на паузу");
+        audioForward.setContentDescription("Вперёд на 15 секунд");
+        audioButtons.addView(audioRewind, new LinearLayout.LayoutParams(0,
+                UiKit.dp(this, compact ? 48 : 52), 1));
+        LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(0,
+                UiKit.dp(this, compact ? 48 : 52), 1);
+        playParams.leftMargin = UiKit.dp(this, 8);
+        playParams.rightMargin = UiKit.dp(this, 8);
+        audioButtons.addView(audioPlayPause, playParams);
+        audioButtons.addView(audioForward, new LinearLayout.LayoutParams(0,
+                UiKit.dp(this, compact ? 48 : 52), 1));
+        LinearLayout.LayoutParams buttonsParams = new LinearLayout.LayoutParams(-1, -2);
+        buttonsParams.topMargin = UiKit.dp(this, 8);
+        audioPlayerControls.addView(audioButtons, buttonsParams);
+        audioPlayerControls.setVisibility(View.GONE);
+        audioCard.addView(audioPlayerControls, new LinearLayout.LayoutParams(-1, -2));
+        audioError = UiKit.label(this, "", 12, UiKit.RED);
+        audioError.setVisibility(View.GONE);
+        audioCard.addView(audioError, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams audioCardParams = new LinearLayout.LayoutParams(-1, -2);
+        audioCardParams.topMargin = UiKit.dp(this, 4);
+        audioCardParams.bottomMargin = UiKit.dp(this, 4);
+        panelScrollableContent.addView(audioCard, audioCardParams);
 
         visitingNextCard = new LinearLayout(this);
         visitingNextCard.setOrientation(LinearLayout.HORIZONTAL);
@@ -362,7 +595,7 @@ public final class MapActivity extends ComponentActivity {
         LinearLayout.LayoutParams nextCardParams = new LinearLayout.LayoutParams(-1, -2);
         nextCardParams.topMargin = UiKit.dp(this, 1);
         nextCardParams.bottomMargin = UiKit.dp(this, 3);
-        sheet.addView(visitingNextCard, nextCardParams);
+        panelScrollableContent.addView(visitingNextCard, nextCardParams);
 
         partnerOfferCard = new LinearLayout(this);
         partnerOfferCard.setOrientation(LinearLayout.HORIZONTAL);
@@ -420,17 +653,11 @@ public final class MapActivity extends ComponentActivity {
         partnerOfferCard.addView(partnerOfferButton, new LinearLayout.LayoutParams(
                 UiKit.dp(this, compact ? 92 : 106), UiKit.dp(this, compact ? 52 : 58)));
         partnerOfferCard.setVisibility(View.GONE);
-        sheet.addView(partnerOfferCard, new LinearLayout.LayoutParams(-1, -2));
+        panelScrollableContent.addView(partnerOfferCard, new LinearLayout.LayoutParams(-1, -2));
 
         pointList = new LinearLayout(this);
         pointList.setOrientation(LinearLayout.VERTICAL);
-        pointListScroll = new ScrollView(this);
-        pointListScroll.setFillViewport(true);
-        pointListScroll.setVerticalScrollBarEnabled(true);
-        pointListScroll.setScrollbarFadingEnabled(false);
-        pointListScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
-        pointListScroll.addView(pointList, new ScrollView.LayoutParams(-1, -2));
-        sheet.addView(pointListScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        panelScrollableContent.addView(pointList, new LinearLayout.LayoutParams(-1, -2));
 
         actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -480,7 +707,11 @@ public final class MapActivity extends ComponentActivity {
         closeParams.leftMargin = UiKit.dp(this, 10);
         topBar.addView(close, closeParams);
         root.addView(topBar, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+        sheet.bringToFront();
         setContentView(root);
+        panelRouteKey = panelRouteKey();
+        configureRouteSheet(root);
+        setupAudioGuide();
 
         close.setOnClickListener(view -> {
             if (pointEditing) cancelPointEditing();
@@ -781,6 +1012,439 @@ public final class MapActivity extends ComponentActivity {
         });
     }
 
+    private String panelRouteKey() {
+        String routeId = getIntent().getStringExtra(EXTRA_ROUTE_ID);
+        return routeId == null ? "unknown" : routeId;
+    }
+
+    private void configureRouteSheet(CoordinatorLayout root) {
+        if (routeSheetBehavior == null) return;
+        routeSheetBehavior.setFitToContents(false);
+        routeSheetBehavior.setHalfExpandedRatio(0.60f);
+        routeSheetBehavior.setHideable(false);
+        routeSheetBehavior.setSkipCollapsed(false);
+        routeSheetBehavior.setDraggable(true);
+        routeSheetBehavior.addBottomSheetCallback(new BottomSheetBehavior.BottomSheetCallback() {
+            @Override public void onStateChanged(@androidx.annotation.NonNull View bottomSheet,
+                                                   int newState) {
+                if (newState == BottomSheetBehavior.STATE_COLLAPSED
+                        || newState == BottomSheetBehavior.STATE_HALF_EXPANDED
+                        || newState == BottomSheetBehavior.STATE_EXPANDED) {
+                    if (!applyingPanelState) savePanelState(newState);
+                }
+                updateMapOverlayOffsets(bottomSheet);
+            }
+
+            @Override public void onSlide(@androidx.annotation.NonNull View bottomSheet,
+                                          float slideOffset) {
+                updateMapOverlayOffsets(bottomSheet);
+            }
+        });
+        root.addOnLayoutChangeListener((view, left, top, right, bottom,
+                                         oldLeft, oldTop, oldRight, oldBottom) -> {
+            int height = bottom - top;
+            if (height <= 0) return;
+            int collapsedHeight = Math.max(UiKit.dp(this, 132), Math.round(height * 0.20f));
+            int expandedOffset = Math.max(0, Math.round(height * 0.02f));
+            routeSheetBehavior.setPeekHeight(collapsedHeight, false);
+            routeSheetBehavior.setExpandedOffset(expandedOffset);
+            if (routeSheetView != null) updateMapOverlayOffsets(routeSheetView);
+        });
+        root.post(() -> {
+            if (root.getHeight() <= 0) return;
+            int savedState = getSavedPanelState();
+            applyingPanelState = true;
+            routeSheetBehavior.setState(savedState);
+            applyingPanelState = false;
+            if (routeSheetView != null) updateMapOverlayOffsets(routeSheetView);
+        });
+    }
+
+    private void updateMapOverlayOffsets(View bottomSheet) {
+        if (!(bottomSheet.getParent() instanceof View)) return;
+        int parentHeight = ((View) bottomSheet.getParent()).getHeight();
+        if (parentHeight <= 0) return;
+        int visibleSheetHeight = Math.max(0, parentHeight - bottomSheet.getTop());
+        float bottomOverlayShift = -visibleSheetHeight;
+        if (mapRouteSummary != null) mapRouteSummary.setTranslationY(bottomOverlayShift);
+        if (guidancePanel != null) guidancePanel.setTranslationY(bottomOverlayShift);
+        if (zoomControls != null) zoomControls.setTranslationY(bottomOverlayShift / 2f);
+    }
+
+    private int getSavedPanelState() {
+        return getSharedPreferences(ROUTE_LIFECYCLE_PREFERENCES, MODE_PRIVATE)
+                .getInt(PANEL_STATE_PREFIX + panelRouteKey,
+                        BottomSheetBehavior.STATE_HALF_EXPANDED);
+    }
+
+    private void savePanelState(int state) {
+        getSharedPreferences(ROUTE_LIFECYCLE_PREFERENCES, MODE_PRIVATE)
+                .edit().putInt(PANEL_STATE_PREFIX + panelRouteKey, state).apply();
+    }
+
+    private void expandPanelForArrival() {
+        if (routeSheetBehavior == null) return;
+        routeSheetBehavior.setState(BottomSheetBehavior.STATE_HALF_EXPANDED);
+    }
+
+    private Button compactAudioButton(String text) {
+        Button button = UiKit.button(this, text, 0xFFEDF8F1, UiKit.GREEN_DARK);
+        button.setTextSize(compactScreen ? 14 : 15);
+        button.setPadding(UiKit.dp(this, 4), 0, UiKit.dp(this, 4), 0);
+        return button;
+    }
+
+    private void setupAudioGuide() {
+        restoreAudioGuideState();
+        audioListenButton.setOnClickListener(view -> {
+            audioCoordinator.onUserInteraction(System.currentTimeMillis());
+            playAudioStory(audioCoordinator.currentStoryId());
+        });
+        audioPlayPause.setOnClickListener(view -> {
+            audioCoordinator.onUserInteraction(System.currentTimeMillis());
+            if (audioController == null) {
+                audioLastError = "Плеер подключается. Нажмите ещё раз.";
+                connectAudioController();
+            } else if (audioCoordinator.playbackState()
+                    == AudioGuideCoordinator.PlaybackState.FINISHED) {
+                audioController.seekTo(0L);
+                audioController.play();
+            } else if (audioController.isPlaying()) {
+                audioController.pause();
+            } else {
+                playAudioStory(audioCoordinator.currentStoryId());
+            }
+            persistAudioGuideState();
+            renderAudioGuide();
+        });
+        audioRewind.setOnClickListener(view -> seekAudioBy(-15_000L));
+        audioForward.setOnClickListener(view -> seekAudioBy(15_000L));
+        audioClose.setOnClickListener(view -> closeAudioGuide());
+        audioNextButton.setOnClickListener(view -> {
+            String nextStory = audioCoordinator.switchToPending(System.currentTimeMillis());
+            persistAudioGuideState();
+            if (nextStory != null) playAudioStory(nextStory);
+        });
+        audioSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress,
+                                                     boolean fromUser) { }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {
+                audioSeekInProgress = true;
+                audioCoordinator.onUserInteraction(System.currentTimeMillis());
+            }
+
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {
+                audioSeekInProgress = false;
+                if (audioController != null && audioController.getDuration() > 0L) {
+                    long target = audioController.getDuration() * seekBar.getProgress()
+                            / seekBar.getMax();
+                    audioController.seekTo(target);
+                }
+                audioCoordinator.onUserInteraction(System.currentTimeMillis());
+                persistAudioGuideState();
+                renderAudioGuide();
+            }
+        });
+        renderAudioGuide();
+    }
+
+    private void connectAudioController() {
+        if (audioController != null || audioControllerFuture != null) return;
+        SessionToken token = new SessionToken(this,
+                new ComponentName(this, AudioPlaybackService.class));
+        audioControllerFuture = new MediaController.Builder(this, token).buildAsync();
+        ListenableFuture<MediaController> pending = audioControllerFuture;
+        pending.addListener(() -> {
+            if (audioControllerFuture != pending || isFinishing() || isDestroyed()) return;
+            try {
+                audioController = pending.get();
+                audioController.addListener(audioPlayerListener);
+                audioLastError = null;
+                syncAudioPlaybackState(audioController, null);
+            } catch (Exception error) {
+                audioControllerFuture = null;
+                audioLastError = "Не удалось подключить аудиоплеер";
+                audioCoordinator.onPlayback(audioCoordinator.currentStoryId(),
+                        AudioGuideCoordinator.PlaybackState.ERROR);
+                persistAudioGuideState();
+                renderAudioGuide();
+            }
+        }, ContextCompat.getMainExecutor(this));
+    }
+
+    private void disconnectAudioController() {
+        if (audioController != null) audioController.removeListener(audioPlayerListener);
+        audioController = null;
+        if (audioControllerFuture != null) {
+            MediaController.releaseFuture(audioControllerFuture);
+            audioControllerFuture = null;
+        }
+    }
+
+    private void syncAudioPlaybackState(Player player, String errorMessage) {
+        if (player == null) return;
+        MediaItem item = player.getCurrentMediaItem();
+        if (item == null) {
+            renderAudioGuide();
+            return;
+        }
+        AudioGuideCoordinator.PlaybackState state;
+        if (errorMessage != null || player.getPlayerError() != null) {
+            state = AudioGuideCoordinator.PlaybackState.ERROR;
+            audioLastError = errorMessage == null
+                    ? "Не удалось воспроизвести локальный аудиофайл" : errorMessage;
+        } else if (player.getPlaybackState() == Player.STATE_ENDED) {
+            state = AudioGuideCoordinator.PlaybackState.FINISHED;
+            audioLastError = null;
+        } else if (player.isPlaying()) {
+            state = AudioGuideCoordinator.PlaybackState.PLAYING;
+            audioLastError = null;
+        } else if (audioCoordinator.playbackState()
+                == AudioGuideCoordinator.PlaybackState.FINISHED
+                && (player.getDuration() <= 0L
+                || player.getCurrentPosition() >= player.getDuration() - 1_000L)) {
+            state = AudioGuideCoordinator.PlaybackState.FINISHED;
+            audioLastError = null;
+        } else if (player.getCurrentPosition() > 0L
+                || audioCoordinator.playbackState()
+                != AudioGuideCoordinator.PlaybackState.IDLE) {
+            state = AudioGuideCoordinator.PlaybackState.PAUSED;
+            audioLastError = null;
+        } else {
+            state = AudioGuideCoordinator.PlaybackState.IDLE;
+        }
+        audioCoordinator.onPlayback(item.mediaId, state);
+        persistAudioGuideState();
+        renderAudioGuide();
+    }
+
+    private void playAudioStory(String storyId) {
+        AudioStoryCatalog.Story story = AudioStoryCatalog.forCatalogId(storyId);
+        if (story == null) return;
+        requestAudioNotificationPermission();
+        if (audioController == null) {
+            audioLastError = "Плеер подключается. Нажмите ещё раз.";
+            connectAudioController();
+            renderAudioGuide();
+            return;
+        }
+        MediaItem selected = audioController.getCurrentMediaItem();
+        if (selected == null || !story.catalogId.equals(selected.mediaId)) {
+            audioController.setMediaItem(AudioStoryCatalog.mediaItem(story));
+            audioController.prepare();
+        } else if (audioController.getPlaybackState() == Player.STATE_ENDED) {
+            audioController.seekTo(0L);
+        } else if (audioController.getPlaybackState() == Player.STATE_IDLE) {
+            audioController.prepare();
+        }
+        audioLastError = null;
+        audioController.play();
+    }
+
+    private void requestAudioNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                    AUDIO_NOTIFICATION_REQUEST);
+        }
+    }
+
+    private void seekAudioBy(long deltaMillis) {
+        audioCoordinator.onUserInteraction(System.currentTimeMillis());
+        if (audioController != null) {
+            long duration = audioController.getDuration();
+            long upper = duration > 0L ? duration : Long.MAX_VALUE;
+            long target = Math.max(0L, Math.min(upper,
+                    audioController.getCurrentPosition() + deltaMillis));
+            audioController.seekTo(target);
+        }
+        persistAudioGuideState();
+        renderAudioGuide();
+    }
+
+    private void closeAudioGuide() {
+        audioCoordinator.onUserInteraction(System.currentTimeMillis());
+        if (audioController != null) {
+            audioController.stop();
+            audioController.clearMediaItems();
+        }
+        audioCoordinator.closeCurrentVisit();
+        audioLastError = null;
+        persistAudioGuideState();
+        renderAudioGuide();
+    }
+
+    private void syncAudioGuideForWalk() {
+        if (walk == null || route == null || !walk.success) return;
+        long now = System.currentTimeMillis();
+        boolean visiting = "VISITING".equals(walk.phase)
+                && walk.currentPointOrder > 0
+                && walk.currentPointOrder <= route.points.size();
+        if (!visiting) {
+            String previousVisit = audioCoordinator.activeVisitKey();
+            if (previousVisit != null) audioCoordinator.onConfirmedExit(previousVisit, now);
+            persistAudioGuideState();
+            renderAudioGuide();
+            return;
+        }
+        String visitKey = panelRouteKey() + ':' + walk.walkId + ':' + walk.currentPointOrder;
+        ApiClient.PlaceOption point = route.points.get(walk.currentPointOrder - 1);
+        AudioStoryCatalog.Story story = AudioStoryCatalog.forStablePlaceId(point.placeId);
+        if (story == null) {
+            audioCoordinator.onVisit(visitKey, null, now);
+            persistAudioGuideState();
+            renderAudioGuide();
+            return;
+        }
+        AudioStoryCatalog.AvailableStory cached = availableAudioStories.get(story.catalogId);
+        if (cached != null) {
+            audioCoordinator.onVisit(visitKey, story.catalogId, now);
+            persistAudioGuideState();
+            renderAudioGuide();
+            return;
+        }
+        int generation = ++audioInspectionGeneration;
+        audioIo.execute(() -> {
+            AudioStoryCatalog.AvailableStory inspected = AudioStoryCatalog.inspect(this, story);
+            runOnUiThread(() -> {
+                if (generation != audioInspectionGeneration || isFinishing() || isDestroyed()
+                        || walk == null || !"VISITING".equals(walk.phase)
+                        || walk.currentPointOrder < 1
+                        || walk.currentPointOrder > route.points.size()
+                        || !visitKey.equals(panelRouteKey() + ':' + walk.walkId + ':'
+                        + walk.currentPointOrder)) return;
+                if (inspected != null) {
+                    availableAudioStories.put(story.catalogId, inspected);
+                    audioCoordinator.onVisit(visitKey, story.catalogId,
+                            System.currentTimeMillis());
+                }
+                persistAudioGuideState();
+                renderAudioGuide();
+            });
+        });
+    }
+
+    private void renderAudioGuide() {
+        if (audioCard == null) return;
+        AudioGuideCoordinator.UiState uiState = audioCoordinator.uiState();
+        AudioStoryCatalog.Story story = AudioStoryCatalog.forCatalogId(
+                audioCoordinator.currentStoryId());
+        if (uiState == AudioGuideCoordinator.UiState.HIDDEN || story == null) {
+            audioCard.setVisibility(View.GONE);
+            uiHandler.removeCallbacks(audioProgressTick);
+            return;
+        }
+        audioCard.setVisibility(View.VISIBLE);
+        audioStoryTitle.setText(story.title);
+        long duration = audioDurationMillis(story.catalogId);
+        boolean controlsVisible = audioCoordinator.playbackState()
+                != AudioGuideCoordinator.PlaybackState.IDLE
+                && audioCoordinator.playbackState()
+                != AudioGuideCoordinator.PlaybackState.ERROR;
+        audioStateLabel.setText(controlsVisible ? "Аудиогид" : "Доступна история!");
+        audioAvailableIcon.setVisibility(controlsVisible ? View.GONE : View.VISIBLE);
+        audioDuration.setVisibility(controlsVisible ? View.GONE : View.VISIBLE);
+        audioDuration.setText("◷  " + formatAudioTime(duration));
+        audioStoryTextContainer.setPadding(controlsVisible ? 0 : UiKit.dp(this, 12),
+                0, 0, 0);
+        audioListenButton.setVisibility(controlsVisible ? View.GONE : View.VISIBLE);
+        audioListenButton.setText(audioCoordinator.playbackState()
+                == AudioGuideCoordinator.PlaybackState.ERROR ? "Повторить" : "Слушать");
+        audioPlayerControls.setVisibility(controlsVisible ? View.VISIBLE : View.GONE);
+        audioPlayPause.setText(audioCoordinator.playbackState()
+                == AudioGuideCoordinator.PlaybackState.PLAYING ? "Ⅱ" : "▶");
+        long position = audioController == null ? 0L : Math.max(0L,
+                audioController.getCurrentPosition());
+        if (!audioSeekInProgress) {
+            audioSeekBar.setProgress(duration > 0L
+                    ? (int) Math.min(1_000L, position * 1_000L / duration) : 0);
+        }
+        audioElapsed.setText(formatAudioTime(position));
+        audioTotal.setText(formatAudioTime(duration));
+        audioError.setText(audioLastError == null ? "" : audioLastError);
+        audioError.setVisibility(audioLastError == null ? View.GONE : View.VISIBLE);
+        AudioStoryCatalog.Story pending = AudioStoryCatalog.forCatalogId(
+                audioCoordinator.pendingStoryId());
+        audioNewStoryBanner.setVisibility(pending == null ? View.GONE : View.VISIBLE);
+        if (pending != null) {
+            audioNewStoryTitle.setText(pending.title);
+        }
+        uiHandler.removeCallbacks(audioProgressTick);
+        uiHandler.postDelayed(audioProgressTick, 1_000L);
+    }
+
+    private long audioDurationMillis(String storyId) {
+        if (audioController != null && audioController.getCurrentMediaItem() != null
+                && storyId.equals(audioController.getCurrentMediaItem().mediaId)
+                && audioController.getDuration() > 0L) {
+            return audioController.getDuration();
+        }
+        AudioStoryCatalog.AvailableStory available = availableAudioStories.get(storyId);
+        return available == null ? 0L : available.durationMillis;
+    }
+
+    private static String formatAudioTime(long millis) {
+        if (millis <= 0L) return "0:00";
+        long totalSeconds = millis / 1_000L;
+        return String.format(Locale.US, "%d:%02d", totalSeconds / 60, totalSeconds % 60);
+    }
+
+    private void expireAudioGuideIfNeeded() {
+        if (!audioCoordinator.expireIfNeeded(System.currentTimeMillis())) return;
+        if (audioController != null) {
+            audioController.stop();
+            audioController.clearMediaItems();
+        }
+        persistAudioGuideState();
+        renderAudioGuide();
+    }
+
+    private void restoreAudioGuideState() {
+        if (audioStateRestored) return;
+        audioStateRestored = true;
+        SharedPreferences preferences = getSharedPreferences(
+                AUDIO_GUIDE_PREFERENCES, MODE_PRIVATE);
+        AudioGuideCoordinator.PlaybackState playbackState;
+        try {
+            playbackState = AudioGuideCoordinator.PlaybackState.valueOf(
+                    preferences.getString("playback_state", "IDLE"));
+        } catch (IllegalArgumentException error) {
+            playbackState = AudioGuideCoordinator.PlaybackState.IDLE;
+        }
+        audioCoordinator.restore(new AudioGuideCoordinator.Snapshot(
+                preferences.getString("current_story", null),
+                preferences.getString("pending_story", null),
+                preferences.getString("current_story_visit", null),
+                preferences.getString("pending_story_visit", null),
+                preferences.getString("active_visit", null),
+                preferences.getString("active_visit_story", null),
+                preferences.getString("dismissed_visit", null),
+                preferences.getLong("confirmed_exit_at", -1L),
+                preferences.getLong("last_interaction_at", 0L),
+                playbackState,
+                preferences.getBoolean("hidden", true)));
+        expireAudioGuideIfNeeded();
+    }
+
+    private void persistAudioGuideState() {
+        AudioGuideCoordinator.Snapshot state = audioCoordinator.snapshot();
+        getSharedPreferences(AUDIO_GUIDE_PREFERENCES, MODE_PRIVATE).edit()
+                .putString("current_story", state.currentStoryId)
+                .putString("pending_story", state.pendingStoryId)
+                .putString("current_story_visit", state.currentStoryVisitKey)
+                .putString("pending_story_visit", state.pendingStoryVisitKey)
+                .putString("active_visit", state.activeVisitKey)
+                .putString("active_visit_story", state.activeVisitStoryId)
+                .putString("dismissed_visit", state.dismissedVisitKey)
+                .putLong("confirmed_exit_at", state.confirmedExitAtMillis)
+                .putLong("last_interaction_at", state.lastInteractionAtMillis)
+                .putString("playback_state", state.playbackState.name())
+                .putBoolean("hidden", state.hidden)
+                .apply();
+    }
+
     private void showRouteStatus() {
         if (route == null || !route.success) return;
         resetVisitingUi();
@@ -932,8 +1596,9 @@ public final class MapActivity extends ComponentActivity {
                 && partnerOfferCard.getVisibility() == View.VISIBLE;
         boolean visiting = walk != null && "VISITING".equals(walk.phase);
         boolean hasVisiblePoints = !visiting || pointList.getChildCount() > 0;
-        pointListScroll.setVisibility(!offerVisible && hasVisiblePoints
+        pointList.setVisibility(!offerVisible && hasVisiblePoints
                 ? View.VISIBLE : View.GONE);
+        pointListScroll.setVisibility(View.VISIBLE);
     }
 
     private String travelToPoint(int pointIndex) {
@@ -1524,6 +2189,15 @@ public final class MapActivity extends ComponentActivity {
 
     private void showWalkStatus() {
         if (walk == null || !walk.success) return;
+        String currentPanelRouteKey = panelRouteKey();
+        boolean newArrival = PanelTransition.isNewArrival(
+                routeViewModel.observedPanelRouteKey, currentPanelRouteKey,
+                routeViewModel.observedWalkPhase, routeViewModel.observedPointOrder,
+                walk.phase, walk.currentPointOrder);
+        routeViewModel.observedPanelRouteKey = currentPanelRouteKey;
+        routeViewModel.observedWalkPhase = walk.phase;
+        routeViewModel.observedPointOrder = walk.currentPointOrder;
+        if (newArrival) expandPanelForArrival();
         String pointName = "Следующая точка";
         if (route != null && walk.currentPointOrder > 0
                 && walk.currentPointOrder <= route.points.size()) {
@@ -1574,6 +2248,7 @@ public final class MapActivity extends ComponentActivity {
             persistFinishedRoute();
             clearActiveWalk();
         }
+        syncAudioGuideForWalk();
         syncPartnerOffer();
     }
 
@@ -1869,6 +2544,7 @@ public final class MapActivity extends ComponentActivity {
         renderedVisitingStructureKey = null;
         visitingNextCard.setVisibility(View.GONE);
         pointListScroll.setVisibility(View.VISIBLE);
+        pointList.setVisibility(View.VISIBLE);
         invalidatePartnerOffer();
         nextLabel.setText("ПЕРВАЯ ТОЧКА");
         status.setTextSize(14);
@@ -1878,13 +2554,13 @@ public final class MapActivity extends ComponentActivity {
         status.setIncludeFontPadding(true);
         status.setMinLines(0);
         status.setMaxLines(Integer.MAX_VALUE);
-        status.setMinHeight(0);
-        status.setPadding(UiKit.dp(this, 14), 0, UiKit.dp(this, 14), 0);
+        status.setMinHeight(UiKit.dp(this, compactScreen ? 40 : 46));
+        status.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 8),
+                UiKit.dp(this, 14), UiKit.dp(this, 8));
         status.setBackground(UiKit.rounded(0xFFEAF9EF, 12, this));
         status.setCompoundDrawables(null, null, null, null);
         status.setCompoundDrawablePadding(0);
-        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1,
-                UiKit.dp(this, compactScreen ? 40 : 46));
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
         statusParams.topMargin = UiKit.dp(this, 4);
         statusParams.bottomMargin = UiKit.dp(this, 4);
         status.setLayoutParams(statusParams);
@@ -2413,6 +3089,7 @@ public final class MapActivity extends ComponentActivity {
 
     @Override protected void onStart() {
         super.onStart();
+        connectAudioController();
         if (walk != null && walk.success) {
             showWalkStatus();
             syncLocationTracking();
@@ -2429,6 +3106,7 @@ public final class MapActivity extends ComponentActivity {
     @Override protected void onStop() {
         stopVisitStopwatch();
         stopLocationTracking();
+        disconnectAudioController();
         super.onStop();
     }
 
@@ -2953,6 +3631,7 @@ public final class MapActivity extends ComponentActivity {
             mapView = null;
         }
         network.shutdownNow();
+        audioIo.shutdownNow();
         logMemory("destroyed");
         super.onDestroy();
     }
@@ -2969,5 +3648,8 @@ public final class MapActivity extends ComponentActivity {
         long partnerOfferLastRequestElapsedMillis;
         String partnerOfferLastStatus;
         ApiClient.PartnerOffer partnerOffer;
+        String observedPanelRouteKey;
+        String observedWalkPhase;
+        int observedPointOrder;
     }
 }

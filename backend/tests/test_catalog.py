@@ -265,10 +265,28 @@ def test_committed_enrichment_makes_fresh_catalog_runtime_ready(tmp_path):
     assert all(catalog_provider.has_sufficient_resolved(city)
                for city in ("moscow", "tula", "vladimir", "borovsk"))
     moscow = {place.id: place for place in catalog.list_places("moscow")}
-    assert moscow["msk001"].lat is not None
+    assert (moscow["msk001"].lat, moscow["msk001"].lon) == pytest.approx(
+        (55.754549, 37.618666)
+    )
     assert moscow["msk001"].dgis_place_id is not None
     assert moscow["msk001"].provider_name is not None
     assert moscow["msk035"].search_aliases
+
+
+def test_bundled_override_updates_only_red_square_stale_coordinates(tmp_path):
+    from gulyay.catalog import bundled_manual_overrides
+
+    catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
+    for path in bundled_seed_paths():
+        catalog.import_seed(path)
+    catalog.apply_manual_overrides({"msk001": {"lat": 55.753084, "lon": 37.622133}})
+
+    overrides = bundled_manual_overrides()
+    assert set(overrides) == {"msk001"}
+    catalog.apply_manual_overrides(overrides)
+
+    red_square = catalog.get_by_ids(["msk001"])[0]
+    assert (red_square.lat, red_square.lon) == pytest.approx((55.754549, 37.618666))
 
 
 def test_unsupported_city_keeps_provider_fallback(tmp_path):

@@ -47,6 +47,8 @@ import android.widget.Toast;
 import androidx.activity.ComponentActivity;
 import androidx.coordinatorlayout.widget.CoordinatorLayout;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.lifecycle.ViewModel;
 import androidx.lifecycle.ViewModelProvider;
 import androidx.media3.common.MediaItem;
@@ -228,6 +230,7 @@ public final class MapActivity extends ComponentActivity {
     private boolean mapInitializationStarted;
     private boolean cameraSnapshotFailureLogged;
     private BottomSheetBehavior<LinearLayout> routeSheetBehavior;
+    private int routeBottomInset;
     private LinearLayout routeSheetView;
     private String panelRouteKey;
     private boolean applyingPanelState;
@@ -456,8 +459,16 @@ public final class MapActivity extends ComponentActivity {
         audioNewStoryTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
         pendingText.addView(audioNewStoryTitle, new LinearLayout.LayoutParams(-1, -2));
         audioNewStoryBanner.addView(pendingText, new LinearLayout.LayoutParams(0, -2, 1));
-        audioNextButton = UiKit.button(this, "▶▶", UiKit.GREEN, 0xFFFFFFFF);
+        audioNextButton = UiKit.button(this, "▶", UiKit.GREEN, 0xFFFFFFFF);
         audioNextButton.setTextSize(compact ? 16 : 18);
+        audioNextButton.setIncludeFontPadding(false);
+        audioNextButton.setMinWidth(0);
+        audioNextButton.setMinHeight(0);
+        audioNextButton.setGravity(Gravity.CENTER);
+        audioNextButton.setPadding(0, 0, 0, 0);
+        audioNextButton.setElevation(0f);
+        audioNextButton.setStateListAnimator(null);
+        audioNextButton.setBackground(UiKit.rounded(UiKit.GREEN, 14, this));
         audioNextButton.setContentDescription("Включить новую историю");
         audioNewStoryBanner.addView(audioNextButton, new LinearLayout.LayoutParams(
                 UiKit.dp(this, 58), UiKit.dp(this, 52)));
@@ -543,16 +554,18 @@ public final class MapActivity extends ComponentActivity {
         audioRewind.setContentDescription("Назад на 15 секунд");
         audioPlayPause.setContentDescription("Воспроизвести или поставить на паузу");
         audioForward.setContentDescription("Вперёд на 15 секунд");
+        int audioControlHeight = UiKit.dp(this, compact ? 44 : 48);
         audioButtons.addView(audioRewind, new LinearLayout.LayoutParams(0,
-                UiKit.dp(this, compact ? 48 : 52), 1));
+                audioControlHeight, 1));
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(0,
-                UiKit.dp(this, compact ? 48 : 52), 1);
+                audioControlHeight, 1);
         playParams.leftMargin = UiKit.dp(this, 8);
         playParams.rightMargin = UiKit.dp(this, 8);
         audioButtons.addView(audioPlayPause, playParams);
         audioButtons.addView(audioForward, new LinearLayout.LayoutParams(0,
-                UiKit.dp(this, compact ? 48 : 52), 1));
-        LinearLayout.LayoutParams buttonsParams = new LinearLayout.LayoutParams(-1, -2);
+                audioControlHeight, 1));
+        LinearLayout.LayoutParams buttonsParams = new LinearLayout.LayoutParams(-1,
+                UiKit.dp(this, compact ? 52 : 56));
         buttonsParams.topMargin = UiKit.dp(this, 8);
         audioPlayerControls.addView(audioButtons, buttonsParams);
         audioPlayerControls.setVisibility(View.GONE);
@@ -1019,6 +1032,13 @@ public final class MapActivity extends ComponentActivity {
 
     private void configureRouteSheet(CoordinatorLayout root) {
         if (routeSheetBehavior == null) return;
+        ViewCompat.setOnApplyWindowInsetsListener(root, (view, insets) -> {
+            routeBottomInset = insets.getInsets(
+                    WindowInsetsCompat.Type.navigationBars()).bottom;
+            if (routeSheetView != null) updateMapOverlayOffsets(routeSheetView);
+            return insets;
+        });
+        ViewCompat.requestApplyInsets(root);
         routeSheetBehavior.setFitToContents(false);
         routeSheetBehavior.setHalfExpandedRatio(0.60f);
         routeSheetBehavior.setHideable(false);
@@ -1065,6 +1085,13 @@ public final class MapActivity extends ComponentActivity {
         int parentHeight = ((View) bottomSheet.getParent()).getHeight();
         if (parentHeight <= 0) return;
         int visibleSheetHeight = Math.max(0, parentHeight - bottomSheet.getTop());
+        int footerLift = PanelViewportLayout.footerLift(
+                parentHeight, visibleSheetHeight, routeBottomInset);
+        if (actions != null) actions.setTranslationY(-footerLift);
+        if (pointListScroll != null && pointListScroll.getPaddingBottom() != footerLift) {
+            pointListScroll.setPadding(pointListScroll.getPaddingLeft(),
+                    pointListScroll.getPaddingTop(), pointListScroll.getPaddingRight(), footerLift);
+        }
         float bottomOverlayShift = -visibleSheetHeight;
         if (mapRouteSummary != null) mapRouteSummary.setTranslationY(bottomOverlayShift);
         if (guidancePanel != null) guidancePanel.setTranslationY(bottomOverlayShift);
@@ -1090,7 +1117,13 @@ public final class MapActivity extends ComponentActivity {
     private Button compactAudioButton(String text) {
         Button button = UiKit.button(this, text, 0xFFEDF8F1, UiKit.GREEN_DARK);
         button.setTextSize(compactScreen ? 14 : 15);
+        button.setIncludeFontPadding(false);
+        button.setMinWidth(0);
+        button.setMinHeight(0);
+        button.setGravity(Gravity.CENTER);
         button.setPadding(UiKit.dp(this, 4), 0, UiKit.dp(this, 4), 0);
+        button.setElevation(0f);
+        button.setStateListAnimator(null);
         return button;
     }
 
@@ -2655,12 +2688,14 @@ public final class MapActivity extends ComponentActivity {
             boolean requested = false;
             if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER,
-                        30_000L, 0f, locationListener, Looper.getMainLooper());
+                        PositionSubmissionPolicy.LOCATION_UPDATE_INTERVAL_MILLIS,
+                        0f, locationListener, Looper.getMainLooper());
                 requested = true;
             }
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER,
-                        30_000L, 0f, locationListener, Looper.getMainLooper());
+                        PositionSubmissionPolicy.LOCATION_UPDATE_INTERVAL_MILLIS,
+                        0f, locationListener, Looper.getMainLooper());
                 requested = true;
             }
             if (!requested) {

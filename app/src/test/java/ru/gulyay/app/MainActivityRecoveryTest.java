@@ -143,6 +143,7 @@ public class MainActivityRecoveryTest {
     }
 
     @Test public void stationaryFreshMeasurementsRemainEligibleWithoutMovement() {
+        assertEquals(12_000L, PositionSubmissionPolicy.LOCATION_UPDATE_INTERVAL_MILLIS);
         assertTrue(PositionSubmissionPolicy.isFresh(10_000L, 10_000L, 0L));
         assertTrue(PositionSubmissionPolicy.isFresh(15_000L, 15_000L, 10_000L));
         assertFalse(PositionSubmissionPolicy.isFresh(10_000L, 15_000L, 10_000L));

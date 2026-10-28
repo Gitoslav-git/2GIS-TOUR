@@ -993,13 +993,15 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
             raise RouteNotFound()
         projected_seconds = elapsed_seconds + leg.durationSeconds + visit_minutes * 60
         arrival = local_now + timedelta(seconds=elapsed_seconds + leg.durationSeconds)
-        schedule_status = schedule_status_at(candidate.schedule, arrival, visit_minutes)
+        schedule_status = (old.scheduleStatus if old is not None and not candidate.schedule
+                           else schedule_status_at(candidate.schedule, arrival, visit_minutes))
         if schedule_status == "CLOSED":
             raise RouteNotFound()
         route_points.append(RoutePoint(
             order=len(route_points) + 1, placeId=candidate.placeId, name=candidate.name,
             lat=candidate.lat, lon=candidate.lon, visitMinutes=visit_minutes,
             scheduleStatus=schedule_status, isFood=candidate.isFood,
+            pointType=old.pointType if old is not None else ("FOOD" if candidate.isFood else "TOUR"),
         ))
         legs.append(leg)
         current = candidate.lat, candidate.lon

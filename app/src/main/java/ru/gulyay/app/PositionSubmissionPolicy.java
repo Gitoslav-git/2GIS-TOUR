@@ -2,6 +2,7 @@ package ru.gulyay.app;
 
 /** Pure timing and freshness rules for walk GPS submissions. */
 final class PositionSubmissionPolicy {
+    static final long LOCATION_UPDATE_INTERVAL_MILLIS = 12_000L;
     static final long WINDOW_MILLIS = 60_000L;
     static final long MIN_INTERVAL_MILLIS = 5_000L;
     static final long MAX_LOCATION_AGE_MILLIS = 30_000L;

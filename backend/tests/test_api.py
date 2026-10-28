@@ -13,7 +13,7 @@ from gulyay.api import (CLIENT_REQUESTS, IDEMPOTENT_REVISIONS, IDEMPOTENT_ROUTES
                         get_catalog_provider, get_route_repository,
                         _client_rate_limit, _prune_rate_state, _source_key)
 from gulyay.catalog import CatalogPlaceProvider, PlaceCatalog
-from gulyay.geo import GeoRateLimited, GeoUnavailable
+from gulyay.geo import GeoRateLimited, GeoRouteNotFound, GeoUnavailable
 from gulyay.models import IntentExtraction, PlaceCandidate, RouteLeg, SearchArea
 from gulyay.repository import RouteRepository
 
@@ -27,7 +27,9 @@ class FakeIntent:
 
     def extract(self, query):
         self.calls += 1
-        requested_count = 1 if "одно место" in query.casefold() else None
+        lowered = query.casefold()
+        requested_count = (1 if "одно место" in lowered else
+                           2 if "два места" in lowered else None)
         return IntentExtraction.model_validate({
             "schemaVersion": "1.0", "cityText": "Тула",
             "duration": {"mode": "TARGET", "targetMinutes": 120,
@@ -94,6 +96,15 @@ class FakeGeo:
 class RateLimitedGeo(FakeGeo):
     def resolve_city_center(self, city_id):
         raise GeoRateLimited(17)
+
+
+class FailingEditGeo(FakeGeo):
+    fail_walking = False
+
+    def walking_leg(self, start, end, from_order, to_order):
+        if self.fail_walking:
+            raise GeoRouteNotFound()
+        return super().walking_leg(start, end, from_order, to_order)
 
 
 class MissingGeo:
@@ -648,6 +659,159 @@ def test_change_query_creates_atomic_next_version():
     assert revised.json()["routeId"] == route_id
     assert revised.json()["routeVersion"] == 2
     assert revised.json()["query"] == "Архитектура на севере два часа"
+
+
+def _create_chat_edit_route(geo=None):
+    geo = geo or FakeGeo()
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = lambda: geo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "История в центре, ровно два места",
+        "filters": {"durationMinutes": 300}, "deviceSessionId": session,
+    })
+    assert created.status_code == 200
+    assert len(created.json()["points"]) == 2
+    return session, headers, created.json()
+
+
+def _chat_edit(headers, route, message):
+    return client.post(f"/v1/routes/{route['routeId']}/revisions", headers=headers,
+                       json={"baseVersion": route["routeVersion"],
+                             "mode": "CHAT_REVISION", "message": message})
+
+
+def test_chat_remove_keeps_every_other_point_and_order():
+    _, headers, route = _create_chat_edit_route()
+    original = route["points"]
+    revised = _chat_edit(headers, route, f"Убери {original[0]['name']}, остальные оставляем")
+    assert revised.status_code == 200
+    assert [item["placeId"] for item in revised.json()["points"]] == [
+        original[1]["placeId"],
+    ]
+
+
+def test_chat_removing_last_point_does_not_regenerate_route():
+    _, headers, route = _create_chat_edit_route()
+    original = route["points"]
+    revised = _chat_edit(headers, route, f"Удали {original[-1]['name']}")
+    assert revised.status_code == 200
+    assert revised.json()["points"] == original[:-1]
+
+
+def test_chat_add_keeps_existing_points_and_appends_only_requested_place():
+    _, headers, route = _create_chat_edit_route()
+    original_ids = [item["placeId"] for item in route["points"]]
+    revised = _chat_edit(headers, route, "Добавь Памятник")
+    assert revised.status_code == 200
+    assert [item["placeId"] for item in revised.json()["points"]] == [
+        *original_ids, "third-provider-id",
+    ]
+
+
+def test_sequential_chat_edits_use_latest_version_and_deleted_point_stays_deleted():
+    _, headers, route = _create_chat_edit_route()
+    removed = route["points"][-1]
+    first = _chat_edit(headers, route, f"Убери {removed['name']}")
+    assert first.status_code == 200
+    second = _chat_edit(headers, first.json(), "Добавь Памятник")
+    assert second.status_code == 200
+    assert [item["placeId"] for item in second.json()["points"]] == [
+        route["points"][0]["placeId"], "third-provider-id",
+    ]
+    assert removed["placeId"] not in {item["placeId"] for item in second.json()["points"]}
+
+
+def test_chat_duplicate_add_does_not_create_duplicate():
+    _, headers, route = _create_chat_edit_route()
+    existing = route["points"][0]
+    revised = _chat_edit(headers, route, f"Добавь {existing['name']}")
+    assert revised.status_code == 200
+    ids = [item["placeId"] for item in revised.json()["points"]]
+    assert ids == [item["placeId"] for item in route["points"]]
+    assert len(ids) == len(set(ids))
+
+
+def test_chat_unlimited_time_changes_duration_without_changing_points():
+    _, headers, route = _create_chat_edit_route()
+    revised = _chat_edit(headers, route, "Время не ограничено")
+    assert revised.status_code == 200
+    assert [item["placeId"] for item in revised.json()["points"]] == [
+        item["placeId"] for item in route["points"]
+    ]
+    assert revised.json()["durationSource"] == "default"
+    assert revised.json()["maxDurationMinutes"] is None
+
+
+def test_chat_add_with_unlimited_time_changes_only_requested_fields():
+    _, headers, route = _create_chat_edit_route()
+    original_ids = [item["placeId"] for item in route["points"]]
+    revised = _chat_edit(headers, route, "Добавь Памятник (время не ограничено)")
+    assert revised.status_code == 200
+    assert [item["placeId"] for item in revised.json()["points"]] == [
+        *original_ids, "third-provider-id",
+    ]
+    assert revised.json()["durationSource"] == "default"
+
+
+def test_chat_routing_error_keeps_persisted_route_unchanged():
+    geo = FailingEditGeo()
+    _, headers, route = _create_chat_edit_route(geo)
+    geo.fail_walking = True
+    failed = _chat_edit(headers, route, f"Убери {route['points'][-1]['name']}")
+    assert failed.status_code == 422
+    current = client.get(f"/v1/routes/{route['routeId']}", headers=headers)
+    assert current.status_code == 200
+    assert current.json()["routeVersion"] == route["routeVersion"]
+    assert current.json()["points"] == route["points"]
+
+
+def test_chat_response_matches_latest_persisted_route():
+    _, headers, route = _create_chat_edit_route()
+    revised = _chat_edit(headers, route, "Добавь Памятник")
+    assert revised.status_code == 200
+    stored = client.get(f"/v1/routes/{route['routeId']}", headers=headers)
+    assert stored.status_code == 200
+    assert stored.json()["routeVersion"] == revised.json()["routeVersion"]
+    assert stored.json()["points"] == revised.json()["points"]
+
+
+def test_chat_swap_and_replace_preserve_unmentioned_points():
+    _, headers, route = _create_chat_edit_route()
+    first, second = route["points"]
+    swapped = _chat_edit(headers, route,
+                         f"Поменяй {first['name']} и {second['name']} местами")
+    assert swapped.status_code == 200
+    assert [item["placeId"] for item in swapped.json()["points"]] == [
+        second["placeId"], first["placeId"],
+    ]
+    replaced = _chat_edit(headers, swapped.json(),
+                          f"Замени {first['name']} на Памятник")
+    assert replaced.status_code == 200
+    assert [item["placeId"] for item in replaced.json()["points"]] == [
+        second["placeId"], "third-provider-id",
+    ]
+
+
+def test_chat_unsupported_edit_asks_for_clarification_without_regeneration():
+    _, headers, route = _create_chat_edit_route()
+    failed = _chat_edit(headers, route, "Сделай как-нибудь интереснее")
+    assert failed.status_code == 422
+    assert failed.json()["error"]["code"] == "QUERY_NEEDS_CLARIFICATION"
+    current = client.get(f"/v1/routes/{route['routeId']}", headers=headers)
+    assert current.json()["points"] == route["points"]
+
+
+def test_explicit_full_rebuild_still_uses_planner():
+    intent = FakeIntent()
+    app.dependency_overrides[get_intent_provider] = lambda: intent
+    session, headers, route = _create_chat_edit_route()
+    app.dependency_overrides[get_intent_provider] = lambda: intent
+    rebuilt = _chat_edit(headers, route, "Перестрой маршрут полностью заново")
+    assert rebuilt.status_code == 200
+    assert rebuilt.json()["routeVersion"] == 2
+    assert intent.calls == 1
 
 
 def test_search_and_edit_points_use_real_ids_and_preserve_requested_order():

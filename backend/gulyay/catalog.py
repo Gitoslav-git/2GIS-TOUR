@@ -73,6 +73,14 @@ def bundled_seed_paths() -> tuple[Path, ...]:
     return tuple(sorted(data_dir.glob("*_places_v0_1.csv")))
 
 
+def bundled_manual_overrides() -> dict[str, dict[str, object]]:
+    path = Path(__file__).resolve().parent.parent / "data" / "catalog_manual_overrides.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise CatalogImportError("Bundled catalog overrides must be an object")
+    return payload
+
+
 class PlaceCatalog:
     """Catalogue persistence isolated from route lifecycle cleanup."""
 

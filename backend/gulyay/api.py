@@ -15,7 +15,8 @@ from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
-from .catalog import (CatalogPlaceProvider, PlaceCatalog, bundled_seed_paths)
+from .catalog import (CatalogPlaceProvider, PlaceCatalog, bundled_manual_overrides,
+                      bundled_seed_paths)
 from .geo import (DgisGeoProvider, GeoAuthenticationError, GeoConstraintNotFound,
                   GeoInvalidResponse, GeoPlaceNotFound, GeoRateLimited,
                   GeoUnavailable)
@@ -31,6 +32,8 @@ from .partners import (MAX_POSITION_ACCURACY_METERS, MAX_POSITION_AGE_SECONDS,
                        NAME_SEARCH_PILOT, PartnerOfferSelector, PartnerRegistry)
 from .planning_debug import planning_log
 from .repository import RouteRepository
+from .route_edit import (RouteEditNeedsClarification, apply_route_edit,
+                         parse_route_edit)
 from .route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, build_route,
                             insert_suggested_place, rebuild_route_with_points)
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
@@ -45,6 +48,7 @@ ROUTE_REPOSITORY = RouteRepository()
 PLACE_CATALOG = PlaceCatalog()
 for seed_path in bundled_seed_paths():
     PLACE_CATALOG.import_seed(seed_path)
+PLACE_CATALOG.apply_manual_overrides(bundled_manual_overrides())
 CATALOG_PROVIDER = CatalogPlaceProvider(PLACE_CATALOG)
 PARTNER_REGISTRY = PartnerRegistry()
 IDEMPOTENT_ROUTES: dict[tuple[UUID, UUID], Route] = {}
@@ -855,28 +859,64 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
                        {"currentVersion": current.routeVersion})
     if revision.mode in {"CHANGE_QUERY", "CHAT_REVISION"}:
         if revision.mode == "CHAT_REVISION":
-            if revision.message is None or revision.query is not None or revision.pointIds is not None:
+            if (revision.message is None or revision.query is not None
+                    or revision.pointIds is not None or revision.filters is not None):
                 return failure("VALIDATION_ERROR", "Для сообщения чата нужен только текст правки", 400,
                                request_id, {"fields": ["message"]})
-            # Keep the route source compact and preserve the previous intent context for
-            # the existing structured parser. The model receives no POI/provider facts.
-            next_query = source.query + "\nУточнение к текущему маршруту: " + revision.message
+            try:
+                edit = parse_route_edit(revision.message)
+                if edit.operation != "REBUILD":
+                    replacement, payload = apply_route_edit(current, source, edit, geo)
+                    replacement = replacement.model_copy(update={
+                        "routeId": route_id, "routeVersion": revision.baseVersion + 1,
+                    })
+                else:
+                    next_query = source.query + "\nПолная перестройка: " + revision.message
+            except RouteEditNeedsClarification as exc:
+                return failure("QUERY_NEEDS_CLARIFICATION", exc.message, 422,
+                               request_id, {"fields": ["message"]})
+            except (GeoAuthenticationError, GeoRateLimited, GeoInvalidResponse,
+                    GeoUnavailable) as exc:
+                return dgis_failure(exc, request_id)
+            except DurationConfirmationRequired as exc:
+                return failure(
+                    "TIME_BUDGET_CONFIRMATION_REQUIRED",
+                    "После изменения маршрут займёт больше выбранного времени",
+                    409, request_id,
+                    {"requestedMinutes": exc.requested_minutes,
+                     "projectedMinutes": exc.projected_minutes,
+                     "overrunMinutes": exc.overrun_minutes,
+                     "durationMode": exc.duration_mode, "canOverride": True},
+                )
+            except TimeBudgetExceeded as exc:
+                details = ({"minimumMinutes": exc.minimum_minutes}
+                           if exc.minimum_minutes else {})
+                return failure("TIME_BUDGET_EXCEEDED",
+                               "Точки не помещаются в выбранное время", 422,
+                               request_id, details)
+            except RouteNotFound:
+                return failure("ROUTE_NOT_FOUND",
+                               "Нельзя применить изменение к текущему маршруту", 422,
+                               request_id)
+            if edit.operation != "REBUILD":
+                next_query = None
         else:
             next_query = revision.query
-        if next_query is None or revision.pointIds is not None:
+        if revision.pointIds is not None or (revision.mode == "CHANGE_QUERY" and next_query is None):
             return failure("VALIDATION_ERROR", "Для изменения маршрута нужен новый текст", 400,
                            request_id, {"fields": ["query"]})
-        payload = CreateRoute(
-            cityId=source.cityId, query=next_query,
-            filters=revision.filters if revision.filters is not None else source.filters,
-            startLocation=source.startLocation, deviceSessionId=x_device_session,
-        )
-        route_or_error = _build(payload, intent_provider, geo, request_id, catalog)
-        if isinstance(route_or_error, JSONResponse):
-            return route_or_error
-        replacement = route_or_error.model_copy(update={
-            "routeId": route_id, "routeVersion": revision.baseVersion + 1,
-        })
+        if next_query is not None:
+            payload = CreateRoute(
+                cityId=source.cityId, query=next_query,
+                filters=revision.filters if revision.filters is not None else source.filters,
+                startLocation=source.startLocation, deviceSessionId=x_device_session,
+            )
+            route_or_error = _build(payload, intent_provider, geo, request_id, catalog)
+            if isinstance(route_or_error, JSONResponse):
+                return route_or_error
+            replacement = route_or_error.model_copy(update={
+                "routeId": route_id, "routeVersion": revision.baseVersion + 1,
+            })
     else:
         if revision.pointIds is None or revision.query is not None or revision.filters is not None:
             return failure("VALIDATION_ERROR", "Передайте итоговый порядок точек", 400,

@@ -1,5 +1,5 @@
 id,city_id,name,level,parent_id,relation,type,tags,access_cost,base_price_from_rub,base_price_to_rub,price_note,visit_min,visit_max,lat,lon,dgis_place_id,price_source_url,notes,search_aliases,provider_name,allow_coords_only
-msk001,moscow,Красная площадь,AREA,,,historic_area,"HISTORY,ARCHITECTURE,LOCAL_CULTURE,PHOTOGENIC",FREE,0,0,,25,45,55.753084,37.622133,70000001103455323,,,,Красная площадь,0
+msk001,moscow,Красная площадь,AREA,,,historic_area,"HISTORY,ARCHITECTURE,LOCAL_CULTURE,PHOTOGENIC",FREE,0,0,,25,45,55.754549,37.618666,70000001103455323,,,,Красная площадь,0
 msk002,moscow,Храм Василия Блаженного,POI,msk001,CLUSTER_MEMBER,cathedral,"HISTORY,ARCHITECTURE,RELIGION,ART_CULTURE,UNUSUAL,PHOTOGENIC",PAID,700,700,Стандартный базовый вход; без экскурсий и событий,20,40,55.752344,37.623055,4504127908471722,https://shm.ru/visit/tickets/hvb/,,,Храм Василия Блаженного,0
 msk003,moscow,Мавзолей Ленина,POI,msk001,CLUSTER_MEMBER,mausoleum,"HISTORY,SOVIET,UNUSUAL",FREE,0,0,,20,40,55.753809,37.619959,4504127908445736,,,,Мавзолей В.И. Ленина,0
 msk004,moscow,ГУМ,POI,msk001,CLUSTER_MEMBER,shopping_gallery,"HISTORY,ARCHITECTURE,PHOTOGENIC,INDOOR",FREE,0,0,Посещение здания/галерей; покупки не учитываются,30,60,55.755223,37.620414,4504127908391014,,,,ГУМ,0

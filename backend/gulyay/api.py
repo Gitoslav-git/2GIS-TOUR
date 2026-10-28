@@ -33,7 +33,7 @@ from .partners import (MAX_POSITION_ACCURACY_METERS, MAX_POSITION_AGE_SECONDS,
 from .planning_debug import planning_log
 from .repository import RouteRepository
 from .route_edit import (RouteEditNeedsClarification, apply_route_edit,
-                         parse_route_edit)
+                         parse_route_edit, route_conversation_reply)
 from .route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, build_route,
                             insert_suggested_place, rebuild_route_with_points)
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
@@ -863,6 +863,10 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
                     or revision.pointIds is not None or revision.filters is not None):
                 return failure("VALIDATION_ERROR", "Для сообщения чата нужен только текст правки", 400,
                                request_id, {"fields": ["message"]})
+            reply = route_conversation_reply(revision.message, current, revision.previousReply)
+            if reply is not None:
+                return JSONResponse(content={"reply": reply, "routeId": str(route_id),
+                                             "routeVersion": current.routeVersion})
             try:
                 edit = parse_route_edit(revision.message)
                 if edit.operation != "REBUILD":

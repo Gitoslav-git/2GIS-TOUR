@@ -344,6 +344,7 @@ class RouteRevision(StrictModel):
     mode: Literal["CHANGE_QUERY", "EDIT_POINTS", "CHAT_REVISION"]
     query: str | None = Field(default=None, min_length=3, max_length=1000)
     message: str | None = Field(default=None, min_length=2, max_length=1000)
+    previousReply: str | None = Field(default=None, max_length=1500)
     filters: Filters | None = None
     pointIds: list[str] | None = Field(default=None, min_length=1, max_length=8)
     allowDurationOverrun: bool = False

@@ -51,6 +51,7 @@ public final class RouteChatActivity extends ComponentActivity {
     private Runnable locationTimeout;
     private String pendingNewRouteQuery;
     private RouteChatFilters routeFilters;
+    private String lastBotReply;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -89,13 +90,13 @@ public final class RouteChatActivity extends ComponentActivity {
         } else bot("Что хотите изменить в маршруте?");
     }
     private void user(String text){ bubble(text,false); }
-    private void bot(String text){ bubble(text,true); }
+    private void bot(String text){ lastBotReply = text; bubble(text,true); }
     private void bubble(String text, boolean bot){ TextView v=UiKit.label(this,text,17,UiKit.TEXT); v.setLineSpacing(0,1.1f); v.setPadding(UiKit.dp(this,16),UiKit.dp(this,12),UiKit.dp(this,16),UiKit.dp(this,12)); v.setBackground(UiKit.rounded(bot?0xFFE8F8ED:0xFFF1F2F3,22,this)); LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,-2); p.gravity=bot?Gravity.START:Gravity.END; p.topMargin=UiKit.dp(this,8); messages.addView(v,p); scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN)); }
     private final Runnable typingTick = new Runnable(){ @Override public void run(){ if(typingBubble==null)return; String[] dots={"● ○ ○","○ ● ○","○ ○ ●"}; typingBubble.setText("Гуляй составляет маршрут…\n"+dots[typingFrame++%dots.length]); typingHandler.postDelayed(this,360); }};
     private void loading(boolean on){ busy=on; input.setEnabled(!on); send.setEnabled(!on); if(on){ removeTyping(); typingBubble=UiKit.label(this,"",17,UiKit.TEXT); typingBubble.setPadding(UiKit.dp(this,16),UiKit.dp(this,12),UiKit.dp(this,16),UiKit.dp(this,12)); typingBubble.setBackground(UiKit.rounded(0xFFE8F8ED,22,this)); LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,-2); p.gravity=Gravity.START; p.topMargin=UiKit.dp(this,8); messages.addView(typingBubble,p); typingFrame=0; typingHandler.post(typingTick); scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN)); } else removeTyping(); }
     private void removeTyping(){ typingHandler.removeCallbacks(typingTick); if(typingBubble!=null){ messages.removeView(typingBubble); typingBubble=null; } }
     private void requestInitial(String query){ requestNewRoute(query); }
-    private void submit(){ String text=input.getText().toString().trim(); if(busy||text.length()<2)return; input.setText(""); user(text); if(routeId==null) requestNewRoute(text); else { loading(true); network.execute(()->call(()->ApiClient.chatRevision(routeId,routeVersion,city,text,session))); } }
+    private void submit(){ String text=input.getText().toString().trim(); if(busy||text.length()<2)return; input.setText(""); user(text); if(routeId==null) requestNewRoute(text); else { loading(true); network.execute(()->call(()->ApiClient.chatRevision(routeId,routeVersion,city,text,session,lastBotReply))); } }
 
     private void requestNewRoute(String query) {
         if (busy) return;
@@ -220,7 +221,7 @@ public final class RouteChatActivity extends ComponentActivity {
     }
     private interface Call { ApiClient.Result run() throws Exception; }
     private void call(Call work){ ApiClient.Result result; try { result=work.run(); } catch(Exception e){ result=new ApiClient.Result(false,"Не удалось связаться с сервером. Попробуйте ещё раз.",null,0); } ApiClient.Result r=result; runOnUiThread(()->finishCall(r)); }
-    private void finishCall(ApiClient.Result r){ loading(false); if(!r.success){ bot(r.message); return; } latest=r; createdNewRouteInThisChat = !editingExistingRoute; routeId=r.routeId; routeVersion=r.routeVersion; StringBuilder s=new StringBuilder("Готово! Маршрут примерно на ").append(r.totalMinutes>0?r.totalMinutes:"несколько").append(" мин.\n\n"); for(int i=0;i<r.points.size();i++)s.append(i+1).append(". ").append(r.points.get(i).name).append('\n'); bot(s.toString().trim()); if(currentAction!=null) messages.removeView(currentAction); currentAction=UiKit.button(this,editingExistingRoute?"Применить изменения":"▶  Начать маршрут",UiKit.GREEN,0xFFFFFFFF); currentAction.setOnClickListener(v->returnRoute(true)); messages.addView(currentAction,new LinearLayout.LayoutParams(-1,UiKit.dp(this,54))); scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN)); }
+    private void finishCall(ApiClient.Result r){ loading(false); if(!r.success){ bot(r.message); return; } if(r.conversationReply){ bot(r.message); return; } latest=r; createdNewRouteInThisChat = !editingExistingRoute; routeId=r.routeId; routeVersion=r.routeVersion; StringBuilder s=new StringBuilder("Готово! Маршрут примерно на ").append(r.totalMinutes>0?r.totalMinutes:"несколько").append(" мин.\n\n"); for(int i=0;i<r.points.size();i++)s.append(i+1).append(". ").append(r.points.get(i).name).append('\n'); bot(s.toString().trim()); if(currentAction!=null) messages.removeView(currentAction); currentAction=UiKit.button(this,editingExistingRoute?"Применить изменения":"▶  Начать маршрут",UiKit.GREEN,0xFFFFFFFF); currentAction.setOnClickListener(v->returnRoute(true)); messages.addView(currentAction,new LinearLayout.LayoutParams(-1,UiKit.dp(this,54))); scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN)); }
     private void returnRoute(boolean open){ if(latest!=null){ Intent data=new Intent(); data.putExtra(EXTRA_CITY,city); data.putExtra(EXTRA_SESSION,session); data.putExtra(EXTRA_ROUTE_ID,routeId); data.putExtra(EXTRA_ROUTE_VERSION,routeVersion); data.putExtra(EXTRA_SNAPSHOT,ApiClient.routeSnapshot(latest)); data.putExtra(EXTRA_QUERY,getIntent().getStringExtra(EXTRA_QUERY)); data.putExtra(EXTRA_OPEN_ROUTE,open); setResult(RESULT_OK,data); } finish(); }
     private void confirmCancelCreate(){ if(busy)return; new AlertDialog.Builder(this).setTitle("Отменить создание маршрута?").setMessage(createdNewRouteInThisChat ? "Созданный маршрут будет удалён." : "Чат будет закрыт без создания маршрута.").setNegativeButton("Продолжить",null).setPositiveButton("Подтвердить",(d,w)->cancelCreateChat()).show(); }
     private void cancelCreateChat(){ if(!createdNewRouteInThisChat || routeId==null){ setResult(RESULT_CANCELED); finish(); return; } loading(true); network.execute(()->{ boolean deleted; try{ deleted=ApiClient.deleteRoute(routeId,session).success; }catch(Exception ignored){ deleted=false; } final boolean done=deleted; runOnUiThread(()->{ loading(false); if(!done){ bot("Не удалось отменить маршрут. Попробуйте ещё раз."); return; } Intent data=new Intent(); data.putExtra(EXTRA_RESET_ROUTE,true); setResult(RESULT_OK,data); finish(); }); }); }

@@ -1042,3 +1042,33 @@ def test_rejects_whitespace_only_query():
     response = client.post("/v1/routes", headers={"X-Device-Session": session}, json={
         "cityId": "vladimir", "query": "     ", "deviceSessionId": session})
     assert response.status_code == 400
+
+
+def test_chat_conversation_why_keeps_route_version_and_points():
+    _, headers, route = _create_chat_edit_route()
+    response = _chat_edit(headers, route, "Почему выбрал это место?")
+    assert response.status_code == 200
+    assert "reply" in response.json()
+    assert response.json()["routeVersion"] == route["routeVersion"]
+    current = client.get(f"/v1/routes/{route['routeId']}", headers=headers)
+    assert current.json()["points"] == route["points"]
+
+
+def test_chat_feedback_asks_question_without_regeneration():
+    _, headers, route = _create_chat_edit_route()
+    response = _chat_edit(headers, route, "Переделай, мне не нравится")
+    assert response.status_code == 200
+    assert "Что хотите изменить" in response.json()["reply"]
+    assert response.json()["routeVersion"] == route["routeVersion"]
+
+
+def test_chat_why_after_failed_edit_explains_previous_failure():
+    _, headers, route = _create_chat_edit_route()
+    response = client.post(f"/v1/routes/{route['routeId']}/revisions",
+                           headers=headers, json={
+        "baseVersion": route["routeVersion"], "mode": "CHAT_REVISION",
+        "message": "почему?",
+        "previousReply": "Нельзя применить изменение к текущему маршруту"})
+    assert response.status_code == 200
+    assert "не удалось применить" in response.json()["reply"]
+    assert response.json()["routeVersion"] == route["routeVersion"]

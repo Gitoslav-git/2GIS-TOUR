@@ -17,3 +17,6 @@ local.properties
 routing-test.json
 app/src/main/assets/audio/03_krasnaya_ploshadj_hram_vasiliya_blazhennogo.mp3
 app/src/main/assets/audio/07_krasnaya_ploshadj_pamyatnik_mininu_i_pozharskomu.mp3
+
+# Codespaces runtime artifacts
+.devcontainer/logs/

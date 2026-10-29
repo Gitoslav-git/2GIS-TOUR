@@ -189,3 +189,34 @@ def _edit_summary(edit: RouteEdit) -> str:
     else:
         result = "изменить ограничение времени"
     return result + ("; время не ограничено" if edit.unlimited_time else "")
+
+
+def route_conversation_reply(message: str, current: Route,
+                             previous_reply: str | None = None) -> str | None:
+    """Answer conversation turns without touching persisted route state.
+
+    Explicit point operations are handled by parse_route_edit, not here.
+    Never invent a rationale for the planner's choice.
+    """
+    normalized = _normalize(message)
+    if re.search(r"\b(?:почему|зачем|отчего)\b", normalized):
+        if previous_reply and ("не удалось" in previous_reply.lower()
+                              or "нельзя" in previous_reply.lower()
+                              or "не найден" in previous_reply.lower()):
+            return ("Предыдущее изменение не удалось применить: " + previous_reply
+                    + " Текущий маршрут остался без изменений. "
+                    "Можно уточнить место или попробовать другое изменение.")
+        names = ", ".join(point.name for point in current.points[:3])
+        return ("Маршрут построен с учётом вашего запроса и доступных точек: "
+                + names + ". Точную причину выбора конкретной точки "
+                "планировщик не сохранил. Хотите заменить какую-то из них?")
+    if re.search(r"\b(?:не нравится|не понравил|переделай|скучн|не то)\b", normalized):
+        return ("Что хотите изменить: сами места, порядок посещения, "
+                "длительность или настроение прогулки? "
+                "Пока оставляю текущий маршрут без изменений.")
+    if re.search(r"\b(?:спасибо|благодарю)\b", normalized):
+        return "Пожалуйста! Можем обсудить маршрут или изменить отдельные точки."
+    if re.search(r"\b(?:что|как|где|когда|можно ли)\b", normalized) and "?" in message:
+        return ("Могу помочь с текущим маршрутом и его точками. "
+                "Уточните, о каком месте или участке хотите узнать.")
+    return None

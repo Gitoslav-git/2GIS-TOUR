@@ -85,6 +85,7 @@ final class ApiClient {
         final List<GeoCoordinate> path;
         List<RouteLegGeometry> legGeometries;
         boolean transientFailure;
+        boolean conversationReply;
         int totalMinutes;
         int requestedMinutes;
         int projectedMinutes;
@@ -388,12 +389,42 @@ final class ApiClient {
     }
 
     static Result chatRevision(String routeId, int baseVersion, String cityId,
-                               String message, String sessionId) throws Exception {
+                               String message, String sessionId, String previousReply) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("baseVersion", baseVersion);
         payload.put("mode", "CHAT_REVISION");
         payload.put("message", message);
-        return send("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
+        if (previousReply != null) payload.put("previousReply", previousReply);
+        return sendChatRevision("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
+    }
+
+    private static Result sendChatRevision(String path, JSONObject payload, String sessionId,
+                                           String cityId) throws Exception {
+        if (!BackendConfig.isConfigured())
+            return new Result(false, "Backend не подключён.", null, 0);
+        long started = BackendConfig.logRequest("POST", path);
+        HttpURLConnection connection = null;
+        try {
+            connection = open(path, "POST", sessionId);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            try (java.io.OutputStream out = connection.getOutputStream()) {
+                out.write(payload.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            int status = connection.getResponseCode();
+            BackendConfig.logResponse("POST", path, status, started);
+            JSONObject response = readJson(connection, status);
+            if (status >= 400) return routeError(response, status);
+            if (response.has("reply")) {
+                Result reply = new Result(true, response.getString("reply"),
+                        response.getString("routeId"), response.getInt("routeVersion"));
+                reply.conversationReply = true;
+                return reply;
+            }
+            return routeFromJson(response, cityId);
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
     }
 
     static Result getRoute(String routeId, String cityId, String sessionId) throws Exception {

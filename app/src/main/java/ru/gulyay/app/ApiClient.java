@@ -389,7 +389,7 @@ final class ApiClient {
     }
 
     static Result chatRevision(String routeId, int baseVersion, String cityId,
-                               String message, String sessionId) throws Exception {
+                               String message, String sessionId, String previousReply) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("baseVersion", baseVersion);
         payload.put("mode", "CHAT_REVISION");

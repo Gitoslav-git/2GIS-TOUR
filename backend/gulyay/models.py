@@ -38,6 +38,9 @@ class CreateRoute(StrictModel):
     filters: Filters = Field(default_factory=Filters)
     startLocation: StartLocation | None = None
     deviceSessionId: UUID | None = None
+    # Backend-only B2 pilot. Existing Android clients omit it and keep the
+    # original point-based route/walk contract.
+    routeGroupsEnabled: bool = False
 
     @field_validator("query")
     @classmethod
@@ -259,6 +262,7 @@ class RoutePoint(StrictModel):
     # Stable persisted provenance. Array indexes change when a recommendation is
     # inserted, so recommendation eligibility must not be inferred from order.
     pointType: Literal["TOUR", "COFFEE", "RESTAURANT", "FOOD", "OTHER"] = "TOUR"
+    catalogId: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -291,6 +295,49 @@ class RouteLeg(StrictModel):
             if not sampled or sampled[-1] != point:
                 sampled.append(point)
         return sampled
+
+
+class RouteZoneGeometry(StrictModel):
+    type: Literal["Polygon", "MultiPolygon"]
+    coordinates: list
+
+
+class RouteWaypoint(StrictModel):
+    order: int = Field(ge=1)
+    catalogId: str
+    placeId: str
+    name: str
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    relation: Literal["CONTAINS", "CLUSTER_MEMBER"]
+
+
+class RouteWaypointLeg(StrictModel):
+    fromWaypointOrder: int = Field(ge=0)
+    toWaypointOrder: int = Field(ge=1)
+    distanceMeters: int = Field(ge=0)
+    durationSeconds: int = Field(ge=0)
+    geometry: list[tuple[float, float]]
+
+
+class RouteGroup(StrictModel):
+    pointOrder: int = Field(ge=1, le=8)
+    catalogId: str
+    waypoints: list[RouteWaypoint] = Field(min_length=1)
+    waypointLegs: list[RouteWaypointLeg] = Field(min_length=1)
+    visitZone: RouteZoneGeometry
+
+    @model_validator(mode="after")
+    def validate_waypoint_path(self) -> "RouteGroup":
+        expected = list(range(1, len(self.waypoints) + 1))
+        if [item.order for item in self.waypoints] != expected:
+            raise ValueError("route group waypoint orders must be contiguous")
+        if len(self.waypointLegs) != len(self.waypoints):
+            raise ValueError("every route group waypoint needs a walking leg")
+        for index, leg in enumerate(self.waypointLegs):
+            if (leg.fromWaypointOrder, leg.toWaypointOrder) != (index, index + 1):
+                raise ValueError("route group walking legs must be contiguous")
+        return self
 
 
 class Route(StrictModel):
@@ -326,6 +373,8 @@ class Route(StrictModel):
     points: list[RoutePoint]
     legs: list[RouteLeg]
     warnings: list[str]
+    routeGroupsEnabled: bool = False
+    routeGroups: list[RouteGroup] = Field(default_factory=list)
 
 
 class GuestHistoryItem(StrictModel):
@@ -399,6 +448,7 @@ class Visit(StrictModel):
     reachedAt: datetime
     leftAt: datetime | None = None
     durationSeconds: int | None = Field(default=None, ge=0)
+    catalogId: str | None = None
 
 
 class WalkSession(StrictModel):

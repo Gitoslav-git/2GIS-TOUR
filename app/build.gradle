@@ -6,6 +6,8 @@ if (!backendUrl.startsWith('https://')) {
     throw new GradleException('BACKEND_BASE_URL must be HTTPS')
 }
 def dgisSdkVersion = providers.environmentVariable('DGIS_SDK_VERSION').orElse('13.6.0').get()
+def routeGroupsEnabled = providers.environmentVariable('ROUTE_GROUPS_ENABLED')
+        .orElse('false').map { it.equalsIgnoreCase('true') }.get()
 def appVersion = rootProject.file('VERSION').getText('UTF-8').trim()
 android {
     namespace 'ru.gulyay.app'
@@ -18,6 +20,7 @@ android {
         versionCode 35
         versionName appVersion
         buildConfigField 'String', 'BACKEND_BASE_URL', '"' + backendUrl.replace('"', '\\"') + '"'
+        buildConfigField 'boolean', 'ROUTE_GROUPS_ENABLED', routeGroupsEnabled.toString()
     }
     buildTypes { debug { } }
     buildFeatures { buildConfig true }

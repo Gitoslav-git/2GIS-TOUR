@@ -2,8 +2,9 @@ import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from gulyay.models import (CreateRoute, Filters, Route, RouteLeg, RoutePoint,
-                           SearchArea, StartWalk, WalkPosition)
+from gulyay.models import (CreateRoute, Filters, Route, RouteGroup, RouteLeg,
+                           RoutePoint, RouteWaypoint, RouteWaypointLeg,
+                           RouteZoneGeometry, SearchArea, StartWalk, WalkPosition)
 from gulyay.repository import RouteRepository
 from gulyay.walk import register_position, session_at, start_walk
 
@@ -45,11 +46,67 @@ def test_legacy_persisted_route_without_duration_metadata_uses_safe_defaults():
     legacy.pop("durationMode")
     legacy.pop("maxDurationMinutes")
     legacy.pop("durationOverrunAccepted")
+    legacy.pop("routeGroupsEnabled")
+    legacy.pop("routeGroups")
+    legacy["points"][0].pop("catalogId")
     restored = Route.model_validate(legacy)
     assert restored.durationSource == "default"
     assert restored.durationMode == "DEFAULT"
     assert restored.maxDurationMinutes is None
     assert restored.durationOverrunAccepted is False
+    assert restored.routeGroupsEnabled is False
+    assert restored.routeGroups == []
+    assert restored.points[0].catalogId is None
+
+
+def test_route_version_persists_its_own_visit_zone_snapshot(tmp_path):
+    path = tmp_path / "routes.sqlite3"
+    owner, route_id = uuid4(), uuid4()
+    coordinates = [[[37.60, 54.18], [37.62, 54.18], [37.62, 54.20],
+                    [37.60, 54.20], [37.60, 54.18]]]
+    itinerary = route(route_id).model_copy(update={
+        "routeGroupsEnabled": True,
+        "routeGroups": [RouteGroup(
+            pointOrder=1, catalogId="msk001",
+            waypoints=[RouteWaypoint(
+                order=1, catalogId="msk002", placeId="catalog:msk002",
+                name="child", lat=54.19, lon=37.61, relation="CONTAINS",
+            )],
+            waypointLegs=[RouteWaypointLeg(
+                fromWaypointOrder=0, toWaypointOrder=1,
+                distanceMeters=100, durationSeconds=60,
+                geometry=[(37.60, 54.18), (37.61, 54.19)],
+            )],
+            visitZone=RouteZoneGeometry(type="Polygon", coordinates=coordinates),
+        )],
+    })
+    payload = CreateRoute(cityId="tula", query="walk", deviceSessionId=owner,
+                          routeGroupsEnabled=True)
+    repository = RouteRepository(path)
+    repository.save_new(itinerary, owner, payload)
+    started = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
+    state = start_walk(itinerary, StartWalk(routeVersion=1), started)
+    first = WalkPosition(lat=54.19, lon=37.61, accuracyMeters=10,
+                         measuredAt=started)
+    state, _ = register_position(state, itinerary, first, started)
+    state, _ = register_position(
+        state, itinerary,
+        first.model_copy(update={"measuredAt": started + timedelta(seconds=5)}),
+        started + timedelta(seconds=5),
+    )
+    repository.save_walk(state, owner)
+    coordinates[0][0][0] = 99.0
+    repository.close()
+
+    reopened = RouteRepository(path)
+    stored = reopened.get_version(route_id, owner, 1)
+    assert stored is not None
+    assert stored.routeGroups[0].visitZone.coordinates[0][0][0] == 37.60
+    restored_walk = reopened.get_walk(state.session.walkId, owner)
+    assert restored_walk is not None
+    assert restored_walk.session.phase == "VISITING"
+    assert restored_walk.session.visits[0].catalogId == "msk001"
+    reopened.close()
 
 
 def test_atomic_replace_rejects_stale_version():

@@ -596,6 +596,33 @@ class CatalogPlaceProvider:
     def children_of(self, parent_id: str) -> list[CatalogPlace]:
         return self.catalog.children_of(parent_id)
 
+    def group_waypoint_candidates(self, parent_id: str,
+                                  preview: QueryPreview) -> list[PlaceCandidate]:
+        """Select a small relevant, routable child subset for an opt-in group."""
+        query = catalog_query_from_preview(preview)
+        rows = [row for row in self.catalog.children_of(parent_id)
+                if row.lat is not None and row.lon is not None
+                and (row.level in {"AREA", "COMPLEX"} or row.allow_coords_only
+                     or row.dgis_place_id is not None)
+                and row.relation in ALLOWED_RELATIONS
+                and self._passes_hard_filters(row, query)]
+        if not rows:
+            return []
+        direct = [row for row in rows if any(
+            _row_matches_concept(row, concept) for concept in preview.interests
+        )]
+        if preview.interests:
+            rows = direct
+        else:
+            # With no expressed interest, include one representative child,
+            # never every child merely because it exists in the hierarchy.
+            rows = rows[:1]
+        ranked = sorted(rows, key=lambda row: (
+            -self._semantic_score(row, query, self._lexical_score(row, query)),
+            row.id,
+        ))[:3]
+        return [self._to_candidate(row, preview) for row in ranked]
+
     def list_candidates(self, city_id: str, preview: QueryPreview,
                         anchor: SearchArea) -> list[PlaceCandidate]:
         ranked, trace = self.rank_candidates(city_id, preview, anchor)

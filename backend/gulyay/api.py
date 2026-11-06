@@ -38,6 +38,7 @@ from .route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBud
                             insert_suggested_place, rebuild_route_with_points)
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                    register_position, session_at, start_walk)
+from .visit_zones import bundled_visit_zones_path, load_visit_zones
 from .version import __version__ as APP_VERSION
 
 app = FastAPI(title="Гуляй API", version=APP_VERSION)
@@ -50,6 +51,10 @@ for seed_path in bundled_seed_paths():
     PLACE_CATALOG.import_seed(seed_path)
 PLACE_CATALOG.apply_manual_overrides(bundled_manual_overrides())
 CATALOG_PROVIDER = CatalogPlaceProvider(PLACE_CATALOG)
+VISIT_ZONES = load_visit_zones(
+    bundled_visit_zones_path(),
+    (place.id for city in CITIES for place in PLACE_CATALOG.list_places(city.cityId)),
+)
 PARTNER_REGISTRY = PartnerRegistry()
 IDEMPOTENT_ROUTES: dict[tuple[UUID, UUID], Route] = {}
 IDEMPOTENT_REVISIONS: dict[tuple[UUID, UUID], Route] = {}
@@ -577,6 +582,12 @@ def insert_walk_suggested_place(
             or state.session.routeVersion != current.routeVersion):
         return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
                        {"currentVersion": current.routeVersion})
+    if current.routeGroups:
+        return failure(
+            "GROUPED_ROUTE_EDIT_UNSUPPORTED",
+            "Добавление партнёрской точки в групповой маршрут пока недоступно",
+            409, request_id,
+        )
     if state.session.status != "ACTIVE" or state.session.phase != "VISITING":
         return failure("WALK_INVALID_STATE", "Добавление доступно только во время посещения",
                        409, request_id)
@@ -857,6 +868,12 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
     if revision.baseVersion != current.routeVersion:
         return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
                        {"currentVersion": current.routeVersion})
+    if current.routeGroups and revision.mode != "CHAT_REVISION":
+        return failure(
+            "GROUPED_ROUTE_EDIT_UNSUPPORTED",
+            "Редактирование группового маршрута пока недоступно",
+            409, request_id,
+        )
     if revision.mode in {"CHANGE_QUERY", "CHAT_REVISION"}:
         if revision.mode == "CHAT_REVISION":
             if (revision.message is None or revision.query is not None
@@ -867,6 +884,12 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
             if reply is not None:
                 return JSONResponse(content={"reply": reply, "routeId": str(route_id),
                                              "routeVersion": current.routeVersion})
+            if current.routeGroups:
+                return failure(
+                    "GROUPED_ROUTE_EDIT_UNSUPPORTED",
+                    "Редактирование группового маршрута пока недоступно",
+                    409, request_id,
+                )
             try:
                 edit = parse_route_edit(revision.message)
                 if edit.operation != "REBUILD":
@@ -1019,7 +1042,10 @@ def _build(payload: CreateRoute, intent_provider: OpenAIIntentProvider,
         ensure_routing = getattr(geo, "ensure_routing_configured", geo.ensure_configured)
         ensure_routing()
         preview = interpret(payload, intent_provider, trace_id)
-        return build_route(payload, preview, geo, trace_id=trace_id, catalog=catalog)
+        return build_route(
+            payload, preview, geo, trace_id=trace_id, catalog=catalog,
+            visit_zones=VISIT_ZONES,
+        )
     except IntentNeedsClarification as exc:
         planning_log(trace_id, "planning_error", error="QUERY_NEEDS_CLARIFICATION",
                      fields=exc.fields)

@@ -12,7 +12,8 @@ from gulyay.geo import CatalogPlaceResolution, GeoUnavailable
 from gulyay.models import (CreateRoute, PlaceCandidate, QueryPreview, RouteLeg,
                            SearchArea)
 from gulyay.repository import RouteRepository
-from gulyay.route_builder import _merge_candidates, build_route
+from gulyay.route_builder import (_catalog_parent_conflict, _merge_candidates,
+                                  build_route)
 from gulyay.visit_categories import visit_minutes
 
 
@@ -109,10 +110,68 @@ def test_seed_import_is_idempotent_and_route_clear_does_not_touch_catalog(tmp_pa
     catalog = PlaceCatalog(database)
     first = catalog.import_seed(bundled_seed_path())
     second = catalog.import_seed(bundled_seed_path())
-    assert first == second == 66
-    assert len(catalog.list_places("moscow")) == 66
+    assert first == second == 75
+    assert len(catalog.list_places("moscow")) == 75
     RouteRepository(database).clear()
-    assert len(catalog.list_places("moscow")) == 66
+    assert len(catalog.list_places("moscow")) == 75
+
+
+def test_moscow_stage_a_children_preserve_ids_hierarchy_and_resolution(tmp_path):
+    catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
+    assert catalog.import_seed(bundled_seed_path()) == 75
+    places = catalog.list_places("moscow")
+    by_id = {place.id: place for place in places}
+
+    assert len(places) == len(by_id) == 75
+    assert tuple(child.id for child in catalog.children_of("msk029")) == (
+        "msk068", "msk069",
+    )
+    assert tuple(child.id for child in catalog.children_of("msk031")) == (
+        "msk070", "msk071", "msk072", "msk073", "msk074", "msk075",
+    )
+    assert tuple(child.id for child in catalog.children_of("msk032")) == (
+        "msk033", "msk067",
+    )
+    assert by_id["msk029"].level == "AREA"
+    assert by_id["msk031"].level == "COMPLEX"
+    assert by_id["msk032"].level == "COMPLEX"
+    assert by_id["msk033"].name == "Новодевичье кладбище"
+
+    unresolved = {place.id for place in catalog.unresolved("moscow")}
+    assert "msk069" in unresolved
+    assert (by_id["msk069"].lat, by_id["msk069"].lon,
+            by_id["msk069"].dgis_place_id) == (None, None, None)
+    assert set(f"msk{number:03d}" for number in range(67, 76)) - {"msk069"} <= {
+        place.id for place in catalog.list_places("moscow", resolved_only=True)
+    }
+
+
+def test_moscow_stage_a_reimport_is_idempotent(tmp_path):
+    catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
+    catalog.import_seed(bundled_seed_path())
+    first = {place.id: place for place in catalog.list_places("moscow")}
+    assert catalog.import_seed(bundled_seed_path()) == 75
+    second = {place.id: place for place in catalog.list_places("moscow")}
+    assert second == first
+
+
+def test_luzhniki_contains_children_keep_existing_complex_conflict(tmp_path):
+    catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
+    catalog.import_seed(bundled_seed_path())
+    places = {place.id: place for place in catalog.list_places("moscow")}
+    parent = CatalogPlaceProvider._to_candidate(places["msk031"], preview())
+
+    for child_id in ("msk070", "msk071", "msk072", "msk073", "msk074", "msk075"):
+        child = CatalogPlaceProvider._to_candidate(places[child_id], preview())
+        assert child.catalogRelation == "CONTAINS"
+        assert _catalog_parent_conflict([parent], child)
+        assert _catalog_parent_conflict([child], parent)
+
+    park = CatalogPlaceProvider._to_candidate(places["msk067"], preview())
+    monastery = CatalogPlaceProvider._to_candidate(places["msk032"], preview())
+    assert park.catalogRelation == "CLUSTER_MEMBER"
+    assert not _catalog_parent_conflict([monastery], park)
+    assert not _catalog_parent_conflict([park], monastery)
 
 
 def test_reimport_of_synced_seed_keeps_current_visit_ranges(tmp_path):
@@ -574,6 +633,36 @@ def test_catalog_hard_free_budget_and_type_filters(tmp_path):
         "moscow", preview(maxBudgetRub=100, excludedPlaceTypes=["gallery"]), area(),
     )
     assert {item.catalogId for item in filtered} == {"free"}
+
+
+def test_group_waypoints_use_interests_hard_filters_and_both_relations(tmp_path):
+    contains = row(
+        "contains", "Historic child", parent_id="parent", relation="CONTAINS",
+        tags="HISTORY", lat="55.751", lon="37.611",
+    )
+    cluster = row(
+        "cluster", "Nature child", parent_id="parent", relation="CLUSTER_MEMBER",
+        tags="NATURE", lat="55.752", lon="37.612",
+    )
+    paid = row(
+        "paid-child", "Paid nature", parent_id="parent", relation="CONTAINS",
+        tags="NATURE", lat="55.753", lon="37.613",
+    )
+    paid.update({"access_cost": "PAID", "base_price_from_rub": "500",
+                 "base_price_to_rub": "500"})
+    unresolved = row(
+        "unresolved", "Unresolved nature", parent_id="parent", relation="CONTAINS",
+        tags="NATURE", provider_id="", lat="55.754", lon="37.614",
+    )
+    catalog_provider = provider(tmp_path, [
+        row("parent", "Parent", level="COMPLEX"),
+        contains, cluster, paid, unresolved,
+    ])
+    selected = catalog_provider.group_waypoint_candidates(
+        "parent", preview(interests=["PARKS"], freeOnly=True),
+    )
+    assert [item.catalogId for item in selected] == ["cluster"]
+    assert selected[0].catalogRelation == "CLUSTER_MEMBER"
 
 
 def test_variety_penalizes_repeated_place_type(tmp_path):

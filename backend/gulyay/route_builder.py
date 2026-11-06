@@ -13,7 +13,9 @@ from .geo import (GeoConstraintNotFound, GeoProvider, GeoRouteNotFound, GeoUnava
 from .models import (CreateRoute, PlaceCandidate, QueryPreview, Route, RouteLeg,
                      RoutePoint, SearchArea)
 from .planning_debug import catalog_debug_log, planning_log
+from .route_groups import attach_route_groups, logical_group_candidates
 from .route_config import CITY_NO_GEO_START_OVERRIDES
+from .visit_zones import VisitZones
 from .visit_categories import (minimum_visit_minutes,
                                visit_minutes as visit_duration_minutes)
 
@@ -114,7 +116,8 @@ class _BuiltPlan:
 
 def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
                 now: datetime | None = None, trace_id: str | None = None,
-                catalog: CatalogPlaceProvider | None = None) -> Route:
+                catalog: CatalogPlaceProvider | None = None,
+                visit_zones: VisitZones | None = None) -> Route:
     location_hint = preview.locationHint or ("центр" if preview.centerOnly else None)
     catalog_first = bool(catalog and catalog.has_sufficient_resolved(payload.cityId))
     catalog_available = bool(catalog and catalog.has_city(payload.cityId))
@@ -218,6 +221,11 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     candidates = _retrieve_candidates(
         payload.cityId, preview, search_area, geo, catalog, catalog_first,
     )
+    if (payload.routeGroupsEnabled and catalog is not None
+            and visit_zones is not None):
+        candidates = logical_group_candidates(
+            candidates, preview, catalog, visit_zones,
+        )
     planning_log(trace_id, "catalog_candidates" if catalog_first else "dgis_candidates",
                  attempt=1, area=search_area.label,
                  count=len(candidates), candidates=_candidate_debug(candidates))
@@ -305,6 +313,11 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
             wider = _retrieve_candidates(
                 payload.cityId, preview, city_area, geo, catalog, catalog_first,
             )
+            if (payload.routeGroupsEnabled and catalog is not None
+                    and visit_zones is not None):
+                wider = logical_group_candidates(
+                    wider, preview, catalog, visit_zones,
+                )
             merged = _merge_candidates(active_candidates, wider)
             planning_log(trace_id, "catalog_candidates" if catalog_first else "dgis_candidates",
                          attempt=2, area=city_area.label,
@@ -424,7 +437,7 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
             trace_id, "final", visit_minutes=sum(point.visitMinutes for point in route_points),
             walking_minutes=math.ceil(best.walking_seconds / 60), total_minutes=total_minutes,
         )
-    return Route(
+    route = Route(
         routeId=uuid4(), routeVersion=1, status="READY", cityId=payload.cityId,
         query=payload.query, filters=payload.filters, searchArea=best_area,
         approximateStart=approximate_start, startLat=start[0], startLon=start[1],
@@ -436,7 +449,13 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
         maxDurationMinutes=preview.maxDurationMinutes, routePace=preview.routePace,
         totalMinutes=total_minutes, unusedMinutes=unused_minutes,
         points=route_points, legs=legs, warnings=warnings,
+        routeGroupsEnabled=payload.routeGroupsEnabled,
     )
+    if payload.routeGroupsEnabled and catalog is not None and visit_zones is not None:
+        return attach_route_groups(
+            route, best.candidates, preview, geo, catalog, visit_zones,
+        )
+    return route
 
 
 def _retrieve_candidates(city_id: str, preview: QueryPreview, area: SearchArea,
@@ -655,6 +674,7 @@ def _materialize_plan(plan: _RoutePlan, preview: QueryPreview, geo: GeoProvider,
             order=len(built.points) + 1, placeId=candidate.placeId, name=candidate.name,
             lat=candidate.lat, lon=candidate.lon, visitMinutes=dwell_minutes,
             scheduleStatus=schedule_status, isFood=candidate.isFood,
+            catalogId=candidate.catalogId,
         ))
         built.legs.append(leg)
         built.candidates.append(candidate)
@@ -1002,6 +1022,7 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
             lat=candidate.lat, lon=candidate.lon, visitMinutes=visit_minutes,
             scheduleStatus=schedule_status, isFood=candidate.isFood,
             pointType=old.pointType if old is not None else ("FOOD" if candidate.isFood else "TOUR"),
+            catalogId=candidate.catalogId,
         ))
         legs.append(leg)
         current = candidate.lat, candidate.lon
@@ -1058,6 +1079,7 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
         "planningStatus": "DEGRADED" if unmet else "SUCCESS",
         "unmetPreferences": list(dict.fromkeys(unmet)),
         "durationOverrunAccepted": duration_overrun_accepted,
+        "routeGroupsEnabled": False, "routeGroups": [],
     })
 
 
@@ -1065,7 +1087,8 @@ def insert_suggested_place(source: Route, branch: PartnerBranch, segment: str,
                            current_order: int, geo: GeoProvider,
                            now: datetime | None = None) -> Route:
     """Insert a verified branch after the active point and reroute only the suffix."""
-    if (segment not in {"COFFEE", "RESTAURANT"}
+    if (source.routeGroups
+            or segment not in {"COFFEE", "RESTAURANT"}
             or not 1 <= current_order <= len(source.points)
             or len(source.points) >= 8
             or any(point.placeId == branch.dgis_place_id for point in source.points)):

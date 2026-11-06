@@ -4,8 +4,9 @@ import math
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from .models import (Route, StartWalk, Visit, WalkAction, WalkPosition,
+from .models import (Route, RouteGroup, StartWalk, Visit, WalkAction, WalkPosition,
                      WalkProgress, WalkSession, WalkState)
+from .visit_zones import distance_to_geometry_meters, distance_to_polyline_meters
 
 ARRIVAL_RADIUS_METERS = 75
 EXIT_RADIUS_METERS = 115
@@ -49,8 +50,20 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
     if measured > current_time + timedelta(minutes=5):
         raise WalkInvalidPosition()
     point = route.points[session.currentPointOrder - 1]
-    distance = round(_distance_meters(position.lat, position.lon, point.lat, point.lon))
+    group = _route_group(route, session.currentPointOrder)
+    if group is None:
+        distance = round(_distance_meters(position.lat, position.lon, point.lat, point.lon))
+        inside_group = False
+    else:
+        zone_distance, inside_group = distance_to_geometry_meters(
+            position.lat, position.lon, group.visitZone.model_dump(),
+        )
+        distance = round(zone_distance)
     if session.phase == "VISITING":
+        if group is not None:
+            distance = round(_group_presence_distance(
+                position, group, zone_distance, state.lastPosition,
+            ))
         return _register_visit_position(state, route, measured, position, distance)
     reached = False
     session = session.model_copy(update={
@@ -65,7 +78,7 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
     }
     accurate_and_near = (
         position.accuracyMeters <= MAX_ACCURACY_METERS
-        and distance <= ARRIVAL_RADIUS_METERS
+        and (inside_group if group is not None else distance <= ARRIVAL_RADIUS_METERS)
     )
     if not accurate_and_near:
         update.update({"proximityStartedAt": None, "proximityPointOrder": None})
@@ -79,6 +92,7 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
         reached = True
         visits = [*session.visits, Visit(
             pointOrder=session.currentPointOrder, reachedAt=measured,
+            catalogId=group.catalogId if group is not None else point.catalogId,
         )]
         session = session.model_copy(update={
             "phase": "VISITING", "visits": visits,
@@ -279,6 +293,33 @@ def _distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> floa
     haversine = (math.sin(delta_lat / 2) ** 2
                  + math.cos(first) * math.cos(second) * math.sin(delta_lon / 2) ** 2)
     return radius * 2 * math.atan2(math.sqrt(haversine), math.sqrt(1 - haversine))
+
+
+def _route_group(route: Route, point_order: int) -> RouteGroup | None:
+    return next((group for group in route.routeGroups
+                 if group.pointOrder == point_order), None)
+
+
+def _group_presence_distance(position: WalkPosition, group: RouteGroup,
+                             zone_distance: float,
+                             previous: WalkPosition | None) -> float:
+    """Keep a visit during continuous motion along a verified inter-part leg."""
+    distances = [zone_distance]
+    if previous is not None and previous.accuracyMeters <= MAX_ACCURACY_METERS:
+        _, previous_inside = distance_to_geometry_meters(
+            previous.lat, previous.lon, group.visitZone.model_dump(),
+        )
+        for leg in group.waypointLegs:
+            if not leg.geometry:
+                continue
+            previous_distance = distance_to_polyline_meters(
+                previous.lat, previous.lon, leg.geometry,
+            )
+            if previous_inside or previous_distance <= EXIT_RADIUS_METERS:
+                distances.append(distance_to_polyline_meters(
+                    position.lat, position.lon, leg.geometry,
+                ))
+    return min(distances)
 
 
 def _utc(value: datetime | None) -> datetime:

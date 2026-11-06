@@ -23,6 +23,7 @@ final class ApiClient {
 
     static final class PlaceOption {
         final String placeId;
+        final String catalogId;
         final String name;
         final boolean food;
         final double lat;
@@ -33,7 +34,13 @@ final class ApiClient {
         }
 
         PlaceOption(String placeId, String name, boolean food, double lat, double lon) {
+            this(placeId, null, name, food, lat, lon);
+        }
+
+        PlaceOption(String placeId, String catalogId, String name, boolean food,
+                    double lat, double lon) {
             this.placeId = placeId;
+            this.catalogId = catalogId;
             this.name = name;
             this.food = food;
             this.lat = lat;
@@ -42,6 +49,45 @@ final class ApiClient {
 
         @Override public String toString() {
             return food ? name + " (еда)" : name;
+        }
+    }
+
+    static final class RouteWaypoint {
+        final int order;
+        final String catalogId, placeId, name, relation;
+        final double lat, lon;
+
+        RouteWaypoint(int order, String catalogId, String placeId, String name,
+                      double lat, double lon, String relation) {
+            this.order = order; this.catalogId = catalogId; this.placeId = placeId;
+            this.name = name; this.lat = lat; this.lon = lon; this.relation = relation;
+        }
+    }
+
+    static final class RouteWaypointLeg {
+        final int fromWaypointOrder, toWaypointOrder, distanceMeters, durationSeconds;
+        final List<GeoCoordinate> path;
+
+        RouteWaypointLeg(int fromWaypointOrder, int toWaypointOrder, int distanceMeters,
+                         int durationSeconds, List<GeoCoordinate> path) {
+            this.fromWaypointOrder = fromWaypointOrder;
+            this.toWaypointOrder = toWaypointOrder;
+            this.distanceMeters = Math.max(0, distanceMeters);
+            this.durationSeconds = Math.max(0, durationSeconds);
+            this.path = path;
+        }
+    }
+
+    static final class RouteGroup {
+        final int pointOrder;
+        final String catalogId;
+        final List<RouteWaypoint> waypoints;
+        final List<RouteWaypointLeg> waypointLegs;
+
+        RouteGroup(int pointOrder, String catalogId, List<RouteWaypoint> waypoints,
+                   List<RouteWaypointLeg> waypointLegs) {
+            this.pointOrder = pointOrder; this.catalogId = catalogId;
+            this.waypoints = waypoints; this.waypointLegs = waypointLegs;
         }
     }
 
@@ -84,6 +130,8 @@ final class ApiClient {
         final List<PlaceOption> points;
         final List<GeoCoordinate> path;
         List<RouteLegGeometry> legGeometries;
+        boolean routeGroupsEnabled;
+        List<RouteGroup> routeGroups;
         boolean transientFailure;
         boolean conversationReply;
         int totalMinutes;
@@ -125,6 +173,8 @@ final class ApiClient {
             this.points = points;
             this.path = path;
             this.legGeometries = Collections.emptyList();
+            this.routeGroupsEnabled = false;
+            this.routeGroups = Collections.emptyList();
             this.transientFailure = false;
             this.totalMinutes = -1;
             this.requestedMinutes = -1;
@@ -171,26 +221,38 @@ final class ApiClient {
     static String routeSnapshot(Result route) {
         if (route == null || !route.success) return null;
         try {
-            long savedAtElapsedMillis = SystemClock.elapsedRealtime();
+            long savedAtElapsedMillis = elapsedRealtimeForSnapshot();
             JSONObject json = new JSONObject();
             json.put("routeId", route.routeId).put("routeVersion", route.routeVersion)
                     .put("message", route.message).put("totalMinutes", route.totalMinutes)
                     .put("requestedMinutes", route.requestedMinutes)
                     .put("totalDistanceMeters", route.totalDistanceMeters)
-                    .put("startLat", route.startLat).put("startLon", route.startLon)
                     .put("startSource", route.startSource)
                     .put("offlineSnapshotSavedAtElapsedMs", savedAtElapsedMillis)
                     .put("offlineSnapshotExpiresAtElapsedMs",
                             savedAtElapsedMillis + RouteSnapshotPolicy.OFFLINE_VIEW_WINDOW_MILLIS);
+            if (Double.isFinite(route.startLat) && Double.isFinite(route.startLon)) {
+                json.put("startLat", route.startLat).put("startLon", route.startLon);
+            }
             JSONArray points = new JSONArray();
             for (PlaceOption point : route.points) points.put(new JSONObject()
-                    .put("id", point.placeId).put("name", point.name).put("food", point.food)
+                    .put("id", point.placeId).put("catalogId", point.catalogId)
+                    .put("name", point.name).put("food", point.food)
                     .put("lat", point.lat).put("lon", point.lon));
             JSONArray path = new JSONArray();
             for (GeoCoordinate point : route.path) path.put(new JSONArray()
                     .put(point.lat).put(point.lon));
-            return json.put("points", points).put("path", path).toString();
+            json.put("points", points).put("path", path)
+                    .put("routeGroupsEnabled", route.routeGroupsEnabled)
+                    .put("legGeometries", routeLegsJson(route.legGeometries))
+                    .put("routeGroups", routeGroupsJson(route.routeGroups));
+            return json.toString();
         } catch (Exception ignored) { return null; }
+    }
+
+    private static long elapsedRealtimeForSnapshot() {
+        try { return SystemClock.elapsedRealtime(); }
+        catch (RuntimeException unavailableInJvmTests) { return 1L; }
     }
 
     static Result routeFromSnapshot(String raw) {
@@ -200,7 +262,8 @@ final class ApiClient {
             List<PlaceOption> points = new ArrayList<>();
             for (int i = 0; i < sourcePoints.length(); i++) {
                 JSONObject item = sourcePoints.getJSONObject(i);
-                points.add(new PlaceOption(item.getString("id"), item.getString("name"),
+                points.add(new PlaceOption(item.getString("id"), item.optString("catalogId", null),
+                        item.getString("name"),
                         item.optBoolean("food"), item.getDouble("lat"), item.getDouble("lon")));
             }
             List<GeoCoordinate> path = new ArrayList<>();
@@ -217,8 +280,122 @@ final class ApiClient {
             result.startLat = json.optDouble("startLat", Double.NaN);
             result.startLon = json.optDouble("startLon", Double.NaN);
             result.startSource = json.optString("startSource", "LEGACY");
+            result.routeGroupsEnabled = json.optBoolean("routeGroupsEnabled", false);
+            result.legGeometries = snapshotRouteLegs(json.optJSONArray("legGeometries"));
+            result.routeGroups = parseRouteGroups(json.optJSONArray("routeGroups"), true);
+            if (result.routeGroupsEnabled && json.optJSONArray("routeGroups") == null) return null;
             return result;
         } catch (Exception ignored) { return null; }
+    }
+
+    private static JSONArray coordinatesJson(List<GeoCoordinate> path) throws Exception {
+        JSONArray value = new JSONArray();
+        for (GeoCoordinate point : path) value.put(new JSONArray().put(point.lat).put(point.lon));
+        return value;
+    }
+
+    private static List<GeoCoordinate> snapshotCoordinates(JSONArray value) throws Exception {
+        List<GeoCoordinate> path = new ArrayList<>();
+        if (value == null) return path;
+        for (int i = 0; i < value.length(); i++) {
+            JSONArray point = value.getJSONArray(i);
+            path.add(new GeoCoordinate(point.getDouble(0), point.getDouble(1)));
+        }
+        return path;
+    }
+
+    private static JSONArray routeLegsJson(List<RouteLegGeometry> legs) throws Exception {
+        JSONArray value = new JSONArray();
+        if (legs == null) return value;
+        for (RouteLegGeometry leg : legs) value.put(new JSONObject()
+                .put("toOrder", leg.toOrder).put("distanceMeters", leg.distanceMeters)
+                .put("durationSeconds", leg.durationSeconds)
+                .put("path", coordinatesJson(leg.path)));
+        return value;
+    }
+
+    private static List<RouteLegGeometry> snapshotRouteLegs(JSONArray value) throws Exception {
+        List<RouteLegGeometry> legs = new ArrayList<>();
+        if (value == null) return legs;
+        for (int i = 0; i < value.length(); i++) {
+            JSONObject leg = value.getJSONObject(i);
+            legs.add(new RouteLegGeometry(leg.getInt("toOrder"),
+                    leg.optInt("distanceMeters"), leg.optInt("durationSeconds"),
+                    snapshotCoordinates(leg.optJSONArray("path"))));
+        }
+        return legs;
+    }
+
+    private static JSONArray routeGroupsJson(List<RouteGroup> groups) throws Exception {
+        JSONArray value = new JSONArray();
+        if (groups == null) return value;
+        for (RouteGroup group : groups) {
+            JSONArray waypoints = new JSONArray();
+            for (RouteWaypoint waypoint : group.waypoints) waypoints.put(new JSONObject()
+                    .put("order", waypoint.order).put("catalogId", waypoint.catalogId)
+                    .put("placeId", waypoint.placeId).put("name", waypoint.name)
+                    .put("lat", waypoint.lat).put("lon", waypoint.lon)
+                    .put("relation", waypoint.relation));
+            JSONArray legs = new JSONArray();
+            for (RouteWaypointLeg leg : group.waypointLegs) legs.put(new JSONObject()
+                    .put("fromWaypointOrder", leg.fromWaypointOrder)
+                    .put("toWaypointOrder", leg.toWaypointOrder)
+                    .put("distanceMeters", leg.distanceMeters)
+                    .put("durationSeconds", leg.durationSeconds)
+                    .put("path", coordinatesJson(leg.path)));
+            value.put(new JSONObject().put("pointOrder", group.pointOrder)
+                    .put("catalogId", group.catalogId).put("waypoints", waypoints)
+                    .put("waypointLegs", legs));
+        }
+        return value;
+    }
+
+    private static List<RouteGroup> parseRouteGroups(JSONArray groups, boolean snapshot)
+            throws Exception {
+        List<RouteGroup> parsed = new ArrayList<>();
+        if (groups == null) return parsed;
+        for (int i = 0; i < groups.length(); i++) {
+            JSONObject group = groups.getJSONObject(i);
+            List<RouteWaypoint> waypoints = new ArrayList<>();
+            JSONArray sourceWaypoints = group.optJSONArray("waypoints");
+            if (sourceWaypoints != null) for (int j = 0; j < sourceWaypoints.length(); j++) {
+                JSONObject waypoint = sourceWaypoints.getJSONObject(j);
+                waypoints.add(new RouteWaypoint(waypoint.getInt("order"),
+                        waypoint.optString("catalogId", null),
+                        waypoint.optString("placeId", null), waypoint.getString("name"),
+                        waypoint.getDouble("lat"), waypoint.getDouble("lon"),
+                        waypoint.optString("relation", "")));
+            }
+            List<RouteWaypointLeg> legs = new ArrayList<>();
+            JSONArray sourceLegs = group.optJSONArray("waypointLegs");
+            if (sourceLegs != null) for (int j = 0; j < sourceLegs.length(); j++) {
+                JSONObject leg = sourceLegs.getJSONObject(j);
+                List<GeoCoordinate> path;
+                if (snapshot) {
+                    path = snapshotCoordinates(leg.optJSONArray("path"));
+                } else {
+                    path = backendCoordinates(leg.optJSONArray("geometry"));
+                }
+                legs.add(new RouteWaypointLeg(leg.getInt("fromWaypointOrder"),
+                        leg.getInt("toWaypointOrder"), leg.optInt("distanceMeters"),
+                        leg.optInt("durationSeconds"), compactPath(path, 240)));
+            }
+            parsed.add(new RouteGroup(group.getInt("pointOrder"),
+                    group.optString("catalogId", null), waypoints, legs));
+        }
+        return parsed;
+    }
+
+    private static List<GeoCoordinate> backendCoordinates(JSONArray value) throws Exception {
+        List<GeoCoordinate> path = new ArrayList<>();
+        if (value == null) return path;
+        for (int i = 0; i < value.length(); i++) {
+            JSONArray coordinate = value.getJSONArray(i);
+            GeoCoordinate next = new GeoCoordinate(coordinate.getDouble(1), coordinate.getDouble(0));
+            if (path.isEmpty() || path.get(path.size() - 1).lat != next.lat
+                    || path.get(path.size() - 1).lon != next.lon) path.add(next);
+        }
+        return path;
     }
 
     static boolean isSnapshotValidForOfflineView(String raw, String expectedRouteId,
@@ -309,18 +486,28 @@ final class ApiClient {
                               Double startLat, Double startLon, Double accuracyMeters,
                               JSONObject filters) throws Exception {
         return send("/v1/routes", createRoutePayload(cityId, query, sessionId,
-                startLat, startLon, accuracyMeters, filters), sessionId, cityId);
+                startLat, startLon, accuracyMeters, filters, BuildConfig.ROUTE_GROUPS_ENABLED),
+                sessionId, cityId);
     }
 
     static JSONObject createRoutePayload(String cityId, String query, String sessionId,
                                          Double startLat, Double startLon,
                                          Double accuracyMeters, JSONObject filters)
             throws Exception {
+        return createRoutePayload(cityId, query, sessionId, startLat, startLon,
+                accuracyMeters, filters, BuildConfig.ROUTE_GROUPS_ENABLED);
+    }
+
+    static JSONObject createRoutePayload(String cityId, String query, String sessionId,
+                                         Double startLat, Double startLon,
+                                         Double accuracyMeters, JSONObject filters,
+                                         boolean routeGroupsEnabled) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("cityId", cityId);
         payload.put("query", query);
         payload.put("deviceSessionId", sessionId);
         payload.put("filters", filters == null ? new JSONObject() : filters);
+        if (routeGroupsEnabled) payload.put("routeGroupsEnabled", true);
         if (startLat != null && startLon != null) {
             JSONObject location = new JSONObject();
             location.put("lat", startLat);
@@ -366,9 +553,9 @@ final class ApiClient {
             Result recreated = createRoute(cityId, query, sessionId, startLat, startLon,
                     accuracyMeters, filters);
             if (recreated.success) {
-                return new Result(true, "Старый маршрут отсутствовал на сервере — построен новый.\n\n" +
+                return copyRouteState(new Result(true, "Старый маршрут отсутствовал на сервере — построен новый.\n\n" +
                         recreated.message, recreated.routeId, recreated.routeVersion,
-                        0, null, recreated.points, recreated.path);
+                        0, null, recreated.points, recreated.path), recreated);
             }
             return recreated;
         }
@@ -386,6 +573,19 @@ final class ApiClient {
         payload.put("pointIds", ids);
         if (allowDurationOverrun) payload.put("allowDurationOverrun", true);
         return send("/v1/routes/" + routeId + "/revisions", payload, sessionId, cityId);
+    }
+
+    private static Result copyRouteState(Result target, Result source) {
+        target.legGeometries = source.legGeometries;
+        target.routeGroupsEnabled = source.routeGroupsEnabled;
+        target.routeGroups = source.routeGroups;
+        target.totalMinutes = source.totalMinutes;
+        target.requestedMinutes = source.requestedMinutes;
+        target.totalDistanceMeters = source.totalDistanceMeters;
+        target.startLat = source.startLat;
+        target.startLon = source.startLon;
+        target.startSource = source.startSource;
+        return target;
     }
 
     static Result chatRevision(String routeId, int baseVersion, String cityId,
@@ -847,7 +1047,7 @@ final class ApiClient {
         }
     }
 
-    private static Result routeFromJson(JSONObject response, String cityId) throws Exception {
+    static Result routeFromJson(JSONObject response, String cityId) throws Exception {
         Result result = new Result(true, routeSummary(response, cityId),
                 response.getString("routeId"), response.getInt("routeVersion"),
                 0, null, routePoints(response), routePath(response));
@@ -944,7 +1144,8 @@ final class ApiClient {
         List<PlaceOption> points = new ArrayList<>();
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.getJSONObject(i);
-            points.add(new PlaceOption(item.getString("placeId"), item.getString("name"),
+            points.add(new PlaceOption(item.getString("placeId"),
+                    item.optString("catalogId", null), item.getString("name"),
                     item.optBoolean("isFood"), item.getDouble("lat"), item.getDouble("lon")));
         }
         return points;
@@ -960,6 +1161,8 @@ final class ApiClient {
             result.startLon = response.getDouble("startLon");
         }
         result.startSource = response.optString("startSource", "LEGACY");
+        result.routeGroupsEnabled = response.optBoolean("routeGroupsEnabled", false);
+        result.routeGroups = parseRouteGroups(response.optJSONArray("routeGroups"), false);
         JSONArray legs = response.optJSONArray("legs");
         if (legs == null) return;
         int distance = 0;
@@ -1087,8 +1290,10 @@ final class ApiClient {
         return summary.toString();
     }
 
-    private static String humanError(String code, String message) {
+    static String humanError(String code, String message) {
         switch (code) {
+            case "GROUPED_ROUTE_EDIT_UNSUPPORTED":
+                return "Маршрутная группа уже используется в прогулке. Изменение точек и вставка заведений для неё пока недоступны; разговор с помощником продолжает работать.";
             case "RATE_LIMITED": return message.isEmpty() ? "Слишком много запросов приложения. Подождите и повторите." : message;
             case "DGIS_AUTH_ERROR": return "2ГИС отклонил ключ backend. Обратитесь к администратору приложения.";
             case "DGIS_RATE_LIMIT": return message.isEmpty() ? "2ГИС временно ограничил запросы. Подождите и повторите." : message;

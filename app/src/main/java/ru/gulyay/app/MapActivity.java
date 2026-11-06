@@ -2275,8 +2275,11 @@ public final class MapActivity extends ComponentActivity {
             mapRouteSummary.setVisibility(View.VISIBLE);
             mapRouteSummary.setText("Прогулка на паузе");
         }
+        boolean grouped = RouteGroupSupport.hasActiveGroup(route, walk);
+        // The chat remains available for conversational replies. Mutating requests
+        // receive the backend's friendly GROUPED_ROUTE_EDIT_UNSUPPORTED response.
         editQuery.setEnabled(active || paused);
-        editPoints.setEnabled(active || paused);
+        editPoints.setEnabled((active || paused) && !grouped);
         if ("COMPLETED".equals(walk.status) || "STOPPED".equals(walk.status)) {
             persistFinishedRoute();
             clearActiveWalk();
@@ -2362,7 +2365,11 @@ public final class MapActivity extends ComponentActivity {
         visitingNextMeta.setVisibility(model.nextMeta.isEmpty() ? View.GONE : View.VISIBLE);
         updatePointListVisibility();
         renderPartnerOffer(model.partnerOffer);
-        renderVisitArrivalCard(pointName);
+        if (RouteGroupSupport.hasActiveGroup(route, walk)) {
+            updateGroupGuidance(latestUserLat, latestUserLon);
+        } else {
+            renderVisitArrivalCard(pointName);
+        }
     }
 
     private void renderVisitArrivalCard(String pointName) {
@@ -2401,7 +2408,8 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void syncPartnerOffer() {
-        if (walk == null || !PartnerOfferRequestPolicy.eligible(
+        if (RouteGroupSupport.hasActiveGroup(route, walk)
+                || walk == null || !PartnerOfferRequestPolicy.eligible(
                 walk.status, walk.phase, walk.currentPointOrder)) {
             invalidatePartnerOffer();
             return;
@@ -2458,6 +2466,7 @@ public final class MapActivity extends ComponentActivity {
         VisitingPresentation.PartnerOffer offer = VisitingPresentation.PartnerOffer.from(
                 routeViewModel.partnerOffer);
         if (partnerOfferInsertInFlight || route == null || walk == null
+                || RouteGroupSupport.hasActiveGroup(route, walk)
                 || !VisitingPresentation.shouldShowPartnerOffer(offer)) return;
         ApiClient.PartnerOffer selected = routeViewModel.partnerOffer;
         partnerOfferInsertInFlight = true;
@@ -2898,8 +2907,9 @@ public final class MapActivity extends ComponentActivity {
         if (location == null || walk == null || route == null || walk.currentPointOrder < 1
                 || walk.currentPointOrder > route.points.size()) return -1;
         ApiClient.PlaceOption point = route.points.get(walk.currentPointOrder - 1);
-        return (int) Math.round(meters(location.getLatitude(), location.getLongitude(),
+        int localDistance = (int) Math.round(meters(location.getLatitude(), location.getLongitude(),
                 point.lat, point.lon));
+        return RouteGroupSupport.boundaryDistance(route, walk, localDistance);
     }
 
     private void showGpsWaiting(String reason) {
@@ -2907,6 +2917,11 @@ public final class MapActivity extends ComponentActivity {
         if ("VISITING".equals(walk.phase) && route != null
                 && walk.currentPointOrder > 0
                 && walk.currentPointOrder <= route.points.size()) {
+            if (RouteGroupSupport.hasActiveGroup(route, walk)) {
+                updateGroupGuidance(latestUserLat, latestUserLon);
+                if (reason != null && !reason.isEmpty()) guidanceSubtitle.append(" · " + reason);
+                return;
+            }
             renderVisitArrivalCard(route.points.get(walk.currentPointOrder - 1).name);
             return;
         }
@@ -3180,15 +3195,33 @@ public final class MapActivity extends ComponentActivity {
                     point.name, i + 2);
             objects.addObject(new Marker(options));
         }
+        int childIndex = 0;
+        for (ApiClient.RouteWaypoint child : RouteGroupSupport.uniqueChildMarkers(route)) {
+            if (!Double.isFinite(child.lat) || !Double.isFinite(child.lon)) continue;
+            Image marker = labeledPinImage(application, "•", child.name, 0xFF2474FF);
+            routeMarkerImages.add(marker);
+            objects.addObject(new Marker(labeledMarkerOptions(child.lat, child.lon, marker,
+                    child.name, route.points.size() + 3 + childIndex++)));
+        }
 
-        if (route.path.size() >= 2) {
-            List<GeoPoint> geometry = new ArrayList<>(route.path.size());
-            for (ApiClient.GeoCoordinate coordinate : route.path) {
+        List<ApiClient.GeoCoordinate> cameraPath = new ArrayList<>();
+        int externalSegmentCount = 0;
+        for (ApiClient.RouteLegGeometry leg : route.legGeometries) {
+            if (leg.path != null && leg.path.size() >= 2) externalSegmentCount++;
+        }
+        if (externalSegmentCount == 0 && route.path.size() >= 2) externalSegmentCount = 1;
+        int segmentIndex = 0;
+        for (List<ApiClient.GeoCoordinate> segment : RouteGroupSupport.drawableSegments(route)) {
+            List<GeoPoint> geometry = new ArrayList<>(segment.size());
+            for (ApiClient.GeoCoordinate coordinate : segment) {
                 geometry.add(GeoPointExtraKt.GeoPoint(coordinate.lat, coordinate.lon));
+                cameraPath.add(coordinate);
             }
-            PolylineOptions line = new PolylineOptions(
-                    geometry, new LogicalPixel(5f), new Color(0xFF00A88F),
-                    0.0, null, null, true, "route", new ZIndex(1), null, null);
+            PolylineOptions line = new PolylineOptions(geometry, new LogicalPixel(5f),
+                    new Color(segmentIndex < externalSegmentCount
+                            ? 0xFF00A88F : 0xFF2474FF),
+                    0.0, null, null, true, "route-segment-" + segmentIndex++,
+                    new ZIndex(2), null, null);
             objects.addObject(new Polyline(line));
         }
 
@@ -3201,13 +3234,13 @@ public final class MapActivity extends ComponentActivity {
         }
         updateUserMarker(markerLat, markerLon);
 
-        if ((fitCameraToRoute || !restoredCamera) && !route.path.isEmpty()) {
-            double[] bounds = routeBounds(route.path);
-            rememberRouteCameraBounds(route.path, bounds);
+        if ((fitCameraToRoute || !restoredCamera) && !cameraPath.isEmpty()) {
+            double[] bounds = routeBounds(cameraPath);
+            rememberRouteCameraBounds(cameraPath, bounds);
             map.getCamera().move(camera(bounds[0], bounds[1], (float) bounds[2]),
                     Duration.ofMilliseconds(0), CameraAnimationType.LINEAR);
-        } else if (!route.path.isEmpty()) {
-            rememberRouteCameraBounds(route.path, routeBounds(route.path));
+        } else if (!cameraPath.isEmpty()) {
+            rememberRouteCameraBounds(cameraPath, routeBounds(cameraPath));
         }
         renderedRouteVersion = route.routeVersion;
     }
@@ -3427,12 +3460,14 @@ public final class MapActivity extends ComponentActivity {
 
     private void updateGuidance(double lat, double lon) {
         if (walk == null || !walk.success || route == null || !route.success
-                || route.path.size() < 2 || walk.currentPointOrder < 1
+                || walk.currentPointOrder < 1
                 || walk.currentPointOrder > route.points.size()) return;
         if ("VISITING".equals(walk.phase)) {
             renderVisitStopwatch(route.points.get(walk.currentPointOrder - 1).name);
+            if (RouteGroupSupport.hasActiveGroup(route, walk)) updateGroupGuidance(lat, lon);
             return;
         }
+        if (route.path.size() < 2) return;
         if (!Double.isFinite(lat) || !Double.isFinite(lon)) {
             lat = routeStartLat();
             lon = routeStartLon();
@@ -3444,6 +3479,55 @@ public final class MapActivity extends ComponentActivity {
         guidanceTurnIcon.setText(guidance.icon);
         mapRouteSummary.setVisibility(View.GONE);
         guidancePanel.setVisibility(View.VISIBLE);
+    }
+
+    private void updateGroupGuidance(double lat, double lon) {
+        ApiClient.RouteGroup group = RouteGroupSupport.groupForPoint(route, walk.currentPointOrder);
+        if (group == null) return;
+        if (!Double.isFinite(lat) || !Double.isFinite(lon)) {
+            lat = routeStartLat(); lon = routeStartLon();
+        }
+        if (routeViewModel.groupPointOrder != walk.currentPointOrder) {
+            routeViewModel.groupPointOrder = walk.currentPointOrder;
+            routeViewModel.groupLegIndex = 0;
+            routeViewModel.groupPathIndex = 0;
+        }
+        RouteGroupSupport.NavigationTarget target = RouteGroupSupport.navigationTarget(group,
+                lat, lon, routeViewModel.groupLegIndex, routeViewModel.groupPathIndex);
+        if (target == null) return;
+        routeViewModel.groupLegIndex = target.legIndex;
+        routeViewModel.groupPathIndex = target.pathIndex;
+        int minutes = Math.max(1, (int) Math.ceil(target.remainingMeters / 80.0));
+        guidanceLeadingIcon.setText("↗");
+        guidanceLeadingIcon.setBackground(UiKit.rounded(0xFFE8F0FF, 28, this));
+        guidanceLeadingIcon.setTextColor(0xFF2474FF);
+        guidanceTitle.setText("К ориентиру: " + target.waypoint.name);
+        guidanceSubtitle.setText("≈" + Math.max(0, target.remainingMeters) + " м · " + minutes
+                + " мин пешком · посещение продолжается");
+        guidanceDivider.setVisibility(View.VISIBLE);
+        guidanceTurnIcon.setVisibility(View.VISIBLE);
+        guidanceTurnIcon.setText("↑");
+        TurnHint turn = nextTurn(target.leg.path, target.pathIndex,
+                target.leg.path.size() - 1);
+        if (turn != null) {
+            String arrow = "направо".equals(turn.direction) ? "↱" : "↰";
+            guidanceTitle.setText(turn.distanceMeters <= 40
+                    ? "Поверните " + turn.direction
+                    : "Через " + roundedMeters(turn.distanceMeters) + " поверните "
+                    + turn.direction);
+            guidanceTurnIcon.setText(arrow);
+        }
+        mapRouteSummary.setVisibility(View.GONE);
+        guidancePanel.setVisibility(View.VISIBLE);
+        visitingNextCard.setVisibility(View.VISIBLE);
+        visitingNextTitle.setText("Сейчас: " + target.waypoint.name);
+        StringBuilder children = new StringBuilder("Маршрут внутри локации: ");
+        for (int i = 0; i < group.waypoints.size(); i++) {
+            if (i > 0) children.append(" · ");
+            children.append(group.waypoints.get(i).name);
+        }
+        visitingNextMeta.setText(children.toString());
+        visitingNextMeta.setVisibility(View.VISIBLE);
     }
 
     private GuidanceInfo guidanceInfo(double lat, double lon, ApiClient.PlaceOption target) {
@@ -3678,6 +3762,9 @@ public final class MapActivity extends ComponentActivity {
         long latestPositionSentAt;
         long lastPositionMeasurementElapsedMillis;
         int guidancePointOrder;
+        int groupPointOrder;
+        int groupLegIndex;
+        int groupPathIndex;
         int guidancePathIndex;
         String partnerOfferKey;
         long partnerOfferLastRequestElapsedMillis;

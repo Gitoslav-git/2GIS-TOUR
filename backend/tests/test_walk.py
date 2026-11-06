@@ -4,8 +4,9 @@ from uuid import uuid4
 
 import pytest
 
-from gulyay.models import (Filters, Route, RouteLeg, RoutePoint, SearchArea,
-                           StartWalk, WalkAction, WalkPosition, WalkState)
+from gulyay.models import (Filters, Route, RouteGroup, RouteLeg, RoutePoint,
+                           RouteWaypoint, RouteWaypointLeg, RouteZoneGeometry,
+                           SearchArea, StartWalk, WalkAction, WalkPosition, WalkState)
 from gulyay.walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
                          register_position, session_at, start_walk)
 
@@ -33,6 +34,133 @@ def route(points=2, total_minutes=120):
 def position(point, measured_at, accuracy=10):
     return WalkPosition(lat=point.lat, lon=point.lon, accuracyMeters=accuracy,
                         measuredAt=measured_at)
+
+
+def grouped_route():
+    itinerary = route(points=1, total_minutes=45)
+    point = itinerary.points[0]
+    first_lon = point.lon - 0.001
+    second_lon = point.lon + 0.001
+    square = lambda lon: [[
+        [lon - 0.0002, point.lat - 0.0002], [lon + 0.0002, point.lat - 0.0002],
+        [lon + 0.0002, point.lat + 0.0002], [lon - 0.0002, point.lat + 0.0002],
+        [lon - 0.0002, point.lat - 0.0002],
+    ]]
+    group = RouteGroup(
+        pointOrder=1, catalogId="msk-parent",
+        waypoints=[RouteWaypoint(
+            order=1, catalogId="msk-child", placeId="catalog:msk-child",
+            name="Child", lat=point.lat, lon=second_lon, relation="CLUSTER_MEMBER",
+        )],
+        waypointLegs=[RouteWaypointLeg(
+            fromWaypointOrder=0, toWaypointOrder=1,
+            distanceMeters=130, durationSeconds=100,
+            geometry=[(first_lon, point.lat), (second_lon, point.lat)],
+        )],
+        visitZone=RouteZoneGeometry(
+            type="MultiPolygon", coordinates=[square(first_lon), square(second_lon)],
+        ),
+    )
+    point = point.model_copy(update={
+        "lon": first_lon, "catalogId": "msk-parent",
+    })
+    return itinerary.model_copy(update={
+        "points": [point], "routeGroupsEnabled": True, "routeGroups": [group],
+    })
+
+
+def test_group_zone_creates_one_parent_visit_and_corridor_prevents_gap_exit():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = grouped_route()
+    point = itinerary.points[0]
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, _ = register_position(state, itinerary, position(point, start), start)
+    state, reached = register_position(
+        state, itinerary, position(point, start + timedelta(seconds=5)),
+        start + timedelta(seconds=5),
+    )
+    assert reached.pointReached is True
+    assert len(state.session.visits) == 1
+    assert state.session.visits[0].catalogId == "msk-parent"
+
+    gap = WalkPosition(
+        lat=point.lat, lon=point.lon + 0.001, accuracyMeters=10,
+        measuredAt=start + timedelta(seconds=10),
+    )
+    state, _ = register_position(state, itinerary, gap, gap.measuredAt)
+    state, gap_result = register_position(
+        state, itinerary,
+        gap.model_copy(update={"measuredAt": start + timedelta(seconds=15)}),
+        start + timedelta(seconds=15),
+    )
+    assert gap_result.pointExited is False
+    assert state.session.phase == "VISITING"
+    assert len(state.session.visits) == 1
+
+
+def test_group_requires_actual_zone_entry_and_completes_after_confirmed_exit():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = grouped_route()
+    point = itinerary.points[0]
+    near_but_outside = WalkPosition(
+        lat=point.lat + 0.0005, lon=point.lon, accuracyMeters=10, measuredAt=start,
+    )
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, _ = register_position(state, itinerary, near_but_outside, start)
+    state, result = register_position(
+        state, itinerary,
+        near_but_outside.model_copy(update={"measuredAt": start + timedelta(seconds=5)}),
+        start + timedelta(seconds=5),
+    )
+    assert result.pointReached is False
+
+    state, _ = register_position(
+        state, itinerary, position(point, start + timedelta(seconds=10)),
+        start + timedelta(seconds=10),
+    )
+    state, _ = register_position(
+        state, itinerary, position(point, start + timedelta(seconds=15)),
+        start + timedelta(seconds=15),
+    )
+    far = WalkPosition(
+        lat=point.lat + 0.003, lon=point.lon, accuracyMeters=10,
+        measuredAt=start + timedelta(seconds=20),
+    )
+    state, _ = register_position(state, itinerary, far, far.measuredAt)
+    state, exited = register_position(
+        state, itinerary,
+        far.model_copy(update={"measuredAt": start + timedelta(seconds=25)}),
+        start + timedelta(seconds=25),
+    )
+    assert exited.pointExited is True
+    assert state.session.status == "COMPLETED"
+    assert state.session.currentPointOrder is None
+    assert len(state.session.visits) == 1
+
+
+def test_group_visit_pause_resume_and_stop_keep_single_parent_timer():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = grouped_route()
+    point = itinerary.points[0]
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, _ = register_position(state, itinerary, position(point, start), start)
+    state, _ = register_position(
+        state, itinerary, position(point, start + timedelta(seconds=5)),
+        start + timedelta(seconds=5),
+    )
+    state = apply_action(
+        state, itinerary, WalkAction(action="PAUSE"), start + timedelta(seconds=15),
+    )
+    state = apply_action(
+        state, itinerary, WalkAction(action="RESUME"), start + timedelta(seconds=45),
+    )
+    stopped = apply_action(
+        state, itinerary, WalkAction(action="STOP"), start + timedelta(seconds=55),
+    )
+    assert stopped.session.status == "STOPPED"
+    assert len(stopped.session.visits) == 1
+    assert stopped.session.visits[0].catalogId == "msk-parent"
+    assert stopped.session.visits[0].durationSeconds == 20
 
 
 def test_two_accurate_measurements_five_seconds_apart_reach_point():

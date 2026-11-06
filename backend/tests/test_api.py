@@ -14,7 +14,9 @@ from gulyay.api import (CLIENT_REQUESTS, IDEMPOTENT_REVISIONS, IDEMPOTENT_ROUTES
                         _client_rate_limit, _prune_rate_state, _source_key)
 from gulyay.catalog import CatalogPlaceProvider, PlaceCatalog
 from gulyay.geo import GeoRateLimited, GeoRouteNotFound, GeoUnavailable
-from gulyay.models import IntentExtraction, PlaceCandidate, RouteLeg, SearchArea
+from gulyay.models import (IntentExtraction, PlaceCandidate, RouteGroup, RouteLeg,
+                           RouteWaypoint, RouteWaypointLeg, RouteZoneGeometry,
+                           SearchArea)
 from gulyay.repository import RouteRepository
 
 client = TestClient(app)
@@ -680,6 +682,73 @@ def _chat_edit(headers, route, message):
     return client.post(f"/v1/routes/{route['routeId']}/revisions", headers=headers,
                        json={"baseVersion": route["routeVersion"],
                              "mode": "CHAT_REVISION", "message": message})
+
+
+def _mark_route_grouped(session, route):
+    owner = UUID(session)
+    current, payload = repository.get(UUID(route["routeId"]), owner)
+    point = current.points[0]
+    group = RouteGroup(
+        pointOrder=1, catalogId="msk001",
+        waypoints=[RouteWaypoint(
+            order=1, catalogId="msk002", placeId="catalog:msk002",
+            name="child", lat=point.lat, lon=point.lon, relation="CONTAINS",
+        )],
+        waypointLegs=[RouteWaypointLeg(
+            fromWaypointOrder=0, toWaypointOrder=1,
+            distanceMeters=10, durationSeconds=10,
+            geometry=[(point.lon, point.lat), (point.lon, point.lat)],
+        )],
+        visitZone=RouteZoneGeometry(type="Polygon", coordinates=[[
+            [point.lon - .001, point.lat - .001], [point.lon + .001, point.lat - .001],
+            [point.lon + .001, point.lat + .001], [point.lon - .001, point.lat + .001],
+            [point.lon - .001, point.lat - .001],
+        ]]),
+    )
+    grouped = current.model_copy(update={
+        "routeVersion": current.routeVersion + 1,
+        "routeGroupsEnabled": True, "routeGroups": [group],
+    })
+    assert repository.replace(grouped, owner, payload, current.routeVersion)
+    return grouped
+
+
+def test_grouped_route_rejects_mutation_but_keeps_conversation_reply():
+    session, headers, route = _create_chat_edit_route()
+    grouped = _mark_route_grouped(session, route)
+    edit = client.post(f"/v1/routes/{route['routeId']}/revisions", headers=headers, json={
+        "baseVersion": grouped.routeVersion, "mode": "CHANGE_QUERY", "query": "new route",
+    })
+    assert edit.status_code == 409
+    assert edit.json()["error"]["code"] == "GROUPED_ROUTE_EDIT_UNSUPPORTED"
+    reply = client.post(f"/v1/routes/{route['routeId']}/revisions", headers=headers, json={
+        "baseVersion": grouped.routeVersion, "mode": "CHAT_REVISION",
+        "message": "Почему выбрал это место?",
+    })
+    assert reply.status_code == 200
+    assert "reply" in reply.json()
+    assert reply.json()["routeVersion"] == grouped.routeVersion
+
+
+def test_grouped_route_rejects_partner_insertion_without_changing_version():
+    session, headers, route = _create_chat_edit_route()
+    grouped = _mark_route_grouped(session, route)
+    started = client.post(
+        f"/v1/routes/{route['routeId']}/walks", headers=headers,
+        json={"routeVersion": grouped.routeVersion},
+    )
+    assert started.status_code == 200
+    response = client.post(
+        f"/v1/walks/{started.json()['walkId']}/insert-suggested-place",
+        headers=headers, json={
+            "expectedRouteVersion": grouped.routeVersion,
+            "partnerBrandId": "brand", "dgisPlaceId": "branch",
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "GROUPED_ROUTE_EDIT_UNSUPPORTED"
+    stored = client.get(f"/v1/routes/{route['routeId']}", headers=headers)
+    assert stored.json()["routeVersion"] == grouped.routeVersion
 
 
 def test_chat_remove_keeps_every_other_point_and_order():

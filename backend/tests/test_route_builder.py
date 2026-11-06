@@ -53,6 +53,8 @@ def test_builds_route_only_from_provider_places_and_legs():
     assert route.requestedMinutes == 180
     assert route.unusedMinutes == 130
     assert route.approximateStart is True
+    assert route.routeGroupsEnabled is False
+    assert route.routeGroups == []
 
 
 def test_device_location_is_used_as_real_first_leg_start():

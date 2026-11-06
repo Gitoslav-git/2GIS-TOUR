@@ -32,6 +32,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Toast;
 import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -478,7 +479,7 @@ public final class MainActivity extends Activity {
         if (routeId == null && savedInstanceState == null) {
             result.setText("Версия 0.6 поддерживает ограничение пеших переходов и прохождение маршрута.");
         }
-        editPointsButton.setEnabled(routeId != null);
+        editPointsButton.setEnabled(routeId != null && !currentRouteHasGroups());
         startWalkButton.setEnabled(routeId != null);
         mapButton.setEnabled(routeId != null);
         submit.setOnClickListener(view -> generate());
@@ -774,12 +775,12 @@ public final class MainActivity extends Activity {
                     updateQueryEditActions();
                     if (activeWalkBeforeChange != null) clearActiveWalkState();
                     submit.setText("▶");
-                    editPointsButton.setEnabled(true);
                     startWalkButton.setEnabled(true);
                     mapButton.setEnabled(true);
                     currentPoints.clear();
                     currentPoints.addAll(finalResponse.points);
                     routeSnapshot = ApiClient.routeSnapshot(finalResponse);
+                    editPointsButton.setEnabled(!currentRouteHasGroups());
                     pointEditor.setVisibility(View.GONE);
                     persistRouteState(text);
                     openMap();
@@ -805,6 +806,11 @@ public final class MainActivity extends Activity {
 
     private void loadPointEditor() {
         if (requestInFlight || routeId == null) return;
+        if (currentRouteHasGroups()) {
+            Toast.makeText(this,
+                    "Изменение точек маршрутной группы пока недоступно.", Toast.LENGTH_LONG).show();
+            return;
+        }
         pointEditor.setVisibility(View.VISIBLE);
         editorStatus.setText("Загружаем актуальную версию маршрута…");
         setNetworkBusy(true);
@@ -825,7 +831,10 @@ public final class MainActivity extends Activity {
                                 "Старый маршрут отсутствовал на сервере — построен новый.\n\n" +
                                         recreated.message,
                                 recreated.routeId, recreated.routeVersion, 0, null,
-                                recreated.points);
+                                recreated.points, recreated.path);
+                        response.legGeometries = recreated.legGeometries;
+                        response.routeGroupsEnabled = recreated.routeGroupsEnabled;
+                        response.routeGroups = recreated.routeGroups;
                     } else {
                         response = recreated;
                     }
@@ -1017,7 +1026,7 @@ public final class MainActivity extends Activity {
         submit.setEnabled(!busy);
         returnToRouteButton.setEnabled(!busy);
         if (routeControlButton != null) routeControlButton.setEnabled(!busy);
-        editPointsButton.setEnabled(!busy && routeId != null);
+        editPointsButton.setEnabled(!busy && routeId != null && !currentRouteHasGroups());
         startWalkButton.setEnabled(!busy && routeId != null);
         mapButton.setEnabled(!busy && routeId != null);
         resetRouteButton.setEnabled(!busy && routeId != null);
@@ -1040,7 +1049,7 @@ public final class MainActivity extends Activity {
             if (!requestInFlight) {
                 submit.setEnabled(true);
                 returnToRouteButton.setEnabled(true);
-                editPointsButton.setEnabled(routeId != null);
+                editPointsButton.setEnabled(routeId != null && !currentRouteHasGroups());
                 startWalkButton.setEnabled(routeId != null);
                 mapButton.setEnabled(routeId != null);
                 resetRouteButton.setEnabled(routeId != null);
@@ -2396,7 +2405,7 @@ public final class MainActivity extends Activity {
             resetRouteButton.setEnabled(false);
         } else if (!requestInFlight) {
             submit.setEnabled(true);
-            editPointsButton.setEnabled(routeId != null);
+            editPointsButton.setEnabled(routeId != null && !currentRouteHasGroups());
             resetRouteButton.setEnabled(routeId != null);
         }
         refreshHomeRouteCard();
@@ -2406,6 +2415,11 @@ public final class MainActivity extends Activity {
         return startLat != null && startLon != null && startAccuracyMeters != null
                 && new RouteStartLocation(startLat, startLon, startAccuracyMeters,
                 startMeasuredAtMillis).isFreshAndAccurate(System.currentTimeMillis());
+    }
+
+    private boolean currentRouteHasGroups() {
+        ApiClient.Result saved = ApiClient.routeFromSnapshot(routeSnapshot);
+        return saved != null && saved.routeGroups != null && !saved.routeGroups.isEmpty();
     }
 
     @Override protected void onDestroy() {

@@ -13,6 +13,15 @@ final class VisitStopwatch {
         return (int) Math.min(Integer.MAX_VALUE, Math.max(0L, backendSeconds) + localSeconds);
     }
 
+    static int reconciledBaseSeconds(int backendSeconds, int cachedBaseSeconds,
+                                     long cachedSyncedAtElapsedMillis, long nowElapsedMillis,
+                                     boolean cachedRunning, boolean sameVisit) {
+        if (!sameVisit) return Math.max(0, backendSeconds);
+        return Math.max(Math.max(0, backendSeconds), elapsedSeconds(
+                cachedBaseSeconds, cachedSyncedAtElapsedMillis, nowElapsedMillis,
+                cachedRunning));
+    }
+
     static String format(int seconds) {
         int safe = Math.max(0, seconds);
         int hours = safe / 3600;

@@ -661,13 +661,16 @@ def test_insert_suggested_place_updates_route_and_visiting_walk_atomically(tmp_p
         leaving, _ = register_position(
             persisted_walk, persisted_route, outside, now=first_exit_at,
         )
-        left, progress = register_position(
-            leaving, persisted_route,
-            outside.model_copy(update={
-                "measuredAt": first_exit_at + timedelta(seconds=6),
-            }),
-            now=first_exit_at + timedelta(seconds=6),
-        )
+        left = leaving
+        for seconds in (10, 20, 30):
+            measured = first_exit_at + timedelta(seconds=seconds)
+            left, progress = register_position(
+                left, persisted_route,
+                outside.model_copy(update={"measuredAt": measured}),
+                now=measured,
+            )
+            if seconds < 30:
+                assert progress.pointExited is False
         assert progress.pointExited is True
         assert left.session.phase == "MOVING"
         assert left.session.currentPointOrder == 2

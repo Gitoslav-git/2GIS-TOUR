@@ -6,12 +6,16 @@ from uuid import uuid4
 
 from .models import (Route, RouteGroup, StartWalk, Visit, WalkAction, WalkPosition,
                      WalkProgress, WalkSession, WalkState)
-from .visit_zones import distance_to_geometry_meters, distance_to_polyline_meters
+from .visit_zones import VisitZones, distance_to_geometry_meters
 
 ARRIVAL_RADIUS_METERS = 75
-EXIT_RADIUS_METERS = 115
+POINT_EXIT_RADIUS_METERS = 95
+GEOJSON_EXIT_RADIUS_METERS = 70
 MAX_ACCURACY_METERS = 50
-CONFIRMATION_INTERVAL_SECONDS = 5
+ARRIVAL_CONFIRMATION_INTERVAL_SECONDS = 10
+EXIT_CONFIRMATION_INTERVAL_SECONDS = 10
+EXIT_MIN_DURATION_SECONDS = 30
+EXIT_REQUIRED_MEASUREMENTS = 4
 
 
 class WalkInvalidState(Exception):
@@ -36,7 +40,9 @@ def start_walk(route: Route, payload: StartWalk,
 
 
 def register_position(state: WalkState, route: Route, position: WalkPosition,
-                      now: datetime | None = None) -> tuple[WalkState, WalkProgress]:
+                      now: datetime | None = None,
+                      visit_zones: VisitZones | None = None,
+                      ) -> tuple[WalkState, WalkProgress]:
     state = _normalize_legacy_visit(state)
     session = state.session
     measured = position.measuredAt.astimezone(timezone.utc)
@@ -51,20 +57,27 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
         raise WalkInvalidPosition()
     point = route.points[session.currentPointOrder - 1]
     group = _route_group(route, session.currentPointOrder)
-    if group is None:
+    zone_geometry = _visit_zone_geometry(
+        route, session.currentPointOrder, visit_zones,
+    )
+    if zone_geometry is None:
         distance = round(_distance_meters(position.lat, position.lon, point.lat, point.lon))
-        inside_group = False
+        inside_zone = False
     else:
-        zone_distance, inside_group = distance_to_geometry_meters(
-            position.lat, position.lon, group.visitZone.model_dump(),
+        zone_distance, inside_zone = distance_to_geometry_meters(
+            position.lat, position.lon, zone_geometry,
         )
         distance = round(zone_distance)
     if session.phase == "VISITING":
-        if group is not None:
-            distance = round(_group_presence_distance(
-                position, group, zone_distance, state.lastPosition,
-            ))
-        return _register_visit_position(state, route, measured, position, distance)
+        direct_next_point_order = _direct_next_zone_order(
+            route, session.currentPointOrder, position, inside_zone, visit_zones,
+        )
+        return _register_visit_position(
+            state, route, measured, position, distance,
+            (GEOJSON_EXIT_RADIUS_METERS if zone_geometry is not None
+             else POINT_EXIT_RADIUS_METERS),
+            direct_next_point_order,
+        )
     reached = False
     session = session.model_copy(update={
         "estimatedRemainingMinutes": _remaining_minutes(
@@ -78,7 +91,7 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
     }
     accurate_and_near = (
         position.accuracyMeters <= MAX_ACCURACY_METERS
-        and (inside_group if group is not None else distance <= ARRIVAL_RADIUS_METERS)
+        and (inside_zone if zone_geometry is not None else distance <= ARRIVAL_RADIUS_METERS)
     )
     if not accurate_and_near:
         update.update({"proximityStartedAt": None, "proximityPointOrder": None})
@@ -88,7 +101,8 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
             "proximityStartedAt": measured,
             "proximityPointOrder": session.currentPointOrder,
         })
-    elif (measured - state.proximityStartedAt).total_seconds() >= CONFIRMATION_INTERVAL_SECONDS:
+    elif ((measured - state.proximityStartedAt).total_seconds()
+          >= ARRIVAL_CONFIRMATION_INTERVAL_SECONDS):
         reached = True
         visits = [*session.visits, Visit(
             pointOrder=session.currentPointOrder, reachedAt=measured,
@@ -102,12 +116,19 @@ def register_position(state: WalkState, route: Route, position: WalkPosition,
         update.update({
             "session": session, "proximityStartedAt": None,
             "proximityPointOrder": None, "exitStartedAt": None,
-            "exitPointOrder": None, "visitPausedSeconds": 0,
+            "exitPointOrder": None, "exitLastConfirmedAt": None,
+            "exitConfirmationCount": 0, "exitDirectNextPointOrder": None,
+            "visitPausedSeconds": 0,
             "finalPointPausedSeconds": 0,
         })
     updated = state.model_copy(update=update)
     return updated, WalkProgress(
-        walk=updated.session, pointReached=reached, distanceMeters=distance,
+        walk=updated.session, pointReached=reached,
+        exitThresholdMeters=(
+            GEOJSON_EXIT_RADIUS_METERS if zone_geometry is not None
+            else POINT_EXIT_RADIUS_METERS
+        ),
+        distanceMeters=distance,
     )
 
 
@@ -149,6 +170,8 @@ def apply_action(state: WalkState, route: Route, payload: WalkAction,
             "finalPointPausedSeconds": 0,
             "proximityStartedAt": None, "proximityPointOrder": None,
             "exitStartedAt": None, "exitPointOrder": None,
+            "exitLastConfirmedAt": None, "exitConfirmationCount": 0,
+            "exitDirectNextPointOrder": None,
         })
     if payload.action == "STOP":
         if session.status not in {"ACTIVE", "PAUSED"}:
@@ -176,6 +199,8 @@ def apply_action(state: WalkState, route: Route, payload: WalkAction,
             "pausedAt": None, "pausedSeconds": paused_seconds,
             "proximityStartedAt": None, "proximityPointOrder": None,
             "exitStartedAt": None, "exitPointOrder": None,
+            "exitLastConfirmedAt": None, "exitConfirmationCount": 0,
+            "exitDirectNextPointOrder": None,
             "visitPausedSeconds": 0, "finalPointPausedSeconds": 0,
         })
     raise WalkInvalidState()
@@ -189,7 +214,10 @@ def session_at(state: WalkState, now: datetime | None = None) -> WalkSession:
 
 def _register_visit_position(state: WalkState, route: Route, measured: datetime,
                              position: WalkPosition,
-                             distance: int) -> tuple[WalkState, WalkProgress]:
+                             distance: int,
+                             exit_threshold_meters: int,
+                             direct_next_point_order: int | None,
+                             ) -> tuple[WalkState, WalkProgress]:
     session = _session_with_visit_elapsed(state, measured)
     update: dict = {
         "lastMeasuredAt": measured,
@@ -198,19 +226,39 @@ def _register_visit_position(state: WalkState, route: Route, measured: datetime,
     }
     accurate_and_outside = (
         position.accuracyMeters <= MAX_ACCURACY_METERS
-        and distance > EXIT_RADIUS_METERS
+        and (distance > exit_threshold_meters or direct_next_point_order is not None)
     )
     exited = False
+    reached_next = False
     if not accurate_and_outside:
-        update.update({"exitStartedAt": None, "exitPointOrder": None})
+        update.update(_cleared_exit_confirmation())
     elif (state.exitPointOrder != session.currentPointOrder
-          or state.exitStartedAt is None):
+          or state.exitStartedAt is None
+          or state.exitLastConfirmedAt is None
+          or state.exitConfirmationCount < 1
+          or state.exitDirectNextPointOrder != direct_next_point_order):
         update.update({
             "exitStartedAt": measured,
             "exitPointOrder": session.currentPointOrder,
+            "exitLastConfirmedAt": measured,
+            "exitConfirmationCount": 1,
+            "exitDirectNextPointOrder": direct_next_point_order,
         })
-    elif (measured - state.exitStartedAt).total_seconds() >= CONFIRMATION_INTERVAL_SECONDS:
-        exited = True
+    elif ((measured - state.exitLastConfirmedAt).total_seconds()
+          >= EXIT_CONFIRMATION_INTERVAL_SECONDS):
+        confirmation_count = min(
+            EXIT_REQUIRED_MEASUREMENTS, state.exitConfirmationCount + 1,
+        )
+        update.update({
+            "exitLastConfirmedAt": measured,
+            "exitConfirmationCount": confirmation_count,
+        })
+        exited = (
+            confirmation_count >= EXIT_REQUIRED_MEASUREMENTS
+            and (measured - state.exitStartedAt).total_seconds()
+            >= EXIT_MIN_DURATION_SECONDS
+        )
+    if exited:
         visits = list(session.visits)
         duration = session.visitElapsedSeconds
         if visits and visits[-1].pointOrder == session.currentPointOrder:
@@ -226,6 +274,23 @@ def _register_visit_position(state: WalkState, route: Route, measured: datetime,
                 **common, "status": "COMPLETED", "currentPointOrder": None,
                 "endedAt": measured, "estimatedRemainingMinutes": 0,
             })
+        elif direct_next_point_order is not None:
+            next_group = _route_group(route, direct_next_point_order)
+            next_point = route.points[direct_next_point_order - 1]
+            visits.append(Visit(
+                pointOrder=direct_next_point_order, reachedAt=measured,
+                catalogId=(next_group.catalogId if next_group is not None
+                           else next_point.catalogId),
+            ))
+            reached_next = True
+            session = session.model_copy(update={
+                "phase": "VISITING", "visits": visits,
+                "currentPointOrder": direct_next_point_order,
+                "visitStartedAt": measured, "visitElapsedSeconds": 0,
+                "estimatedRemainingMinutes": _remaining_minutes(
+                    route, session.startedAt, measured, state.pausedSeconds,
+                ),
+            })
         else:
             session = session.model_copy(update={
                 **common, "currentPointOrder": session.currentPointOrder + 1,
@@ -234,13 +299,17 @@ def _register_visit_position(state: WalkState, route: Route, measured: datetime,
                 ),
             })
         update.update({
-            "session": session, "exitStartedAt": None, "exitPointOrder": None,
+            "session": session, **_cleared_exit_confirmation(),
             "proximityStartedAt": None, "proximityPointOrder": None,
             "visitPausedSeconds": 0, "finalPointPausedSeconds": 0,
         })
     updated = state.model_copy(update=update)
     return updated, WalkProgress(
-        walk=updated.session, pointReached=False, pointExited=exited,
+        walk=updated.session, pointReached=reached_next, pointExited=exited,
+        exitConfirmationPending=(
+            not exited and updated.exitConfirmationCount > 0
+        ),
+        exitThresholdMeters=exit_threshold_meters,
         distanceMeters=distance,
     )
 
@@ -300,26 +369,41 @@ def _route_group(route: Route, point_order: int) -> RouteGroup | None:
                  if group.pointOrder == point_order), None)
 
 
-def _group_presence_distance(position: WalkPosition, group: RouteGroup,
-                             zone_distance: float,
-                             previous: WalkPosition | None) -> float:
-    """Keep a visit during continuous motion along a verified inter-part leg."""
-    distances = [zone_distance]
-    if previous is not None and previous.accuracyMeters <= MAX_ACCURACY_METERS:
-        _, previous_inside = distance_to_geometry_meters(
-            previous.lat, previous.lon, group.visitZone.model_dump(),
-        )
-        for leg in group.waypointLegs:
-            if not leg.geometry:
-                continue
-            previous_distance = distance_to_polyline_meters(
-                previous.lat, previous.lon, leg.geometry,
-            )
-            if previous_inside or previous_distance <= EXIT_RADIUS_METERS:
-                distances.append(distance_to_polyline_meters(
-                    position.lat, position.lon, leg.geometry,
-                ))
-    return min(distances)
+def _direct_next_zone_order(route: Route, current_order: int,
+                            position: WalkPosition,
+                            inside_current: bool,
+                            visit_zones: VisitZones | None) -> int | None:
+    """Recognize a real zone-to-zone transition without applying the 70 m buffer."""
+    next_order = current_order + 1
+    if inside_current or next_order > len(route.points):
+        return None
+    next_geometry = _visit_zone_geometry(route, next_order, visit_zones)
+    if next_geometry is None:
+        return None
+    _, inside_next = distance_to_geometry_meters(
+        position.lat, position.lon, next_geometry,
+    )
+    return next_order if inside_next else None
+
+
+def _visit_zone_geometry(route: Route, point_order: int,
+                         visit_zones: VisitZones | None) -> dict | None:
+    group = _route_group(route, point_order)
+    if group is not None:
+        return group.visitZone.model_dump()
+    point = route.points[point_order - 1]
+    if visit_zones is None or not point.catalogId:
+        return None
+    zone = visit_zones.get(point.catalogId)
+    return zone.geometry if zone is not None else None
+
+
+def _cleared_exit_confirmation() -> dict:
+    return {
+        "exitStartedAt": None, "exitPointOrder": None,
+        "exitLastConfirmedAt": None, "exitConfirmationCount": 0,
+        "exitDirectNextPointOrder": None,
+    }
 
 
 def _utc(value: datetime | None) -> datetime:

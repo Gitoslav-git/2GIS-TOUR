@@ -143,21 +143,43 @@ public class MainActivityRecoveryTest {
     }
 
     @Test public void stationaryFreshMeasurementsRemainEligibleWithoutMovement() {
-        assertEquals(12_000L, PositionSubmissionPolicy.LOCATION_UPDATE_INTERVAL_MILLIS);
+        assertEquals(10_000L, PositionSubmissionPolicy.LOCATION_UPDATE_INTERVAL_MILLIS);
+        assertEquals(75, MapActivity.ARRIVAL_RADIUS_METERS);
+        assertEquals(95, MapActivity.POINT_EXIT_RADIUS_METERS);
         assertTrue(PositionSubmissionPolicy.isFresh(10_000L, 10_000L, 0L));
         assertTrue(PositionSubmissionPolicy.isFresh(15_000L, 15_000L, 10_000L));
         assertFalse(PositionSubmissionPolicy.isFresh(10_000L, 15_000L, 10_000L));
         assertFalse(PositionSubmissionPolicy.isFresh(10_000L, 45_001L, 0L));
     }
 
-    @Test public void positionPolicyAllowsTwoThenWaitsForRollingWindow() {
+    @Test public void positionPolicyKeepsTenSecondCadence() {
         assertEquals(0L, PositionSubmissionPolicy.delayUntilSlot(10_000L, 0L, 0L));
-        assertEquals(5_000L,
+        assertEquals(10_000L,
                 PositionSubmissionPolicy.delayUntilSlot(10_000L, 0L, 10_000L));
-        assertEquals(55_000L,
+        assertEquals(10_000L,
                 PositionSubmissionPolicy.delayUntilSlot(15_000L, 10_000L, 15_000L));
+        assertEquals(5_000L,
+                PositionSubmissionPolicy.delayUntilSlot(20_000L, 10_000L, 15_000L));
+        assertEquals(0L,
+                PositionSubmissionPolicy.delayUntilSlot(25_000L, 10_000L, 15_000L));
         assertEquals(0L,
                 PositionSubmissionPolicy.delayUntilSlot(70_000L, 10_000L, 15_000L));
+        assertEquals(15_000L, PositionSubmissionPolicy.retryDelay(20_000L, 35_000L));
+        assertEquals(0L, PositionSubmissionPolicy.retryDelay(35_000L, 35_000L));
+        assertTrue(PositionSubmissionPolicy.shouldRetryPosition(true, null));
+        assertTrue(PositionSubmissionPolicy.shouldRetryPosition(false, "RATE_LIMITED"));
+        assertFalse(PositionSubmissionPolicy.shouldRetryPosition(false, "VALIDATION_ERROR"));
+        assertTrue(PositionSubmissionPolicy.keepVisitTimerVisible("ACTIVE", "VISITING"));
+        assertFalse(PositionSubmissionPolicy.keepVisitTimerVisible("ACTIVE", "MOVING"));
+    }
+
+    @Test public void directZoneExitKeepsAndroidConfirmationPending() {
+        ApiClient.WalkResult pending = new ApiClient.WalkResult(true, "", "walk", "ACTIVE",
+                1, 30, false, 20, null, 0, "VISITING", 40, false, true, 70);
+        assertTrue(pending.exitConfirmationPending);
+        assertFalse(pending.pointExited);
+        assertEquals(20, pending.distanceMeters);
+        assertEquals(70, pending.exitThresholdMeters);
     }
 
     @Test public void visitStopwatchCountsUpAndFreezesWhilePaused() {
@@ -165,6 +187,12 @@ public class MainActivityRecoveryTest {
         assertEquals(5, VisitStopwatch.elapsedSeconds(0, 10_000L, 15_000L, true));
         assertEquals(65, VisitStopwatch.elapsedSeconds(60, 10_000L, 15_000L, true));
         assertEquals(60, VisitStopwatch.elapsedSeconds(60, 10_000L, 25_000L, false));
+        assertEquals(75, VisitStopwatch.reconciledBaseSeconds(
+                70, 60, 10_000L, 25_000L, true, true));
+        assertEquals(70, VisitStopwatch.reconciledBaseSeconds(
+                70, 60, 10_000L, 25_000L, true, false));
+        assertEquals(60, VisitStopwatch.reconciledBaseSeconds(
+                55, 60, 10_000L, 25_000L, false, true));
         assertEquals("00:00", VisitStopwatch.format(0));
         assertEquals("00:33", VisitStopwatch.format(33));
         assertEquals("01:05", VisitStopwatch.format(65));

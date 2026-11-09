@@ -387,7 +387,7 @@ def test_walk_start_arrival_pause_resume_and_stop():
     })
     second = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
         "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,
-        "measuredAt": (first_time + timedelta(seconds=5)).isoformat(),
+        "measuredAt": (first_time + timedelta(seconds=10)).isoformat(),
     })
     assert first.status_code == second.status_code == 200
     assert first.json()["pointReached"] is False
@@ -399,9 +399,15 @@ def test_walk_start_arrival_pause_resume_and_stop():
     assert second.json()["walk"]["visitElapsedSeconds"] == 0
     assert second.json()["walk"]["finalPointVisitStartedAt"] is None
     assert len(second.json()["walk"]["visits"]) == 1
+    for offset in (20, 30, 40, 50, 60, 70):
+        accepted = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
+            "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,
+            "measuredAt": (first_time + timedelta(seconds=offset)).isoformat(),
+        })
+        assert accepted.status_code == 200
     limited = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
         "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,
-        "measuredAt": (first_time + timedelta(seconds=10)).isoformat(),
+        "measuredAt": (first_time + timedelta(seconds=80)).isoformat(),
     })
     assert limited.status_code == 429
     assert limited.json()["error"]["details"]["dependency"] == "geolocation"
@@ -423,7 +429,7 @@ def test_walk_api_last_point_visiting_then_completes_only_after_confirmed_exit()
     walk_id = started.json()["walkId"]
     measured_at = datetime.now(timezone.utc)
 
-    for offset in (0, 5):
+    for offset in (0, 10):
         arrival = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
             "lat": point["lat"], "lon": point["lon"], "accuracyMeters": 10,
             "measuredAt": (measured_at + timedelta(seconds=offset)).isoformat(),
@@ -436,23 +442,26 @@ def test_walk_api_last_point_visiting_then_completes_only_after_confirmed_exit()
     assert visiting["currentPointOrder"] == 1
     assert visiting["visits"][0]["leftAt"] is None
 
-    # The production limiter allows only two positions per minute. Advancing its
-    # window here isolates the transition contract from the separately tested limiter.
-    POSITION_REQUESTS.clear()
-    for offset in (65, 70):
+    # Initial detection plus three ten-second confirmations fits the aligned
+    # six-position rolling-minute limit together with the two arrival samples.
+    for offset in (65, 75, 85, 95):
         leaving = client.post(f"/v1/walks/{walk_id}/positions", headers=headers, json={
             "lat": point["lat"] + 0.002, "lon": point["lon"], "accuracyMeters": 10,
             "measuredAt": (measured_at + timedelta(seconds=offset)).isoformat(),
         })
         assert leaving.status_code == 200
+        assert leaving.json()["exitThresholdMeters"] == 95
+        if offset < 95:
+            assert leaving.json()["exitConfirmationPending"] is True
 
     completed = leaving.json()["walk"]
     assert leaving.json()["pointExited"] is True
+    assert leaving.json()["exitConfirmationPending"] is False
     assert completed["status"] == "COMPLETED"
     assert completed["phase"] == "MOVING"
     assert completed["currentPointOrder"] is None
     assert completed["visits"][0]["leftAt"] is not None
-    assert completed["visits"][0]["durationSeconds"] == 65
+    assert completed["visits"][0]["durationSeconds"] == 85
 
 
 def test_walk_actions_require_valid_state_and_active_walk_is_unique():

@@ -427,6 +427,8 @@ final class ApiClient {
         final String phase;
         final int visitElapsedSeconds;
         final boolean pointExited;
+        final boolean exitConfirmationPending;
+        final int exitThresholdMeters;
         boolean transientFailure;
 
         WalkResult(boolean success, String message, String walkId, String status,
@@ -442,7 +444,7 @@ final class ApiClient {
                    int distanceMeters, String errorCode, int retryAfterSeconds) {
             this(success, message, walkId, status, currentPointOrder, remainingMinutes,
                     pointReached, distanceMeters, errorCode, retryAfterSeconds,
-                    "MOVING", 0, false);
+                    "MOVING", 0, false, false, 95);
         }
 
         WalkResult(boolean success, String message, String walkId, String status,
@@ -450,6 +452,27 @@ final class ApiClient {
                    int distanceMeters, String errorCode, int retryAfterSeconds,
                    String phase, int visitElapsedSeconds,
                    boolean pointExited) {
+            this(success, message, walkId, status, currentPointOrder, remainingMinutes,
+                    pointReached, distanceMeters, errorCode, retryAfterSeconds, phase,
+                    visitElapsedSeconds, pointExited, false, 95);
+        }
+
+        WalkResult(boolean success, String message, String walkId, String status,
+                   int currentPointOrder, int remainingMinutes, boolean pointReached,
+                   int distanceMeters, String errorCode, int retryAfterSeconds,
+                   String phase, int visitElapsedSeconds,
+                   boolean pointExited, boolean exitConfirmationPending) {
+            this(success, message, walkId, status, currentPointOrder, remainingMinutes,
+                    pointReached, distanceMeters, errorCode, retryAfterSeconds, phase,
+                    visitElapsedSeconds, pointExited, exitConfirmationPending, 95);
+        }
+
+        WalkResult(boolean success, String message, String walkId, String status,
+                   int currentPointOrder, int remainingMinutes, boolean pointReached,
+                   int distanceMeters, String errorCode, int retryAfterSeconds,
+                   String phase, int visitElapsedSeconds,
+                   boolean pointExited, boolean exitConfirmationPending,
+                   int exitThresholdMeters) {
             this.success = success;
             this.message = message;
             this.walkId = walkId;
@@ -463,6 +486,8 @@ final class ApiClient {
             this.phase = phase;
             this.visitElapsedSeconds = visitElapsedSeconds;
             this.pointExited = pointExited;
+            this.exitConfirmationPending = exitConfirmationPending;
+            this.exitThresholdMeters = Math.max(1, exitThresholdMeters);
             this.transientFailure = false;
         }
     }
@@ -1017,6 +1042,8 @@ final class ApiClient {
             return walkFromJson(walk,
                     response.optBoolean("pointReached", false),
                     response.optBoolean("pointExited", false),
+                    response.optBoolean("exitConfirmationPending", false),
+                    response.optInt("exitThresholdMeters", 95),
                     response.has("distanceMeters") && !response.isNull("distanceMeters")
                             ? response.getInt("distanceMeters") : -1);
         } catch (Exception error) {
@@ -1079,11 +1106,14 @@ final class ApiClient {
     }
 
     private static WalkResult walkFromJson(JSONObject walk) throws Exception {
-        return walkFromJson(walk, false, false, -1);
+        return walkFromJson(walk, false, false, false, 95, -1);
     }
 
     private static WalkResult walkFromJson(JSONObject walk, boolean pointReached,
-                                           boolean pointExited, int distance) throws Exception {
+                                           boolean pointExited,
+                                           boolean exitConfirmationPending,
+                                           int exitThresholdMeters,
+                                           int distance) throws Exception {
         String walkStatus = walk.getString("status");
         int order = walk.has("currentPointOrder") && !walk.isNull("currentPointOrder")
                 ? walk.getInt("currentPointOrder") : 0;
@@ -1094,7 +1124,8 @@ final class ApiClient {
                 pointExited, phase, visitElapsed, distance);
         return new WalkResult(true, message, walk.getString("walkId"), walkStatus,
                 order, remaining, pointReached, distance, null, 0,
-                phase, visitElapsed, pointExited);
+                phase, visitElapsed, pointExited, exitConfirmationPending,
+                exitThresholdMeters);
     }
 
     private static String formatStopwatch(int seconds) {

@@ -121,11 +121,11 @@ def test_distance_supports_polygon_boundary_and_outside():
     distance_75, _ = distance_to_geometry_meters(
         55.002 + 75 / 110_540, 37.001, geometry,
     )
-    distance_115, _ = distance_to_geometry_meters(
-        55.002 + 115 / 110_540, 37.001, geometry,
+    distance_70, _ = distance_to_geometry_meters(
+        55.002 + 70 / 110_540, 37.001, geometry,
     )
     assert 74 < distance_75 < 76
-    assert 114 < distance_115 < 116
+    assert 69 < distance_70 < 71
 
 
 def test_distance_supports_separate_multipolygon_parts():

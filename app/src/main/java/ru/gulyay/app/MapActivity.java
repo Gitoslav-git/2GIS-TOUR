@@ -100,8 +100,8 @@ public final class MapActivity extends ComponentActivity {
     private static final int ROUTE_CHAT_REQUEST = 207;
     private static final String MEMORY_LOG = "GulyayMapMemory";
     private static final String GEO_LOG = "GulyayGeoWalk";
-    private static final int ARRIVAL_RADIUS_METERS = 75;
-    private static final int EXIT_RADIUS_METERS = 115;
+    static final int ARRIVAL_RADIUS_METERS = 75;
+    static final int POINT_EXIT_RADIUS_METERS = 95;
     static final String EXTRA_ROUTE_ID = "routeId";
     static final String EXTRA_CITY_ID = "cityId";
     static final String EXTRA_SESSION_ID = "sessionId";
@@ -2242,6 +2242,11 @@ public final class MapActivity extends ComponentActivity {
         if (!visiting) {
             resetVisitingUi();
             stopVisitStopwatch();
+            routeViewModel.visitTimerWalkId = null;
+            routeViewModel.visitTimerPointOrder = 0;
+            routeViewModel.visitTimerBaseSeconds = 0;
+            routeViewModel.visitTimerSyncedAtElapsedMillis = 0L;
+            routeViewModel.visitTimerRunning = false;
             status.setText("◷  Осталось ≈" + walk.remainingMinutes + " мин"
                     + "              ●  Точка " + walk.currentPointOrder + " из "
                     + (route == null ? walk.currentPointOrder : route.points.size()));
@@ -2290,8 +2295,20 @@ public final class MapActivity extends ComponentActivity {
 
     private void startVisitStopwatch(String pointName) {
         stopVisitStopwatch();
-        visitTimerBaseSeconds = Math.max(0, walk.visitElapsedSeconds);
-        visitTimerSyncedAtElapsedMillis = SystemClock.elapsedRealtime();
+        long nowElapsed = SystemClock.elapsedRealtime();
+        boolean sameVisit = walk.walkId != null && walk.walkId.equals(
+                routeViewModel.visitTimerWalkId)
+                && walk.currentPointOrder == routeViewModel.visitTimerPointOrder;
+        visitTimerBaseSeconds = VisitStopwatch.reconciledBaseSeconds(
+                walk.visitElapsedSeconds, routeViewModel.visitTimerBaseSeconds,
+                routeViewModel.visitTimerSyncedAtElapsedMillis, nowElapsed,
+                routeViewModel.visitTimerRunning, sameVisit);
+        visitTimerSyncedAtElapsedMillis = nowElapsed;
+        routeViewModel.visitTimerWalkId = walk.walkId;
+        routeViewModel.visitTimerPointOrder = walk.currentPointOrder;
+        routeViewModel.visitTimerBaseSeconds = visitTimerBaseSeconds;
+        routeViewModel.visitTimerSyncedAtElapsedMillis = nowElapsed;
+        routeViewModel.visitTimerRunning = "ACTIVE".equals(walk.status);
         configureVisitingUi(pointName);
         renderVisitStopwatch(pointName);
         if (!"ACTIVE".equals(walk.status)) return;
@@ -2747,6 +2764,14 @@ public final class MapActivity extends ComponentActivity {
             debugLocation("skip", location, distance, "stale-or-duplicate");
             return;
         }
+        long backendRetryDelay = PositionSubmissionPolicy.retryDelay(
+                nowElapsed, routeViewModel.positionRetryNotBeforeElapsedMillis);
+        if (backendRetryDelay > 0) {
+            debugLocation("skip", location, distance, "backend-retry-after-" + backendRetryDelay);
+            scheduleFreshConfirmation(backendRetryDelay,
+                    "backend просит подождать перед GPS-проверкой");
+            return;
+        }
         if (positionInFlight) {
             debugLocation("skip", location, distance, "request-in-flight");
             if (needsBoundaryConfirmation(distance)) {
@@ -2765,6 +2790,7 @@ public final class MapActivity extends ComponentActivity {
             }
             return;
         }
+        cancelPendingConfirmationProbe();
         claimPositionSubmission(nowElapsed);
         routeViewModel.lastPositionMeasurementElapsedMillis = measuredElapsed;
         positionInFlight = true;
@@ -2783,6 +2809,7 @@ public final class MapActivity extends ComponentActivity {
                         "Не удалось передать геопозицию. Проверьте backend.", walkId,
                         walk.status, walk.currentPointOrder, walk.remainingMinutes,
                         false, -1, null);
+                response.transientFailure = true;
             }
             ApiClient.WalkResult finalResponse = response;
             runOnUiThread(() -> {
@@ -2790,14 +2817,23 @@ public final class MapActivity extends ComponentActivity {
                 if (isFinishing() || isDestroyed()) return;
                 if (!finalResponse.success) {
                     debugPositionResponse(finalResponse);
-                    status.setText(finalResponse.message);
-                    if ("RATE_LIMITED".equals(finalResponse.errorCode)
-                            && walk != null && walkId.equals(walk.walkId)
-                            && "ACTIVE".equals(walk.status)
-                            && needsBoundaryConfirmation(distance)) {
-                        scheduleFreshConfirmation(
-                                Math.max(1, finalResponse.retryAfterSeconds) * 1_000L,
-                                "backend временно ограничил проверку");
+                    boolean currentActiveWalk = walk != null && walkId.equals(walk.walkId)
+                            && "ACTIVE".equals(walk.status);
+                    if (currentActiveWalk && PositionSubmissionPolicy.keepVisitTimerVisible(
+                            walk.status, walk.phase)) {
+                        showGpsWaiting(finalResponse.message);
+                    } else {
+                        status.setText(finalResponse.message);
+                    }
+                    if (currentActiveWalk && PositionSubmissionPolicy.shouldRetryPosition(
+                            finalResponse.transientFailure, finalResponse.errorCode)) {
+                        long retryDelay = "RATE_LIMITED".equals(finalResponse.errorCode)
+                                ? Math.max(1, finalResponse.retryAfterSeconds) * 1_000L
+                                : PositionSubmissionPolicy.MIN_INTERVAL_MILLIS;
+                        routeViewModel.positionRetryNotBeforeElapsedMillis =
+                                SystemClock.elapsedRealtime() + retryDelay;
+                        scheduleFreshConfirmation(retryDelay,
+                                "временная ошибка GPS-синхронизации");
                     }
                     return;
                 }
@@ -2805,12 +2841,14 @@ public final class MapActivity extends ComponentActivity {
                         || !"ACTIVE".equals(walk.status)) return;
                 walk = finalResponse;
                 routeViewModel.walk = walk;
+                routeViewModel.positionRetryNotBeforeElapsedMillis = 0L;
                 debugPositionResponse(finalResponse);
                 showWalkStatus();
                 syncLocationTracking();
                 if (!walk.pointReached && !walk.pointExited
                         && walk.currentPointOrder == requestedPointOrder
-                        && needsBoundaryConfirmation(walk.distanceMeters)) {
+                        && (needsBoundaryConfirmation(walk.distanceMeters)
+                        || walk.exitConfirmationPending)) {
                     long retryDelay = PositionSubmissionPolicy.delayUntilSlot(
                             SystemClock.elapsedRealtime(), routeViewModel.previousPositionSentAt,
                             routeViewModel.latestPositionSentAt);
@@ -2824,7 +2862,9 @@ public final class MapActivity extends ComponentActivity {
 
     private boolean needsBoundaryConfirmation(int distance) {
         if (walk == null || distance < 0) return false;
-        if ("VISITING".equals(walk.phase)) return distance > EXIT_RADIUS_METERS;
+        if ("VISITING".equals(walk.phase)) {
+            return distance > Math.max(1, walk.exitThresholdMeters);
+        }
         return distance <= ARRIVAL_RADIUS_METERS;
     }
 
@@ -2863,6 +2903,18 @@ public final class MapActivity extends ComponentActivity {
         uiHandler.postDelayed(pendingConfirmationRequest, safeDelay);
         if (BuildConfig.DEBUG) Log.d(GEO_LOG, "confirmation scheduled: delayMs="
                 + safeDelay + " pointOrder=" + expectedPointOrder + " reason=" + reason);
+    }
+
+    private void cancelPendingConfirmationProbe() {
+        if (pendingConfirmationRequest != null) {
+            uiHandler.removeCallbacks(pendingConfirmationRequest);
+            pendingConfirmationRequest = null;
+        }
+        if (locationManager != null && confirmationLocationListener != null) {
+            try { locationManager.removeUpdates(confirmationLocationListener); }
+            catch (SecurityException ignored) { }
+            confirmationLocationListener = null;
+        }
     }
 
     private void requestFreshConfirmationLocation() {
@@ -2923,6 +2975,7 @@ public final class MapActivity extends ComponentActivity {
                 return;
             }
             renderVisitArrivalCard(route.points.get(walk.currentPointOrder - 1).name);
+            if (reason != null && !reason.isEmpty()) guidanceSubtitle.append(" · " + reason);
             return;
         }
         guidanceTitle.setText("VISITING".equals(walk.phase)
@@ -2939,9 +2992,9 @@ public final class MapActivity extends ComponentActivity {
                 - location.getElapsedRealtimeNanos() / 1_000_000L);
         int pointOrder = walk == null ? 0 : walk.currentPointOrder;
         Log.d(GEO_LOG, String.format(java.util.Locale.US,
-                "%s provider=%s lat=%.6f lon=%.6f ageMs=%d accuracy=%.1f pointOrder=%d distance=%d reason=%s",
-                action, location.getProvider(), location.getLatitude(), location.getLongitude(),
-                age, location.hasAccuracy() ? location.getAccuracy() : -1f,
+                "%s provider=%s ageMs=%d accuracy=%.1f pointOrder=%d distance=%d reason=%s",
+                action, location.getProvider(), age,
+                location.hasAccuracy() ? location.getAccuracy() : -1f,
                 pointOrder, distance, reason));
     }
 
@@ -3761,6 +3814,12 @@ public final class MapActivity extends ComponentActivity {
         long previousPositionSentAt;
         long latestPositionSentAt;
         long lastPositionMeasurementElapsedMillis;
+        long positionRetryNotBeforeElapsedMillis;
+        String visitTimerWalkId;
+        int visitTimerPointOrder;
+        int visitTimerBaseSeconds;
+        long visitTimerSyncedAtElapsedMillis;
+        boolean visitTimerRunning;
         int guidancePointOrder;
         int groupPointOrder;
         int groupLegIndex;

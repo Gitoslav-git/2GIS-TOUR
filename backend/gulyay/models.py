@@ -472,6 +472,8 @@ class WalkProgress(StrictModel):
     walk: WalkSession
     pointReached: bool
     pointExited: bool = False
+    exitConfirmationPending: bool = False
+    exitThresholdMeters: int = Field(default=95, ge=1)
     distanceMeters: int | None = Field(default=None, ge=0)
 
 
@@ -533,6 +535,12 @@ class WalkState(StrictModel):
     proximityPointOrder: int | None = Field(default=None, ge=1, le=8)
     exitStartedAt: datetime | None = None
     exitPointOrder: int | None = Field(default=None, ge=1, le=8)
+    # Exit requires an initial detection plus three fresh confirmations.
+    # Defaults keep persisted walks from earlier releases readable and restart
+    # an in-flight legacy exit sequence conservatively.
+    exitLastConfirmedAt: datetime | None = None
+    exitConfirmationCount: int = Field(default=0, ge=0, le=4)
+    exitDirectNextPointOrder: int | None = Field(default=None, ge=1, le=8)
     pausedAt: datetime | None = None
     pausedSeconds: int = Field(default=0, ge=0)
     visitPausedSeconds: int = Field(default=0, ge=0)

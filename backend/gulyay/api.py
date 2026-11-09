@@ -781,7 +781,9 @@ def add_walk_position(walk_id: UUID, payload: WalkPosition,
         if route is None:
             return failure("VERSION_CONFLICT", "Версия маршрута недоступна", 409, request_id)
         try:
-            updated, progress = register_position(state, route, payload)
+            updated, progress = register_position(
+                state, route, payload, visit_zones=VISIT_ZONES,
+            )
         except WalkInvalidState:
             return failure("WALK_NOT_ACTIVE", "Прогулка сейчас не активна", 409, request_id)
         except WalkInvalidPosition:
@@ -1012,6 +1014,9 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
             "proximityPointOrder": None,
             "exitStartedAt": None,
             "exitPointOrder": None,
+            "exitLastConfirmedAt": None,
+            "exitConfirmationCount": 0,
+            "exitDirectNextPointOrder": None,
             "visitPausedSeconds": 0,
             "finalPointPausedSeconds": 0,
         })
@@ -1162,17 +1167,17 @@ def _client_rate_limit(session: UUID | None, request_id: str | None,
 
 
 def _position_rate_limit(walk_id: UUID, request_id: str | None) -> JSONResponse | None:
-    """Accept at most two geolocation submissions per rolling minute and walk."""
+    """Allow cadence jitter around ten-second GPS updates for one walk."""
     now = time.monotonic()
     with STATE_LOCK:
         window = POSITION_REQUESTS[walk_id]
         while window and window[0] <= now - 60:
             window.popleft()
-        if len(window) >= 2:
+        if len(window) >= 8:
             retry_after = max(1, int(61 - (now - window[0])))
             return failure(
                 "RATE_LIMITED",
-                f"Геопозиция принимается не чаще двух раз в минуту. Повторите через {retry_after} сек.",
+                f"Геопозиция принимается не чаще восьми раз в минуту. Повторите через {retry_after} сек.",
                 429, request_id,
                 {"retryAfterSeconds": retry_after, "dependency": "geolocation"},
                 {"Retry-After": str(retry_after)},

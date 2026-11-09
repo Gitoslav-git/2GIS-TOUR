@@ -91,8 +91,8 @@ def test_route_version_persists_its_own_visit_zone_snapshot(tmp_path):
     state, _ = register_position(state, itinerary, first, started)
     state, _ = register_position(
         state, itinerary,
-        first.model_copy(update={"measuredAt": started + timedelta(seconds=5)}),
-        started + timedelta(seconds=5),
+        first.model_copy(update={"measuredAt": started + timedelta(seconds=10)}),
+        started + timedelta(seconds=10),
     )
     repository.save_walk(state, owner)
     coordinates[0][0][0] = 99.0
@@ -210,7 +210,7 @@ def test_visiting_stopwatch_survives_sqlite_reopen(tmp_path):
     point = itinerary.points[0]
     first = WalkPosition(lat=point.lat, lon=point.lon, accuracyMeters=10, measuredAt=start)
     walk, _ = register_position(walk, itinerary, first, start)
-    second = first.model_copy(update={"measuredAt": start + timedelta(seconds=5)})
+    second = first.model_copy(update={"measuredAt": start + timedelta(seconds=10)})
     walk, _ = register_position(walk, itinerary, second, second.measuredAt)
 
     repository = RouteRepository(path)
@@ -222,7 +222,9 @@ def test_visiting_stopwatch_survives_sqlite_reopen(tmp_path):
     restored = reopened.get_walk(walk.session.walkId, owner)
     assert restored is not None
     assert restored.session.phase == "VISITING"
-    assert session_at(restored, start + timedelta(minutes=2)).visitElapsedSeconds == 115
+    assert session_at(
+        restored, start + timedelta(minutes=2, seconds=10),
+    ).visitElapsedSeconds == 120
     reopened.close()
 
 
@@ -236,7 +238,10 @@ def test_legacy_walk_json_in_sqlite_remains_readable(tmp_path):
     legacy = walk.model_dump(mode="json")
     for field in ("phase", "visitStartedAt", "visitElapsedSeconds"):
         legacy["session"].pop(field)
-    for field in ("exitStartedAt", "exitPointOrder", "visitPausedSeconds"):
+    for field in (
+        "exitStartedAt", "exitPointOrder", "exitLastConfirmedAt",
+        "exitConfirmationCount", "exitDirectNextPointOrder", "visitPausedSeconds",
+    ):
         legacy.pop(field)
     legacy["session"]["finalPointVisitStartedAt"] = (
         started + timedelta(minutes=1)

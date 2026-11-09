@@ -1,6 +1,7 @@
 package ru.gulyay.app;
 
 import android.os.SystemClock;
+import android.util.Log;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
@@ -485,9 +486,10 @@ final class ApiClient {
     static Result createRoute(String cityId, String query, String sessionId,
                               Double startLat, Double startLon, Double accuracyMeters,
                               JSONObject filters) throws Exception {
-        return send("/v1/routes", createRoutePayload(cityId, query, sessionId,
-                startLat, startLon, accuracyMeters, filters, BuildConfig.ROUTE_GROUPS_ENABLED),
-                sessionId, cityId);
+        JSONObject payload = createRoutePayload(cityId, query, sessionId,
+                startLat, startLon, accuracyMeters, filters, BuildConfig.ROUTE_GROUPS_ENABLED);
+        Log.i(BackendConfig.LOG_TAG, createRouteLogSummary(payload));
+        return send("/v1/routes", payload, sessionId, cityId);
     }
 
     static JSONObject createRoutePayload(String cityId, String query, String sessionId,
@@ -517,6 +519,27 @@ final class ApiClient {
             payload.put("startLocation", location);
         }
         return payload;
+    }
+
+    /** Diagnostic summary that deliberately excludes the session id and location coordinates. */
+    static String createRouteLogSummary(JSONObject payload) {
+        JSONObject filters = payload.optJSONObject("filters");
+        JSONObject safeFilters = new JSONObject();
+        if (filters != null) {
+            String[] allowed = {"durationMinutes", "withChildren", "includeFood", "unusualPlaces"};
+            for (String key : allowed) {
+                if (filters.has(key)) {
+                    try { safeFilters.put(key, filters.get(key)); } catch (Exception ignored) { }
+                }
+            }
+        }
+        String query = payload.optString("query", "").replace('\n', ' ').replace('\r', ' ');
+        if (query.length() > 160) query = query.substring(0, 160) + "…";
+        return "Route create payload: cityId=" + payload.optString("cityId", "")
+                + " query=" + JSONObject.quote(query)
+                + " filters=" + safeFilters
+                + " routeGroupsEnabled=" + payload.optBoolean("routeGroupsEnabled", false)
+                + " startLocationPresent=" + payload.has("startLocation");
     }
 
     static Result reviseRoute(String routeId, int baseVersion, String cityId,
@@ -1122,7 +1145,7 @@ final class ApiClient {
         JSONObject details = error.optJSONObject("details");
         int retryAfter = details == null ? 0 : details.optInt("retryAfterSeconds", 0);
         String code = error.optString("code");
-        Result result = new Result(false, humanError(code, error.optString("message")),
+        Result result = new Result(false, humanError(code, error.optString("message"), details),
                 null, 0, retryAfter, code);
         if (details != null && "TIME_BUDGET_CONFIRMATION_REQUIRED".equals(code)) {
             result.requestedMinutes = details.optInt("requestedMinutes", -1);
@@ -1291,6 +1314,10 @@ final class ApiClient {
     }
 
     static String humanError(String code, String message) {
+        return humanError(code, message, null);
+    }
+
+    static String humanError(String code, String message, JSONObject details) {
         switch (code) {
             case "GROUPED_ROUTE_EDIT_UNSUPPORTED":
                 return "Маршрутная группа уже используется в прогулке. Изменение точек и вставка заведений для неё пока недоступны; разговор с помощником продолжает работать.";
@@ -1317,9 +1344,33 @@ final class ApiClient {
             case "WALK_NOT_ACTIVE": return "Прогулка на паузе или уже завершена.";
             case "WALK_INVALID_STATE": return message.isEmpty() ?
                     "Это действие сейчас недоступно." : message;
-            case "VALIDATION_ERROR": return "Проверьте город и текст запроса.";
+            case "VALIDATION_ERROR": return validationErrorMessage(message, details);
             case "UNAUTHORIZED": return "Сессия истекла. Перезапустите приложение.";
             default: return message.isEmpty() ? "Не удалось получить маршрут: " + code : message;
         }
+    }
+
+    private static String validationErrorMessage(String message, JSONObject details) {
+        JSONArray errors = details == null ? null : details.optJSONArray("errors");
+        if (errors != null) {
+            for (int i = 0; i < errors.length(); i++) {
+                JSONObject error = errors.optJSONObject(i);
+                if (error == null) continue;
+                String field = error.optString("field", "");
+                String type = error.optString("type", "");
+                if ("routeGroupsEnabled".equals(field) && type.contains("extra_forbidden")) {
+                    return "Backend не поддерживает маршрутные группы. Обновите backend до версии с полем routeGroupsEnabled.";
+                }
+                if ("cityId".equals(field)) return "Backend отклонил выбранный город.";
+                if ("query".equals(field)) return "Backend отклонил текст пожеланий. Уточните запрос.";
+                if (field.startsWith("filters")) return "Backend отклонил один из фильтров маршрута.";
+            }
+        }
+        if (BuildConfig.ROUTE_GROUPS_ENABLED && "Проверьте заполненные поля".equals(
+                message == null ? "" : message.trim())) {
+            return "Backend отклонил параметры маршрута. Проверьте, что backend поддерживает routeGroupsEnabled.";
+        }
+        if (message != null && !message.trim().isEmpty()) return message.trim();
+        return "Backend отклонил параметры маршрута.";
     }
 }

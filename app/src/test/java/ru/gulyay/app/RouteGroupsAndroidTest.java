@@ -105,6 +105,38 @@ public final class RouteGroupsAndroidTest {
         assertTrue(text.contains("помощником"));
     }
 
+    @Test public void validationErrorKeepsBackendReasonInsteadOfInventingCityProblem() {
+        String text = ApiClient.humanError("VALIDATION_ERROR", "Проверьте заполненные поля");
+        assertFalse(text.contains("Проверьте город"));
+        if (BuildConfig.ROUTE_GROUPS_ENABLED) assertTrue(text.contains("routeGroupsEnabled"));
+        else assertEquals("Проверьте заполненные поля", text);
+    }
+
+    @Test public void validationDetailsExplainOldBackendRouteGroupsMismatch() throws Exception {
+        JSONObject details = new JSONObject().put("errors", new JSONArray().put(
+                new JSONObject().put("field", "routeGroupsEnabled")
+                        .put("type", "extra_forbidden")));
+        String text = ApiClient.humanError("VALIDATION_ERROR", "", details);
+        assertTrue(text.contains("routeGroupsEnabled"));
+        assertTrue(text.contains("Обновите backend"));
+    }
+
+    @Test public void routeCreateLogSummaryContainsUsefulFieldsButNoSecrets() throws Exception {
+        JSONObject payload = ApiClient.createRoutePayload("moscow", "Хочу погулять 5 часов",
+                "secret-session", 55.75, 37.61, 5.0,
+                new JSONObject().put("includeFood", true).put("unknownSecret", "hidden"), true);
+        String summary = ApiClient.createRouteLogSummary(payload);
+        assertTrue(summary.contains("cityId=moscow"));
+        assertTrue(summary.contains("Хочу погулять 5 часов"));
+        assertTrue(summary.contains("includeFood"));
+        assertTrue(summary.contains("routeGroupsEnabled=true"));
+        assertTrue(summary.contains("startLocationPresent=true"));
+        assertFalse(summary.contains("secret-session"));
+        assertFalse(summary.contains("deviceSessionId"));
+        assertFalse(summary.contains("55.75"));
+        assertFalse(summary.contains("unknownSecret"));
+    }
+
     private static JSONObject baseRoute() throws Exception {
         return new JSONObject().put("routeId", "r").put("routeVersion", 1)
                 .put("totalMinutes", 20).put("query", "walk")

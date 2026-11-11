@@ -7,6 +7,32 @@ import java.util.Set;
 
 /** Pure group presentation/navigation rules; never mutates backend walk state. */
 final class RouteGroupSupport {
+    static final class DisplayRow {
+        final int pointOrder;
+        final ApiClient.PlaceOption point;
+        final ApiClient.RouteWaypoint waypoint;
+        final boolean activeWaypoint;
+
+        private DisplayRow(int pointOrder, ApiClient.PlaceOption point,
+                           ApiClient.RouteWaypoint waypoint, boolean activeWaypoint) {
+            this.pointOrder = pointOrder;
+            this.point = point;
+            this.waypoint = waypoint;
+            this.activeWaypoint = activeWaypoint;
+        }
+
+        static DisplayRow point(int pointOrder, ApiClient.PlaceOption point) {
+            return new DisplayRow(pointOrder, point, null, false);
+        }
+
+        static DisplayRow waypoint(int pointOrder, ApiClient.RouteWaypoint waypoint,
+                                   boolean activeWaypoint) {
+            return new DisplayRow(pointOrder, null, waypoint, activeWaypoint);
+        }
+
+        boolean isWaypoint() { return waypoint != null; }
+    }
+
     static final class NavigationTarget {
         final ApiClient.RouteWaypoint waypoint;
         final ApiClient.RouteWaypointLeg leg;
@@ -33,6 +59,37 @@ final class RouteGroupSupport {
 
     static boolean hasActiveGroup(ApiClient.Result route, ApiClient.WalkResult walk) {
         return walk != null && groupForPoint(route, walk.currentPointOrder) != null;
+    }
+
+    static List<DisplayRow> displayRows(ApiClient.Result route, int currentPointOrder,
+                                        int activeWaypointOrder) {
+        List<DisplayRow> rows = new ArrayList<>();
+        if (route == null || route.points == null) return rows;
+        int startIndex = currentPointOrder > 0
+                ? Math.min(currentPointOrder - 1, route.points.size()) : 0;
+        for (int index = startIndex; index < route.points.size(); index++) {
+            int pointOrder = index + 1;
+            ApiClient.PlaceOption point = route.points.get(index);
+            rows.add(DisplayRow.point(pointOrder, point));
+            ApiClient.RouteGroup group = groupForPoint(route, pointOrder);
+            if (group == null) continue;
+            for (ApiClient.RouteWaypoint waypoint : group.waypoints) {
+                if (sameLogicalPoint(point, waypoint)) continue;
+                rows.add(DisplayRow.waypoint(pointOrder, waypoint,
+                        pointOrder == currentPointOrder
+                                && waypoint.order == activeWaypointOrder));
+            }
+        }
+        return rows;
+    }
+
+    private static boolean sameLogicalPoint(ApiClient.PlaceOption point,
+                                            ApiClient.RouteWaypoint waypoint) {
+        if (point.placeId != null && point.placeId.equals(waypoint.placeId)) return true;
+        if (point.catalogId != null && point.catalogId.equals(waypoint.catalogId)) return true;
+        return Double.isFinite(point.lat) && Double.isFinite(point.lon)
+                && Math.abs(point.lat - waypoint.lat) < 0.000001
+                && Math.abs(point.lon - waypoint.lon) < 0.000001;
     }
 
     static List<ApiClient.RouteWaypoint> uniqueChildMarkers(ApiClient.Result route) {
@@ -86,8 +143,10 @@ final class RouteGroupSupport {
 
     static int boundaryDistance(ApiClient.Result route, ApiClient.WalkResult walk,
                                 int localParentDistance) {
-        if (!hasActiveGroup(route, walk)) return localParentDistance;
-        return walk.distanceMeters;
+        // A grouped visit is bounded by server-owned GeoJSON. Neither distance to the
+        // parent marker nor the previous response's distance describes the new GPS fix.
+        if (hasActiveGroup(route, walk)) return -1;
+        return localParentDistance;
     }
 
     static NavigationTarget navigationTarget(ApiClient.RouteGroup group, double lat, double lon,

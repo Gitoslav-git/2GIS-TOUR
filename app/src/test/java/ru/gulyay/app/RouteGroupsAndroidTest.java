@@ -89,14 +89,30 @@ public final class RouteGroupsAndroidTest {
         assertTrue(RouteGroupSupport.hasActiveGroup(route, walk));
     }
 
-    @Test public void groupedBoundaryUsesServerDistanceNotParentCenter() {
+    @Test public void groupedBoundaryNeverUsesStaleServerDistanceForNewGpsFix() {
         ApiClient.Result route = sampleResult();
         ApiClient.WalkResult grouped = new ApiClient.WalkResult(true, "", "w", "ACTIVE",
                 1, 10, false, 8, null, 0, "VISITING", 30, false);
-        assertEquals(8, RouteGroupSupport.boundaryDistance(route, grouped, 2500));
+        assertEquals(-1, RouteGroupSupport.boundaryDistance(route, grouped, 2500));
         grouped = new ApiClient.WalkResult(true, "", "w", "ACTIVE",
                 2, 10, false, 8, null, 0, "MOVING", 0, false);
         assertEquals(2500, RouteGroupSupport.boundaryDistance(route, grouped, 2500));
+    }
+
+    @Test public void groupedPointListKeepsCurrentChildrenAndNextLogicalStopVisible() {
+        ApiClient.Result route = sampleResult();
+
+        java.util.List<RouteGroupSupport.DisplayRow> rows =
+                RouteGroupSupport.displayRows(route, 1, 2);
+
+        assertEquals(3, rows.size());
+        assertFalse(rows.get(0).isWaypoint());
+        assertEquals("Parent", rows.get(0).point.name);
+        assertTrue(rows.get(1).isWaypoint());
+        assertEquals("Child", rows.get(1).waypoint.name);
+        assertTrue(rows.get(1).activeWaypoint);
+        assertFalse(rows.get(2).isWaypoint());
+        assertEquals("Next logical stop", rows.get(2).point.name);
     }
 
     @Test public void groupedEditErrorIsFriendly() {
@@ -176,8 +192,10 @@ public final class RouteGroupsAndroidTest {
     private static ApiClient.Result sampleResult() {
         ApiClient.PlaceOption parent = new ApiClient.PlaceOption("parent", "msk005",
                 "Parent", false, 55.75, 37.61);
+        ApiClient.PlaceOption next = new ApiClient.PlaceOption("next", "msk036",
+                "Next logical stop", false, 55.83, 37.63);
         ApiClient.Result route = new ApiClient.Result(true, "", "r", 1, 0, null,
-                Collections.singletonList(parent), Collections.emptyList());
+                Arrays.asList(parent, next), Collections.emptyList());
         ApiClient.RouteWaypoint duplicate = new ApiClient.RouteWaypoint(1, "msk005", "parent",
                 "Parent duplicate", 55.75, 37.61, "CONTAINS");
         ApiClient.RouteWaypoint child = new ApiClient.RouteWaypoint(2, "msk050", "child",

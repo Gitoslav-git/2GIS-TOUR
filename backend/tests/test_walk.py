@@ -279,6 +279,55 @@ def test_alexander_garden_to_kremlin_uses_confirmed_direct_zone_transition():
     assert [visit.catalogId for visit in state.session.visits] == ["msk013", "msk005"]
 
 
+def test_red_square_exit_via_unrelated_alexander_garden_uses_ordinary_confirmation():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    itinerary = route(points=2, total_minutes=60)
+    red_square = itinerary.points[0].model_copy(update={
+        "catalogId": "msk001", "lat": 55.754549, "lon": 37.618666,
+    })
+    unrelated_next = itinerary.points[1].model_copy(update={
+        "catalogId": "msk036", "lat": 55.82981, "lon": 37.63201,
+    })
+    itinerary = itinerary.model_copy(update={"points": [red_square, unrelated_next]})
+    zones = bundled_zones("msk001", "msk013", "msk036")
+    state = start_walk(itinerary, StartWalk(routeVersion=1), start)
+    state, _ = register_position(
+        state, itinerary, position(red_square, start), start, zones,
+    )
+    state, reached = register_position(
+        state, itinerary,
+        position(red_square, start + timedelta(seconds=10)),
+        start + timedelta(seconds=10), zones,
+    )
+    assert reached.pointReached is True
+
+    garden = WalkPosition(
+        lat=55.750651, lon=37.612822, accuracyMeters=10,
+        measuredAt=start + timedelta(seconds=20),
+    )
+    for expected_count, offset in enumerate((20, 30, 40), start=1):
+        measured = start + timedelta(seconds=offset)
+        state, pending = register_position(
+            state, itinerary, garden.model_copy(update={"measuredAt": measured}),
+            measured, zones,
+        )
+        assert pending.distanceMeters > 70
+        assert pending.pointExited is False
+        assert pending.exitConfirmationPending is True
+        assert state.exitConfirmationCount == expected_count
+        assert state.exitDirectNextPointOrder is None
+
+    measured = start + timedelta(seconds=50)
+    state, exited = register_position(
+        state, itinerary, garden.model_copy(update={"measuredAt": measured}),
+        measured, zones,
+    )
+    assert exited.pointExited is True
+    assert exited.pointReached is False
+    assert state.session.phase == "MOVING"
+    assert state.session.currentPointOrder == 2
+
+
 def test_overlapping_zones_keep_current_visit_until_user_is_outside_it():
     start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
     itinerary = route(points=2)

@@ -243,6 +243,7 @@ public final class MapActivity extends ComponentActivity {
     private Runnable visitTimerTick;
     private String renderedPointListKey;
     private String renderedVisitingStructureKey;
+    private int activeGroupWaypointOrder;
     private boolean mapGestureActive;
     private int partnerOfferRequestGeneration;
     private final Runnable cameraBoundsGuard = this::enforceRouteCameraBounds;
@@ -1586,33 +1587,33 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void renderPointList(int currentOrder) {
-        renderPointList(currentOrder, false);
-    }
-
-    private void renderPointList(int currentOrder, boolean nextPointAlreadyFeatured) {
         String renderKey = VisitingPresentation.pointListRenderKey(
-                route, currentOrder, nextPointAlreadyFeatured);
+                route, currentOrder, activeGroupWaypointOrder);
         if (renderKey.equals(renderedPointListKey)) return;
         renderedPointListKey = renderKey;
         pointList.removeAllViews();
         if (route == null || route.points.isEmpty()) return;
-        int start = currentOrder > 0 ? currentOrder : 1;
-        if (nextPointAlreadyFeatured) start++;
-        int end = route.points.size();
-        for (int i = start; i < end; i++) {
-            ApiClient.PlaceOption point = route.points.get(i);
+        for (RouteGroupSupport.DisplayRow item : RouteGroupSupport.displayRows(
+                route, currentOrder, activeGroupWaypointOrder)) {
+            if (item.isWaypoint()) {
+                renderWaypointRow(item);
+                continue;
+            }
+            ApiClient.PlaceOption point = item.point;
             LinearLayout row = new LinearLayout(this);
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(0, UiKit.dp(this, 4), UiKit.dp(this, 5), UiKit.dp(this, 4));
-            TextView number = UiKit.label(this, String.valueOf(i + 1), 14, 0xFFFFFFFF);
+            TextView number = UiKit.label(this, String.valueOf(item.pointOrder), 14, 0xFFFFFFFF);
             number.setGravity(Gravity.CENTER);
             number.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-            number.setBackground(UiKit.rounded(0xFFE9F8EE, 20, this));
+            number.setBackground(UiKit.rounded(item.pointOrder == currentOrder
+                    ? 0xFFD5F1DE : 0xFFE9F8EE, 20, this));
             number.setTextColor(UiKit.GREEN_DARK);
             row.addView(number, new LinearLayout.LayoutParams(
                     UiKit.dp(this, 32), UiKit.dp(this, 32)));
             String suffix = point.food ? " • заведение" : "";
-            TextView name = UiKit.label(this, point.name + suffix + "\n" + travelToPoint(i), 13, UiKit.TEXT);
+            TextView name = UiKit.label(this, point.name + suffix + "\n"
+                    + travelToPoint(item.pointOrder - 1), 13, UiKit.TEXT);
             name.setMaxLines(2);
             name.setEllipsize(android.text.TextUtils.TruncateAt.END);
             name.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 8), 0);
@@ -1621,16 +1622,35 @@ public final class MapActivity extends ComponentActivity {
                     -1, UiKit.dp(this, 54)));
         }
         updatePointListVisibility();
-        pointListScroll.post(() -> pointListScroll.scrollTo(0, 0));
+    }
+
+    private void renderWaypointRow(RouteGroupSupport.DisplayRow item) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(UiKit.dp(this, 24), UiKit.dp(this, 3),
+                UiKit.dp(this, 8), UiKit.dp(this, 3));
+        TextView icon = UiKit.label(this, item.activeWaypoint ? "●" : "•", 13,
+                item.activeWaypoint ? UiKit.GREEN_DARK : UiKit.MUTED);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(UiKit.rounded(item.activeWaypoint
+                ? 0xFFDDF4E5 : 0xFFF1F4F2, 12, this));
+        row.addView(icon, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 24), UiKit.dp(this, 24)));
+        String relation = "CLUSTER_MEMBER".equals(item.waypoint.relation)
+                ? "Связанный ориентир" : "Ориентир внутри локации";
+        if (item.activeWaypoint) relation = "Сейчас · " + relation;
+        TextView name = UiKit.label(this, item.waypoint.name + "\n" + relation,
+                12, item.activeWaypoint ? UiKit.GREEN_DARK : UiKit.MUTED);
+        name.setMaxLines(2);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        name.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 8), 0);
+        if (item.activeWaypoint) name.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        pointList.addView(row, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 46)));
     }
 
     private void updatePointListVisibility() {
-        boolean offerVisible = partnerOfferCard != null
-                && partnerOfferCard.getVisibility() == View.VISIBLE;
-        boolean visiting = walk != null && "VISITING".equals(walk.phase);
-        boolean hasVisiblePoints = !visiting || pointList.getChildCount() > 0;
-        pointList.setVisibility(!offerVisible && hasVisiblePoints
-                ? View.VISIBLE : View.GONE);
+        pointList.setVisibility(pointList.getChildCount() > 0 ? View.VISIBLE : View.GONE);
         pointListScroll.setVisibility(View.VISIBLE);
     }
 
@@ -2267,7 +2287,10 @@ public final class MapActivity extends ComponentActivity {
         } else {
             updateGuidance(latestUserLat, latestUserLon);
         }
-        renderPointList(walk.currentPointOrder, visiting);
+        if (!visiting || !RouteGroupSupport.hasActiveGroup(route, walk)) {
+            activeGroupWaypointOrder = 0;
+        }
+        renderPointList(walk.currentPointOrder);
         boolean active = "ACTIVE".equals(walk.status);
         boolean paused = "PAUSED".equals(walk.status);
         pauseResume.setVisibility(View.GONE);
@@ -2700,7 +2723,10 @@ public final class MapActivity extends ComponentActivity {
             status.append("\nГеопозиция запрещена — автоматическая отметка точки недоступна.");
             return;
         }
-        if (locationListener != null) return;
+        if (locationListener != null) {
+            scheduleActivePositionProbe();
+            return;
+        }
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         locationListener = new LocationListener() {
             @Override public void onLocationChanged(Location location) {
@@ -2727,6 +2753,8 @@ public final class MapActivity extends ComponentActivity {
             if (!requested) {
                 stopLocationTracking();
                 status.append("\nГеопозиция выключена — автоматическая отметка точки недоступна.");
+            } else {
+                scheduleActivePositionProbe();
             }
         } catch (SecurityException error) {
             stopLocationTracking();
@@ -2755,6 +2783,7 @@ public final class MapActivity extends ComponentActivity {
                 showGpsWaiting("Точность GPS недостаточна (±"
                         + Math.round(accuracy) + " м)");
             }
+            scheduleActivePositionProbe();
             return;
         }
         long nowElapsed = SystemClock.elapsedRealtime();
@@ -2762,6 +2791,7 @@ public final class MapActivity extends ComponentActivity {
         if (!PositionSubmissionPolicy.isFresh(measuredElapsed, nowElapsed,
                 routeViewModel.lastPositionMeasurementElapsedMillis)) {
             debugLocation("skip", location, distance, "stale-or-duplicate");
+            scheduleActivePositionProbe();
             return;
         }
         long backendRetryDelay = PositionSubmissionPolicy.retryDelay(
@@ -2774,20 +2804,17 @@ public final class MapActivity extends ComponentActivity {
         }
         if (positionInFlight) {
             debugLocation("skip", location, distance, "request-in-flight");
-            if (needsBoundaryConfirmation(distance)) {
-                scheduleFreshConfirmation(PositionSubmissionPolicy.MIN_INTERVAL_MILLIS,
-                        "ожидается завершение проверки");
-            }
+            scheduleFreshConfirmation(PositionSubmissionPolicy.MIN_INTERVAL_MILLIS,
+                    needsBoundaryConfirmation(distance) ? "ожидается завершение проверки" : "");
             return;
         }
         long delay = PositionSubmissionPolicy.delayUntilSlot(nowElapsed,
                 routeViewModel.previousPositionSentAt, routeViewModel.latestPositionSentAt);
         if (delay > 0) {
             debugLocation("skip", location, distance, "local-rate-limit-" + delay);
-            if (needsBoundaryConfirmation(distance)) {
-                scheduleFreshConfirmation(delay, "повторная проверка доступна через "
-                        + Math.max(1, (int) Math.ceil(delay / 1000.0)) + " сек");
-            }
+            scheduleFreshConfirmation(delay, needsBoundaryConfirmation(distance)
+                    ? "повторная проверка доступна через "
+                    + Math.max(1, (int) Math.ceil(delay / 1000.0)) + " сек" : "");
             return;
         }
         cancelPendingConfirmationProbe();
@@ -2845,17 +2872,15 @@ public final class MapActivity extends ComponentActivity {
                 debugPositionResponse(finalResponse);
                 showWalkStatus();
                 syncLocationTracking();
-                if (!walk.pointReached && !walk.pointExited
+                long retryDelay = PositionSubmissionPolicy.delayUntilSlot(
+                        SystemClock.elapsedRealtime(), routeViewModel.previousPositionSentAt,
+                        routeViewModel.latestPositionSentAt);
+                boolean confirmationPending = !walk.pointReached && !walk.pointExited
                         && walk.currentPointOrder == requestedPointOrder
-                        && (needsBoundaryConfirmation(walk.distanceMeters)
-                        || walk.exitConfirmationPending)) {
-                    long retryDelay = PositionSubmissionPolicy.delayUntilSlot(
-                            SystemClock.elapsedRealtime(), routeViewModel.previousPositionSentAt,
-                            routeViewModel.latestPositionSentAt);
-                    scheduleFreshConfirmation(Math.max(
-                            PositionSubmissionPolicy.MIN_INTERVAL_MILLIS, retryDelay),
-                            "ожидается повторное GPS-измерение");
-                }
+                        && walk.exitConfirmationPending;
+                scheduleFreshConfirmation(Math.max(
+                        PositionSubmissionPolicy.MIN_INTERVAL_MILLIS, retryDelay),
+                        confirmationPending ? "ожидается повторное GPS-измерение" : "");
             });
         });
     }
@@ -2890,19 +2915,24 @@ public final class MapActivity extends ComponentActivity {
         }
         final String expectedWalkId = walk.walkId;
         final int expectedPointOrder = walk.currentPointOrder;
-        long safeDelay = Math.max(PositionSubmissionPolicy.MIN_INTERVAL_MILLIS, delayMillis);
-        showGpsWaiting(reason);
+        long safeDelay = PositionSubmissionPolicy.nextProbeDelay(true, delayMillis);
+        boolean announce = reason != null && !reason.isEmpty();
+        if (announce) showGpsWaiting(reason);
         pendingConfirmationRequest = () -> {
             pendingConfirmationRequest = null;
             if (isFinishing() || isDestroyed() || walk == null
                     || !expectedWalkId.equals(walk.walkId)
                     || expectedPointOrder != walk.currentPointOrder
                     || !"ACTIVE".equals(walk.status)) return;
-            requestFreshConfirmationLocation();
+            requestFreshConfirmationLocation(announce);
         };
         uiHandler.postDelayed(pendingConfirmationRequest, safeDelay);
         if (BuildConfig.DEBUG) Log.d(GEO_LOG, "confirmation scheduled: delayMs="
                 + safeDelay + " pointOrder=" + expectedPointOrder + " reason=" + reason);
+    }
+
+    private void scheduleActivePositionProbe() {
+        scheduleFreshConfirmation(PositionSubmissionPolicy.MIN_INTERVAL_MILLIS, "");
     }
 
     private void cancelPendingConfirmationProbe() {
@@ -2917,8 +2947,15 @@ public final class MapActivity extends ComponentActivity {
         }
     }
 
-    private void requestFreshConfirmationLocation() {
-        if (locationManager == null || confirmationLocationListener != null) return;
+    private void requestFreshConfirmationLocation(boolean announce) {
+        if (locationManager == null) return;
+        if (confirmationLocationListener != null) {
+            try { locationManager.removeUpdates(confirmationLocationListener); }
+            catch (SecurityException ignored) { }
+            confirmationLocationListener = null;
+            if (BuildConfig.DEBUG) Log.d(GEO_LOG,
+                    "fresh confirmation timed out; requesting another measurement");
+        }
         String provider = null;
         if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
             provider = LocationManager.GPS_PROVIDER;
@@ -2927,6 +2964,7 @@ public final class MapActivity extends ComponentActivity {
         }
         if (provider == null) {
             showGpsWaiting("геопозиция выключена");
+            scheduleActivePositionProbe();
             return;
         }
         confirmationLocationListener = new LocationListener() {
@@ -2946,7 +2984,10 @@ public final class MapActivity extends ComponentActivity {
         try {
             locationManager.requestSingleUpdate(provider, confirmationLocationListener,
                     Looper.getMainLooper());
-            showGpsWaiting("получаем повторное GPS-измерение");
+            // requestSingleUpdate has no delivery deadline. Keep a watchdog so a
+            // stationary emulator cannot end the confirmation loop silently.
+            scheduleActivePositionProbe();
+            if (announce) showGpsWaiting("получаем повторное GPS-измерение");
             if (BuildConfig.DEBUG) Log.d(GEO_LOG,
                     "fresh confirmation requested: provider=" + provider);
         } catch (SecurityException error) {
@@ -3008,6 +3049,7 @@ public final class MapActivity extends ComponentActivity {
                 + " phase=" + response.phase
                 + " visitElapsed=" + response.visitElapsedSeconds
                 + " pointExited=" + response.pointExited
+                + " exitPending=" + response.exitConfirmationPending
                 + " error=" + response.errorCode
                 + " retryAfter=" + response.retryAfterSeconds);
     }
@@ -3544,12 +3586,17 @@ public final class MapActivity extends ComponentActivity {
             routeViewModel.groupPointOrder = walk.currentPointOrder;
             routeViewModel.groupLegIndex = 0;
             routeViewModel.groupPathIndex = 0;
+            activeGroupWaypointOrder = 0;
         }
         RouteGroupSupport.NavigationTarget target = RouteGroupSupport.navigationTarget(group,
                 lat, lon, routeViewModel.groupLegIndex, routeViewModel.groupPathIndex);
         if (target == null) return;
         routeViewModel.groupLegIndex = target.legIndex;
         routeViewModel.groupPathIndex = target.pathIndex;
+        if (activeGroupWaypointOrder != target.waypoint.order) {
+            activeGroupWaypointOrder = target.waypoint.order;
+            renderPointList(walk.currentPointOrder);
+        }
         int minutes = Math.max(1, (int) Math.ceil(target.remainingMeters / 80.0));
         guidanceLeadingIcon.setText("↗");
         guidanceLeadingIcon.setBackground(UiKit.rounded(0xFFE8F0FF, 28, this));
@@ -3572,15 +3619,6 @@ public final class MapActivity extends ComponentActivity {
         }
         mapRouteSummary.setVisibility(View.GONE);
         guidancePanel.setVisibility(View.VISIBLE);
-        visitingNextCard.setVisibility(View.VISIBLE);
-        visitingNextTitle.setText("Сейчас: " + target.waypoint.name);
-        StringBuilder children = new StringBuilder("Маршрут внутри локации: ");
-        for (int i = 0; i < group.waypoints.size(); i++) {
-            if (i > 0) children.append(" · ");
-            children.append(group.waypoints.get(i).name);
-        }
-        visitingNextMeta.setText(children.toString());
-        visitingNextMeta.setVisibility(View.VISIBLE);
     }
 
     private GuidanceInfo guidanceInfo(double lat, double lon, ApiClient.PlaceOption target) {

@@ -166,11 +166,24 @@ public class MainActivityRecoveryTest {
                 PositionSubmissionPolicy.delayUntilSlot(70_000L, 10_000L, 15_000L));
         assertEquals(15_000L, PositionSubmissionPolicy.retryDelay(20_000L, 35_000L));
         assertEquals(0L, PositionSubmissionPolicy.retryDelay(35_000L, 35_000L));
+        assertEquals(10_000L, PositionSubmissionPolicy.nextProbeDelay(true, 0L));
+        assertEquals(25_000L, PositionSubmissionPolicy.nextProbeDelay(true, 25_000L));
+        assertEquals(-1L, PositionSubmissionPolicy.nextProbeDelay(false, 10_000L));
         assertTrue(PositionSubmissionPolicy.shouldRetryPosition(true, null));
         assertTrue(PositionSubmissionPolicy.shouldRetryPosition(false, "RATE_LIMITED"));
         assertFalse(PositionSubmissionPolicy.shouldRetryPosition(false, "VALIDATION_ERROR"));
         assertTrue(PositionSubmissionPolicy.keepVisitTimerVisible("ACTIVE", "VISITING"));
         assertFalse(PositionSubmissionPolicy.keepVisitTimerVisible("ACTIVE", "MOVING"));
+    }
+
+    @Test public void stationaryGpsWatchdogKeepsRequestingFreshMeasurements() {
+        long elapsed = 0L;
+        for (int measurement = 0; measurement < 4; measurement++) {
+            elapsed += PositionSubmissionPolicy.nextProbeDelay(true, 0L);
+        }
+        assertEquals(40_000L, elapsed);
+        assertEquals(30_000L, PositionSubmissionPolicy.nextProbeDelay(true, 30_000L));
+        assertEquals(-1L, PositionSubmissionPolicy.nextProbeDelay(false, 0L));
     }
 
     @Test public void directZoneExitKeepsAndroidConfirmationPending() {
@@ -307,11 +320,11 @@ public class MainActivityRecoveryTest {
 
     @Test public void visitingPointListOnlyRendersWhenItsStructureChanges() {
         ApiClient.Result route = visitingRoute();
-        String initial = VisitingPresentation.pointListRenderKey(route, 1, true);
+        String initial = VisitingPresentation.pointListRenderKey(route, 1, 1);
 
-        assertEquals(initial, VisitingPresentation.pointListRenderKey(route, 1, true));
-        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(route, 2, true)));
-        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(route, 1, false)));
+        assertEquals(initial, VisitingPresentation.pointListRenderKey(route, 1, 1));
+        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(route, 2, 1)));
+        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(route, 1, 2)));
 
         ApiClient.WalkResult active = new ApiClient.WalkResult(true, "", "walk", "ACTIVE",
                 1, 30, true, 0, null, 0, "VISITING", 33, false);

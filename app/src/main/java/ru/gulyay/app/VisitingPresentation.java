@@ -104,9 +104,9 @@ final class VisitingPresentation {
     }
 
     static String pointListRenderKey(ApiClient.Result route, int currentOrder,
-                                     boolean nextPointAlreadyFeatured) {
+                                     int activeWaypointOrder) {
         StringBuilder key = new StringBuilder()
-                .append(currentOrder).append(':').append(nextPointAlreadyFeatured);
+                .append(currentOrder).append(':').append(activeWaypointOrder);
         if (route == null) return key.append(":no-route").toString();
         key.append(':').append(route.routeVersion).append(':').append(route.points.size());
         for (ApiClient.PlaceOption point : route.points) {
@@ -117,7 +117,7 @@ final class VisitingPresentation {
 
     static String structureRenderKey(ApiClient.Result route, ApiClient.WalkResult walk) {
         if (walk == null) return "no-walk";
-        return pointListRenderKey(route, walk.currentPointOrder, true)
+        return pointListRenderKey(route, walk.currentPointOrder, 0)
                 + ':' + walk.phase;
     }
 

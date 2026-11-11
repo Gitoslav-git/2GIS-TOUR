@@ -33,6 +33,11 @@ final class PositionSubmissionPolicy {
         return retryNotBeforeElapsedMillis - nowElapsedMillis;
     }
 
+    static long nextProbeDelay(boolean active, long requestedDelayMillis) {
+        if (!active) return -1L;
+        return Math.max(MIN_INTERVAL_MILLIS, requestedDelayMillis);
+    }
+
     static boolean shouldRetryPosition(boolean transientFailure, String errorCode) {
         return transientFailure || "RATE_LIMITED".equals(errorCode);
     }

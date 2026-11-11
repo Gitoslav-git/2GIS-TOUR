@@ -8,7 +8,8 @@ from gulyay.models import (Filters, Route, RouteGroup, RouteLeg, RoutePoint,
                            RouteWaypoint, RouteWaypointLeg, RouteZoneGeometry,
                            SearchArea, StartWalk, WalkAction, WalkPosition, WalkState)
 from gulyay.walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
-                         register_position, session_at, start_walk)
+                         rebase_walk_for_route_edit, register_position,
+                         session_at, start_walk)
 from gulyay.visit_zones import VisitZone, VisitZones, bundled_visit_zones_path
 
 
@@ -784,6 +785,35 @@ def test_pause_stops_visit_stopwatch_and_resume_continues_it():
     current = session_at(state, start + timedelta(hours=1, seconds=5))
     assert current.status == "ACTIVE"
     assert current.visitElapsedSeconds == 30 * 60 - 5
+
+
+def test_grouped_edit_removing_current_visit_closes_it_safely():
+    start = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    original = adjacent_grouped_route()
+    first = original.points[0]
+    state = start_walk(original, StartWalk(routeVersion=1), start)
+    state, _ = register_position(state, original, position(first, start), start)
+    state, reached = register_position(
+        state, original, position(first, start + timedelta(seconds=10)),
+        start + timedelta(seconds=10),
+    )
+    assert reached.pointReached is True
+
+    remaining_point = original.points[1].model_copy(update={"order": 1})
+    remaining_group = original.routeGroups[1].model_copy(update={"pointOrder": 1})
+    revised = original.model_copy(update={
+        "routeVersion": 2, "points": [remaining_point],
+        "routeGroups": [remaining_group], "totalMinutes": 30,
+    })
+    changed_at = start + timedelta(minutes=5)
+    rebased = rebase_walk_for_route_edit(state, original, revised, changed_at)
+
+    assert rebased.session.routeVersion == 2
+    assert rebased.session.phase == "MOVING"
+    assert rebased.session.currentPointOrder == 1
+    assert rebased.session.visitStartedAt is None
+    assert rebased.session.visits[-1].leftAt == changed_at
+    assert rebased.session.visits[-1].durationSeconds == 290
 
 
 def test_legacy_final_visit_json_restores_as_unlimited_visiting_stopwatch():

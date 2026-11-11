@@ -5,8 +5,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from gulyay.api import (app, get_geo_provider, get_partner_registry,
-                        get_route_repository)
+from gulyay.api import (app, get_catalog_provider, get_geo_provider,
+                        get_partner_registry, get_route_repository)
+from gulyay.catalog import CatalogPlaceProvider, PlaceCatalog, bundled_seed_path
 from gulyay.geo import (DgisGeoProvider, GeoRouteNotFound, GeoUnavailable,
                         PartnerBranch, clear_geo_caches)
 from gulyay.models import (CreateRoute, Filters, Route, RouteLeg, RoutePoint,
@@ -16,6 +17,8 @@ from gulyay.partners import PARTNER_BRANDS, PartnerOfferSelector, PartnerRegistr
 from gulyay.partner_test_fixture import BRAND_IDS, _brand_id_map
 from gulyay.repository import RouteRepository
 from gulyay.route_builder import insert_suggested_place
+from gulyay.route_groups import refresh_route_groups
+from gulyay.visit_zones import VisitZones
 from gulyay.walk import register_position
 
 
@@ -706,6 +709,46 @@ def test_insert_suggested_place_updates_route_and_visiting_walk_atomically(tmp_p
         app.dependency_overrides.clear()
         registry.close()
         repository.close()
+
+
+def test_insert_partner_into_grouped_route_rebuilds_children_and_keeps_visit(tmp_path):
+    catalog = PlaceCatalog(":memory:")
+    catalog.import_seed(bundled_seed_path())
+    provider = CatalogPlaceProvider(catalog)
+    source = route_for_api()
+    source = source.model_copy(update={
+        "routeGroupsEnabled": True,
+        "points": [source.points[0].model_copy(update={"catalogId": "msk001"})],
+    })
+    grouped = refresh_route_groups(source, provider, VisitZones({}))
+    client, repository, registry, owner, route, state = _insert_endpoint_state(
+        tmp_path, InsertGeo(duration_seconds=240), grouped,
+    )
+    app.dependency_overrides[get_catalog_provider] = lambda: provider
+    try:
+        response = client.post(
+            f"/v1/walks/{state.session.walkId}/insert-suggested-place",
+            headers={"X-Device-Session": str(owner)},
+            json={"expectedRouteVersion": 1, "partnerBrandId": "drinkit",
+                  "dgisPlaceId": "drinkit-branch"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["route"]["routeGroupsEnabled"] is True
+        assert len(body["route"]["routeGroups"]) == 1
+        assert body["route"]["routeGroups"][0]["pointOrder"] == 1
+        assert body["route"]["routeGroups"][0]["catalogId"] == "msk001"
+        assert len(body["route"]["routeGroups"][0]["children"]) == 3
+        assert body["route"]["routeGroups"][0]["waypoints"] == []
+        assert body["route"]["points"][0]["catalogId"] == "msk001"
+        assert body["route"]["points"][1]["catalogId"] is None
+        assert body["walk"]["phase"] == "VISITING"
+        assert body["walk"]["visitStartedAt"] is not None
+    finally:
+        app.dependency_overrides.clear()
+        registry.close()
+        repository.close()
+        catalog.close()
 
 
 def test_legacy_route_points_migrate_to_persisted_provenance():

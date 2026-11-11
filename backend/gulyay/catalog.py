@@ -615,6 +615,21 @@ class CatalogPlaceProvider:
         return [row for row in self.catalog.children_of(parent_id)
                 if row.relation in ALLOWED_RELATIONS]
 
+    def catalog_ids_for_place_ids(self, city_id: str,
+                                  place_ids: Iterable[str]) -> dict[str, str]:
+        """Match route provider ids back to stable active catalog ids."""
+        requested = set(place_ids)
+        if not requested:
+            return {}
+        result: dict[str, str] = {}
+        for row in self.catalog.list_places(city_id):
+            aliases = {row.id, f"catalog:{row.id}"}
+            if row.dgis_place_id:
+                aliases.add(row.dgis_place_id)
+            for value in aliases.intersection(requested):
+                result[value] = row.id
+        return result
+
     def group_waypoint_candidates(self, parent_id: str,
                                   preview: QueryPreview) -> list[PlaceCandidate]:
         """Select a small relevant, routable child subset for an opt-in group."""

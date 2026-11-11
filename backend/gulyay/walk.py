@@ -212,6 +212,78 @@ def session_at(state: WalkState, now: datetime | None = None) -> WalkSession:
     return _session_with_visit_elapsed(normalized, _utc(now))
 
 
+def rebase_walk_for_route_edit(state: WalkState, old_route: Route, new_route: Route,
+                               now: datetime | None = None) -> WalkState:
+    """Move an active walk to a new route version without silently losing a visit."""
+    state = _normalize_legacy_visit(state)
+    moment = _utc(now)
+    session = _session_with_visit_elapsed(state, moment)
+    old_order = session.currentPointOrder
+    old_place_id = (
+        old_route.points[old_order - 1].placeId
+        if old_order is not None and 1 <= old_order <= len(old_route.points)
+        else None
+    )
+    retained_order = next((
+        point.order for point in new_route.points if point.placeId == old_place_id
+    ), None)
+    remaining = max(
+        0,
+        session.estimatedRemainingMinutes
+        + new_route.totalMinutes - old_route.totalMinutes,
+    )
+    visits = list(session.visits)
+
+    if retained_order is not None:
+        if (session.phase == "VISITING" and visits
+                and visits[-1].leftAt is None):
+            point = new_route.points[retained_order - 1]
+            group = _route_group(new_route, retained_order)
+            visits[-1] = visits[-1].model_copy(update={
+                "pointOrder": retained_order,
+                "catalogId": group.catalogId if group is not None else point.catalogId,
+            })
+        session = session.model_copy(update={
+            "routeVersion": new_route.routeVersion,
+            "currentPointOrder": retained_order,
+            "estimatedRemainingMinutes": remaining,
+            "visits": visits,
+        })
+        recommendations = state.recommendations
+    else:
+        if session.phase == "VISITING" and visits and visits[-1].leftAt is None:
+            visits[-1] = visits[-1].model_copy(update={
+                "leftAt": moment,
+                "durationSeconds": session.visitElapsedSeconds,
+            })
+        next_order = min(old_order or 1, len(new_route.points))
+        session = session.model_copy(update={
+            "routeVersion": new_route.routeVersion,
+            "currentPointOrder": next_order,
+            "estimatedRemainingMinutes": remaining,
+            "phase": "MOVING",
+            "visits": visits,
+            "visitStartedAt": None,
+            "visitElapsedSeconds": 0,
+            "finalPointVisitStartedAt": None,
+        })
+        recommendations = state.recommendations.model_copy(update={"selected": None})
+
+    return state.model_copy(update={
+        "session": session,
+        "recommendations": recommendations,
+        "proximityStartedAt": None,
+        "proximityPointOrder": None,
+        "exitStartedAt": None,
+        "exitPointOrder": None,
+        "exitLastConfirmedAt": None,
+        "exitConfirmationCount": 0,
+        "exitDirectNextPointOrder": None,
+        "visitPausedSeconds": state.visitPausedSeconds if retained_order is not None else 0,
+        "finalPointPausedSeconds": 0,
+    })
+
+
 def _register_visit_position(state: WalkState, route: Route, measured: datetime,
                              position: WalkPosition,
                              distance: int,

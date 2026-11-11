@@ -16,7 +16,7 @@ from gulyay.catalog import CatalogPlaceProvider, PlaceCatalog
 from gulyay.geo import GeoRateLimited, GeoRouteNotFound, GeoUnavailable
 from gulyay.models import (IntentExtraction, PlaceCandidate, RouteGroup, RouteLeg,
                            RouteWaypoint, RouteWaypointLeg, RouteZoneGeometry,
-                           SearchArea)
+                           SearchArea, Visit)
 from gulyay.repository import RouteRepository
 
 client = TestClient(app)
@@ -722,24 +722,25 @@ def _mark_route_grouped(session, route):
     return grouped
 
 
-def test_grouped_route_rejects_mutation_but_keeps_conversation_reply():
+def test_grouped_route_allows_rebuild_and_keeps_conversation_reply():
     session, headers, route = _create_chat_edit_route()
     grouped = _mark_route_grouped(session, route)
     edit = client.post(f"/v1/routes/{route['routeId']}/revisions", headers=headers, json={
         "baseVersion": grouped.routeVersion, "mode": "CHANGE_QUERY", "query": "new route",
     })
-    assert edit.status_code == 409
-    assert edit.json()["error"]["code"] == "GROUPED_ROUTE_EDIT_UNSUPPORTED"
+    assert edit.status_code == 200
+    assert edit.json()["routeVersion"] == grouped.routeVersion + 1
+    assert edit.json()["routeGroupsEnabled"] is True
     reply = client.post(f"/v1/routes/{route['routeId']}/revisions", headers=headers, json={
-        "baseVersion": grouped.routeVersion, "mode": "CHAT_REVISION",
+        "baseVersion": edit.json()["routeVersion"], "mode": "CHAT_REVISION",
         "message": "Почему выбрал это место?",
     })
     assert reply.status_code == 200
     assert "reply" in reply.json()
-    assert reply.json()["routeVersion"] == grouped.routeVersion
+    assert reply.json()["routeVersion"] == edit.json()["routeVersion"]
 
 
-def test_grouped_route_rejects_partner_insertion_without_changing_version():
+def test_grouped_route_partner_insertion_reaches_normal_walk_validation():
     session, headers, route = _create_chat_edit_route()
     grouped = _mark_route_grouped(session, route)
     started = client.post(
@@ -755,9 +756,27 @@ def test_grouped_route_rejects_partner_insertion_without_changing_version():
         },
     )
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "GROUPED_ROUTE_EDIT_UNSUPPORTED"
+    assert response.json()["error"]["code"] == "WALK_INVALID_STATE"
     stored = client.get(f"/v1/routes/{route['routeId']}", headers=headers)
     assert stored.json()["routeVersion"] == grouped.routeVersion
+
+
+def test_grouped_route_allows_chat_point_mutation():
+    session, headers, route = _create_chat_edit_route()
+    grouped = _mark_route_grouped(session, route)
+    removed = grouped.points[0]
+
+    revised = client.post(
+        f"/v1/routes/{route['routeId']}/revisions", headers=headers,
+        json={"baseVersion": grouped.routeVersion, "mode": "CHAT_REVISION",
+              "message": f"Удали {removed.name}"},
+    )
+
+    assert revised.status_code == 200, revised.text
+    assert revised.json()["routeGroupsEnabled"] is True
+    assert [point["placeId"] for point in revised.json()["points"]] == [
+        grouped.points[1].placeId,
+    ]
 
 
 def test_chat_remove_keeps_every_other_point_and_order():
@@ -948,6 +967,48 @@ def test_paused_walk_is_rebased_and_can_resume_after_point_edit():
                           json={"action": "RESUME"})
     assert resumed.status_code == 200 and resumed.json()["status"] == "ACTIVE"
     assert resumed.json()["routeVersion"] == 2
+
+
+def test_grouped_edit_preserves_active_visit_and_remaps_its_order():
+    app.dependency_overrides[get_intent_provider] = FakeIntent
+    app.dependency_overrides[get_geo_provider] = FakeGeo
+    session = str(uuid4())
+    headers = {"X-Device-Session": session}
+    created = client.post("/v1/routes", headers=headers, json={
+        "cityId": "tula", "query": "two historic places for two hours",
+        "deviceSessionId": session,
+    })
+    assert created.status_code == 200
+    grouped = _mark_route_grouped(session, created.json())
+    started = client.post(
+        f"/v1/routes/{grouped.routeId}/walks", headers=headers,
+        json={"routeVersion": grouped.routeVersion},
+    )
+    assert started.status_code == 200
+    state = repository.get_walk(UUID(started.json()["walkId"]), UUID(session))
+    moment = datetime.now(timezone.utc) - timedelta(minutes=3)
+    current_point = grouped.points[0]
+    visiting = state.model_copy(update={"session": state.session.model_copy(update={
+        "phase": "VISITING", "currentPointOrder": 1,
+        "visitStartedAt": moment, "visitElapsedSeconds": 180,
+        "visits": [Visit(pointOrder=1, reachedAt=moment,
+                         catalogId="msk001")],
+    })})
+    assert repository.replace_walk(visiting, UUID(session))
+
+    revised = client.post(f"/v1/routes/{grouped.routeId}/revisions", headers=headers, json={
+        "baseVersion": grouped.routeVersion, "mode": "EDIT_POINTS",
+        "pointIds": [grouped.points[1].placeId, current_point.placeId],
+        "allowDurationOverrun": True,
+    })
+    assert revised.status_code == 200, revised.text
+    persisted = repository.get_walk(visiting.session.walkId, UUID(session))
+    assert persisted.session.routeVersion == grouped.routeVersion + 1
+    assert persisted.session.phase == "VISITING"
+    assert persisted.session.currentPointOrder == 2
+    assert persisted.session.visitStartedAt == moment
+    assert persisted.session.visits[-1].pointOrder == 2
+    assert persisted.session.visits[-1].leftAt is None
 
 
 def test_explicit_duration_edit_requires_confirmation_then_accepts_override():

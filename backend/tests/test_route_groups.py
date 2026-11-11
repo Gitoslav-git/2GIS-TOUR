@@ -5,7 +5,8 @@ from gulyay.catalog import (CatalogPlaceProvider, PlaceCatalog,
                             bundled_seed_path)
 from gulyay.models import (Filters, PlaceCandidate, QueryPreview, Route, RouteLeg,
                            RoutePoint, SearchArea)
-from gulyay.route_groups import attach_route_groups, logical_group_candidates
+from gulyay.route_groups import (attach_route_groups, logical_group_candidates,
+                                 refresh_route_groups)
 from gulyay.visit_zones import VisitZone, VisitZones
 
 
@@ -178,3 +179,34 @@ def test_bundled_red_square_and_kremlin_groups_expose_all_children():
             assert len(response["routeGroups"]) == 1
             assert len(response["routeGroups"][0]["children"]) == expected_count
             assert response["routeGroups"][0]["waypoints"] == []
+
+
+def test_refresh_recovers_catalog_ids_and_reorders_complete_groups():
+    catalog = PlaceCatalog(":memory:")
+    catalog.import_seed(bundled_seed_path())
+    provider = CatalogPlaceProvider(catalog)
+    try:
+        red_square, kremlin = catalog.get_by_ids(["msk001", "msk005"])
+        route = parent_route().model_copy(update={"points": [
+            RoutePoint(
+                order=1, placeId=kremlin.dgis_place_id, name=kremlin.name,
+                lat=kremlin.lat, lon=kremlin.lon, visitMinutes=40,
+                scheduleStatus="OPEN", isFood=False,
+            ),
+            RoutePoint(
+                order=2, placeId=red_square.dgis_place_id, name=red_square.name,
+                lat=red_square.lat, lon=red_square.lon, visitMinutes=40,
+                scheduleStatus="OPEN", isFood=False,
+            ),
+        ]})
+
+        refreshed = refresh_route_groups(route, provider, VisitZones({}))
+
+        assert [point.catalogId for point in refreshed.points] == ["msk005", "msk001"]
+        assert [(group.pointOrder, group.catalogId, len(group.children))
+                for group in refreshed.routeGroups] == [
+            (1, "msk005", 7), (2, "msk001", 3),
+        ]
+        assert all(group.waypoints == [] for group in refreshed.routeGroups)
+    finally:
+        catalog.close()

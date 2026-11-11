@@ -2320,11 +2320,8 @@ public final class MapActivity extends ComponentActivity {
             mapRouteSummary.setVisibility(View.VISIBLE);
             mapRouteSummary.setText("Прогулка на паузе");
         }
-        boolean grouped = RouteGroupSupport.hasActiveGroup(route, walk);
-        // The chat remains available for conversational replies. Mutating requests
-        // receive the backend's friendly GROUPED_ROUTE_EDIT_UNSUPPORTED response.
         editQuery.setEnabled(active || paused);
-        editPoints.setEnabled((active || paused) && !grouped);
+        editPoints.setEnabled(active || paused);
         if ("COMPLETED".equals(walk.status) || "STOPPED".equals(walk.status)) {
             persistFinishedRoute();
             clearActiveWalk();
@@ -2461,8 +2458,7 @@ public final class MapActivity extends ComponentActivity {
     }
 
     private void syncPartnerOffer() {
-        if (RouteGroupSupport.hasActiveGroup(route, walk)
-                || walk == null || !PartnerOfferRequestPolicy.eligible(
+        if (walk == null || !PartnerOfferRequestPolicy.eligible(
                 walk.status, walk.phase, walk.currentPointOrder)) {
             invalidatePartnerOffer();
             return;
@@ -2519,7 +2515,6 @@ public final class MapActivity extends ComponentActivity {
         VisitingPresentation.PartnerOffer offer = VisitingPresentation.PartnerOffer.from(
                 routeViewModel.partnerOffer);
         if (partnerOfferInsertInFlight || route == null || walk == null
-                || RouteGroupSupport.hasActiveGroup(route, walk)
                 || !VisitingPresentation.shouldShowPartnerOffer(offer)) return;
         ApiClient.PartnerOffer selected = routeViewModel.partnerOffer;
         partnerOfferInsertInFlight = true;

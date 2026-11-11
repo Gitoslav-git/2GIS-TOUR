@@ -29,12 +29,26 @@ def attach_route_groups(route: Route, candidates: list[PlaceCandidate],
                         catalog: CatalogPlaceProvider,
                         zones: VisitZones) -> Route:
     """Attach complete child catalogs without changing route geometry or budget."""
-    del preview, geo
+    del candidates, preview, geo
+    return refresh_route_groups(route, catalog, zones)
+
+
+def refresh_route_groups(route: Route, catalog: CatalogPlaceProvider,
+                         zones: VisitZones) -> Route:
+    """Rebuild free-roam groups after the ordered parent points change."""
+    missing = [point.placeId for point in route.points if point.catalogId is None]
+    matched = (catalog.catalog_ids_for_place_ids(route.cityId, missing)
+               if missing and hasattr(catalog, "catalog_ids_for_place_ids") else {})
+    points = [
+        point if point.catalogId is not None or point.placeId not in matched
+        else point.model_copy(update={"catalogId": matched[point.placeId]})
+        for point in route.points
+    ]
     groups: list[RouteGroup] = []
-    for point, candidate in zip(route.points, candidates):
-        if not candidate.catalogId:
+    for point in points:
+        if not point.catalogId:
             continue
-        rows = catalog.group_children(candidate.catalogId)
+        rows = catalog.group_children(point.catalogId)
         if not rows:
             continue
         children = [RouteChild(
@@ -45,15 +59,16 @@ def attach_route_groups(route: Route, candidates: list[PlaceCandidate],
             lon=row.lon,
             relation=row.relation,
         ) for row in rows]
-        zone = zones.get(candidate.catalogId)
+        zone = zones.get(point.catalogId)
         groups.append(RouteGroup(
             pointOrder=point.order,
-            catalogId=candidate.catalogId,
+            catalogId=point.catalogId,
             children=children,
             visitZone=(RouteZoneGeometry.model_validate(zone.geometry)
                        if zone is not None else None),
         ))
     return route.model_copy(update={
+        "points": points,
         "routeGroupsEnabled": True,
         "routeGroups": groups,
     })

@@ -1022,7 +1022,7 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
             lat=candidate.lat, lon=candidate.lon, visitMinutes=visit_minutes,
             scheduleStatus=schedule_status, isFood=candidate.isFood,
             pointType=old.pointType if old is not None else ("FOOD" if candidate.isFood else "TOUR"),
-            catalogId=candidate.catalogId,
+            catalogId=candidate.catalogId or (old.catalogId if old is not None else None),
         ))
         legs.append(leg)
         current = candidate.lat, candidate.lon
@@ -1079,7 +1079,7 @@ def rebuild_route_with_points(source: Route, payload: CreateRoute,
         "planningStatus": "DEGRADED" if unmet else "SUCCESS",
         "unmetPreferences": list(dict.fromkeys(unmet)),
         "durationOverrunAccepted": duration_overrun_accepted,
-        "routeGroupsEnabled": False, "routeGroups": [],
+        "routeGroupsEnabled": source.routeGroupsEnabled, "routeGroups": [],
     })
 
 
@@ -1087,8 +1087,7 @@ def insert_suggested_place(source: Route, branch: PartnerBranch, segment: str,
                            current_order: int, geo: GeoProvider,
                            now: datetime | None = None) -> Route:
     """Insert a verified branch after the active point and reroute only the suffix."""
-    if (source.routeGroups
-            or segment not in {"COFFEE", "RESTAURANT"}
+    if (segment not in {"COFFEE", "RESTAURANT"}
             or not 1 <= current_order <= len(source.points)
             or len(source.points) >= 8
             or any(point.placeId == branch.dgis_place_id for point in source.points)):

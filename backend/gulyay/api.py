@@ -36,8 +36,10 @@ from .route_edit import (RouteEditNeedsClarification, apply_route_edit,
                          parse_route_edit, route_conversation_reply)
 from .route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, build_route,
                             insert_suggested_place, rebuild_route_with_points)
+from .route_groups import refresh_route_groups
 from .walk import (WalkInvalidPosition, WalkInvalidState, apply_action,
-                   register_position, session_at, start_walk)
+                   rebase_walk_for_route_edit, register_position, session_at,
+                   start_walk)
 from .visit_zones import bundled_visit_zones_path, load_visit_zones
 from .version import __version__ as APP_VERSION
 
@@ -561,6 +563,7 @@ def insert_walk_suggested_place(
         repository: RouteRepository = Depends(get_route_repository),
         registry: PartnerRegistry = Depends(get_partner_registry),
         geo: DgisGeoProvider = Depends(get_geo_provider),
+        catalog: CatalogPlaceProvider = Depends(get_catalog_provider),
 ) -> InsertSuggestedPlaceResponse | JSONResponse:
     request_id = str(x_request_id) if x_request_id else None
     if x_device_session is None:
@@ -584,12 +587,6 @@ def insert_walk_suggested_place(
             or state.session.routeVersion != current.routeVersion):
         return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
                        {"currentVersion": current.routeVersion})
-    if current.routeGroups:
-        return failure(
-            "GROUPED_ROUTE_EDIT_UNSUPPORTED",
-            "Добавление партнёрской точки в групповой маршрут пока недоступно",
-            409, request_id,
-        )
     if state.session.status != "ACTIVE" or state.session.phase != "VISITING":
         return failure("WALK_INVALID_STATE", "Добавление доступно только во время посещения",
                        409, request_id)
@@ -650,6 +647,8 @@ def insert_walk_suggested_place(
         replacement = insert_suggested_place(
             current, branch, segment, current_order, geo,
         ).model_copy(update={"routeVersion": current.routeVersion + 1})
+        if current.routeGroupsEnabled:
+            replacement = refresh_route_groups(replacement, catalog, VISIT_ZONES)
     except (GeoAuthenticationError, GeoRateLimited, GeoInvalidResponse, GeoUnavailable) as exc:
         return dgis_failure(exc, request_id)
     except DurationConfirmationRequired as exc:
@@ -872,12 +871,6 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
     if revision.baseVersion != current.routeVersion:
         return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
                        {"currentVersion": current.routeVersion})
-    if current.routeGroups and revision.mode != "CHAT_REVISION":
-        return failure(
-            "GROUPED_ROUTE_EDIT_UNSUPPORTED",
-            "Редактирование группового маршрута пока недоступно",
-            409, request_id,
-        )
     if revision.mode in {"CHANGE_QUERY", "CHAT_REVISION"}:
         if revision.mode == "CHAT_REVISION":
             if (revision.message is None or revision.query is not None
@@ -888,12 +881,6 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
             if reply is not None:
                 return JSONResponse(content={"reply": reply, "routeId": str(route_id),
                                              "routeVersion": current.routeVersion})
-            if current.routeGroups:
-                return failure(
-                    "GROUPED_ROUTE_EDIT_UNSUPPORTED",
-                    "Редактирование группового маршрута пока недоступно",
-                    409, request_id,
-                )
             try:
                 edit = parse_route_edit(revision.message)
                 if edit.operation != "REBUILD":
@@ -941,6 +928,7 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
                 cityId=source.cityId, query=next_query,
                 filters=revision.filters if revision.filters is not None else source.filters,
                 startLocation=source.startLocation, deviceSessionId=x_device_session,
+                routeGroupsEnabled=current.routeGroupsEnabled,
             )
             route_or_error = _build(payload, intent_provider, geo, request_id, catalog)
             if isinstance(route_or_error, JSONResponse):
@@ -986,43 +974,32 @@ def revise_route(request: Request, route_id: UUID, revision: RouteRevision,
         except RouteNotFound:
             return failure("ROUTE_NOT_FOUND", "Нельзя построить маршрут в выбранном порядке", 422,
                            request_id)
-    if not repository.replace(replacement, x_device_session, payload, revision.baseVersion):
+    if current.routeGroupsEnabled:
+        replacement = refresh_route_groups(replacement, catalog, VISIT_ZONES)
+    with STATE_LOCK:
+        active_walk = repository.find_active_walk(x_device_session)
+        if active_walk is not None and active_walk.session.routeId == route_id:
+            if active_walk.session.routeVersion != revision.baseVersion:
+                return failure(
+                    "VERSION_CONFLICT", "Маршрут или прогулка уже изменились", 409,
+                    request_id, {"currentVersion": current.routeVersion},
+                )
+            rebased_walk = rebase_walk_for_route_edit(
+                active_walk, current, replacement,
+            )
+            replaced = repository.replace_route_and_walk(
+                replacement, rebased_walk, x_device_session, payload,
+                revision.baseVersion,
+            )
+        else:
+            replaced = repository.replace(
+                replacement, x_device_session, payload, revision.baseVersion,
+            )
+    if not replaced:
         latest = repository.get(route_id, x_device_session)
         current_version = latest[0].routeVersion if latest else revision.baseVersion
         return failure("VERSION_CONFLICT", "Маршрут уже изменён", 409, request_id,
                        {"currentVersion": current_version})
-    # A paused walk must continue against the accepted route revision rather
-    # than the immutable geometry of its previous version. Preserve whether
-    # the user paused it manually; the client decides if an automatic editing
-    # pause should be resumed after confirmation.
-    active_walk = repository.find_active_walk(x_device_session)
-    if active_walk is not None and active_walk.session.routeId == route_id:
-        current_order = min(
-            active_walk.session.currentPointOrder or 1,
-            max(1, len(replacement.points)),
-        )
-        rebased_session = active_walk.session.model_copy(update={
-            "routeVersion": replacement.routeVersion,
-            "currentPointOrder": current_order,
-            "estimatedRemainingMinutes": replacement.totalMinutes,
-            "phase": "MOVING",
-            "visitStartedAt": None,
-            "visitElapsedSeconds": 0,
-            "finalPointVisitStartedAt": None,
-        })
-        rebased_walk = active_walk.model_copy(update={
-            "session": rebased_session,
-            "proximityStartedAt": None,
-            "proximityPointOrder": None,
-            "exitStartedAt": None,
-            "exitPointOrder": None,
-            "exitLastConfirmedAt": None,
-            "exitConfirmationCount": 0,
-            "exitDirectNextPointOrder": None,
-            "visitPausedSeconds": 0,
-            "finalPointPausedSeconds": 0,
-        })
-        repository.replace_walk(rebased_walk, x_device_session)
     with STATE_LOCK:
         if idempotency_key:
             IDEMPOTENT_REVISIONS[idempotency_key] = replacement

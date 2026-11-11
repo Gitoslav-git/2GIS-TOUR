@@ -122,6 +122,7 @@ def _candidate_from_point(point) -> PlaceCandidate:
     return PlaceCandidate(
         placeId=point.placeId, name=point.name, lat=point.lat, lon=point.lon,
         rubrics=[], schedule={}, isFood=point.isFood,
+        catalogId=point.catalogId,
     )
 
 

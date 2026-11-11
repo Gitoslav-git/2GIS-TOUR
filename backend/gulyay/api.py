@@ -49,6 +49,8 @@ ROUTE_REPOSITORY = RouteRepository()
 PLACE_CATALOG = PlaceCatalog()
 for seed_path in bundled_seed_paths():
     PLACE_CATALOG.import_seed(seed_path)
+# The old seed entry may still exist in persistent Codespaces SQLite.
+PLACE_CATALOG.retire_places(("msk025",))
 PLACE_CATALOG.apply_manual_overrides(bundled_manual_overrides())
 CATALOG_PROVIDER = CatalogPlaceProvider(PLACE_CATALOG)
 VISIT_ZONES = load_visit_zones(

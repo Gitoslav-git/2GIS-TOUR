@@ -2,5 +2,12 @@
   "msk001": {
     "lat": 55.754549,
     "lon": 37.618666
+  },
+  "msk060": {
+    "lat": 55.736427,
+    "lon": 37.593084,
+    "dgis_place_id": null,
+    "provider_name": null,
+    "allow_coords_only": true
   }
 }

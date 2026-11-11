@@ -442,6 +442,20 @@ class PlaceCatalog:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    def retire_places(self, ids: Iterable[str]) -> int:
+        """Deactivate retired catalog entries in persistent SQLite databases."""
+        identifiers = list(dict.fromkeys(ids))
+        if not identifiers:
+            return 0
+        placeholders = ",".join("?" for _ in identifiers)
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                f"UPDATE places SET is_active = 0, updated_at = CURRENT_TIMESTAMP "
+                f"WHERE id IN ({placeholders}) AND is_active = 1",
+                identifiers,
+            )
+        return cursor.rowcount
+
     def unresolved(self, city_id: str | None = None) -> list[CatalogPlace]:
         query = """SELECT * FROM places WHERE is_active = 1 AND
                    (lat IS NULL OR lon IS NULL OR

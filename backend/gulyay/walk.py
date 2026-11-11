@@ -389,7 +389,7 @@ def _direct_next_zone_order(route: Route, current_order: int,
 def _visit_zone_geometry(route: Route, point_order: int,
                          visit_zones: VisitZones | None) -> dict | None:
     group = _route_group(route, point_order)
-    if group is not None:
+    if group is not None and group.visitZone is not None:
         return group.visitZone.model_dump()
     point = route.points[point_order - 1]
     if visit_zones is None or not point.catalogId:

@@ -79,16 +79,49 @@ final class ApiClient {
         }
     }
 
+    static final class RouteChild {
+        final String catalogId, placeId, name, relation;
+        final double lat, lon;
+
+        RouteChild(String catalogId, String placeId, String name,
+                   double lat, double lon, String relation) {
+            this.catalogId = catalogId; this.placeId = placeId; this.name = name;
+            this.lat = lat; this.lon = lon; this.relation = relation;
+        }
+
+        boolean hasCoordinates() { return Double.isFinite(lat) && Double.isFinite(lon); }
+    }
+
     static final class RouteGroup {
         final int pointOrder;
         final String catalogId;
+        final List<RouteChild> children;
         final List<RouteWaypoint> waypoints;
         final List<RouteWaypointLeg> waypointLegs;
+        final boolean hasVisitZone;
 
         RouteGroup(int pointOrder, String catalogId, List<RouteWaypoint> waypoints,
                    List<RouteWaypointLeg> waypointLegs) {
+            this(pointOrder, catalogId, childrenFromLegacy(waypoints), waypoints,
+                    waypointLegs, true);
+        }
+
+        RouteGroup(int pointOrder, String catalogId, List<RouteChild> children,
+                   List<RouteWaypoint> waypoints, List<RouteWaypointLeg> waypointLegs,
+                   boolean hasVisitZone) {
             this.pointOrder = pointOrder; this.catalogId = catalogId;
+            this.children = children;
             this.waypoints = waypoints; this.waypointLegs = waypointLegs;
+            this.hasVisitZone = hasVisitZone;
+        }
+
+        private static List<RouteChild> childrenFromLegacy(List<RouteWaypoint> waypoints) {
+            List<RouteChild> children = new ArrayList<>();
+            if (waypoints != null) for (RouteWaypoint waypoint : waypoints) {
+                children.add(new RouteChild(waypoint.catalogId, waypoint.placeId,
+                        waypoint.name, waypoint.lat, waypoint.lon, waypoint.relation));
+            }
+            return children;
         }
     }
 
@@ -331,6 +364,15 @@ final class ApiClient {
         JSONArray value = new JSONArray();
         if (groups == null) return value;
         for (RouteGroup group : groups) {
+            JSONArray children = new JSONArray();
+            for (RouteChild child : group.children) {
+                JSONObject item = new JSONObject()
+                        .put("catalogId", child.catalogId).put("placeId", child.placeId)
+                        .put("name", child.name).put("relation", child.relation);
+                item.put("lat", child.hasCoordinates() ? child.lat : JSONObject.NULL);
+                item.put("lon", child.hasCoordinates() ? child.lon : JSONObject.NULL);
+                children.put(item);
+            }
             JSONArray waypoints = new JSONArray();
             for (RouteWaypoint waypoint : group.waypoints) waypoints.put(new JSONObject()
                     .put("order", waypoint.order).put("catalogId", waypoint.catalogId)
@@ -345,8 +387,9 @@ final class ApiClient {
                     .put("durationSeconds", leg.durationSeconds)
                     .put("path", coordinatesJson(leg.path)));
             value.put(new JSONObject().put("pointOrder", group.pointOrder)
-                    .put("catalogId", group.catalogId).put("waypoints", waypoints)
-                    .put("waypointLegs", legs));
+                    .put("catalogId", group.catalogId).put("children", children)
+                    .put("waypoints", waypoints).put("waypointLegs", legs)
+                    .put("hasVisitZone", group.hasVisitZone));
         }
         return value;
     }
@@ -357,6 +400,16 @@ final class ApiClient {
         if (groups == null) return parsed;
         for (int i = 0; i < groups.length(); i++) {
             JSONObject group = groups.getJSONObject(i);
+            List<RouteChild> children = new ArrayList<>();
+            JSONArray sourceChildren = group.optJSONArray("children");
+            if (sourceChildren != null) for (int j = 0; j < sourceChildren.length(); j++) {
+                JSONObject child = sourceChildren.getJSONObject(j);
+                children.add(new RouteChild(child.getString("catalogId"),
+                        child.optString("placeId", null), child.getString("name"),
+                        child.optDouble("lat", Double.NaN),
+                        child.optDouble("lon", Double.NaN),
+                        child.optString("relation", "")));
+            }
             List<RouteWaypoint> waypoints = new ArrayList<>();
             JSONArray sourceWaypoints = group.optJSONArray("waypoints");
             if (sourceWaypoints != null) for (int j = 0; j < sourceWaypoints.length(); j++) {
@@ -381,8 +434,18 @@ final class ApiClient {
                         leg.getInt("toWaypointOrder"), leg.optInt("distanceMeters"),
                         leg.optInt("durationSeconds"), compactPath(path, 240)));
             }
+            // A legacy route normalized by a newer backend may contain children: []
+            // alongside the original waypoints, so an empty list must also fall back.
+            if (children.isEmpty()) for (RouteWaypoint waypoint : waypoints) {
+                children.add(new RouteChild(waypoint.catalogId, waypoint.placeId,
+                        waypoint.name, waypoint.lat, waypoint.lon, waypoint.relation));
+            }
+            boolean hasVisitZone = snapshot
+                    ? group.optBoolean("hasVisitZone", true)
+                    : group.has("visitZone") && !group.isNull("visitZone");
             parsed.add(new RouteGroup(group.getInt("pointOrder"),
-                    group.optString("catalogId", null), waypoints, legs));
+                    group.optString("catalogId", null), children, waypoints, legs,
+                    hasVisitZone));
         }
         return parsed;
     }

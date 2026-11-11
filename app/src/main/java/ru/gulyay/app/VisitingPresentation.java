@@ -1,6 +1,8 @@
 package ru.gulyay.app;
 
 import java.util.Locale;
+import java.util.Set;
+import java.util.TreeSet;
 
 /** Pure VISITING presentation data; it never changes walk or GPS state. */
 final class VisitingPresentation {
@@ -104,20 +106,28 @@ final class VisitingPresentation {
     }
 
     static String pointListRenderKey(ApiClient.Result route, int currentOrder,
-                                     int activeWaypointOrder) {
+                                     Set<Integer> expandedGroupOrders) {
         StringBuilder key = new StringBuilder()
-                .append(currentOrder).append(':').append(activeWaypointOrder);
+                .append(currentOrder).append(':')
+                .append(new TreeSet<>(expandedGroupOrders));
         if (route == null) return key.append(":no-route").toString();
         key.append(':').append(route.routeVersion).append(':').append(route.points.size());
         for (ApiClient.PlaceOption point : route.points) {
             key.append('|').append(point.placeId).append(':').append(point.name);
+        }
+        for (ApiClient.RouteGroup group : route.routeGroups) {
+            key.append("|g:").append(group.pointOrder).append(':').append(group.children.size());
+            for (ApiClient.RouteChild child : group.children) {
+                key.append(':').append(child.catalogId).append(':').append(child.name);
+            }
         }
         return key.toString();
     }
 
     static String structureRenderKey(ApiClient.Result route, ApiClient.WalkResult walk) {
         if (walk == null) return "no-walk";
-        return pointListRenderKey(route, walk.currentPointOrder, 0)
+        return pointListRenderKey(route, walk.currentPointOrder,
+                java.util.Collections.emptySet())
                 + ':' + walk.phase;
     }
 

@@ -320,11 +320,15 @@ public class MainActivityRecoveryTest {
 
     @Test public void visitingPointListOnlyRendersWhenItsStructureChanges() {
         ApiClient.Result route = visitingRoute();
-        String initial = VisitingPresentation.pointListRenderKey(route, 1, 1);
+        String initial = VisitingPresentation.pointListRenderKey(
+                route, 1, Collections.singleton(1));
 
-        assertEquals(initial, VisitingPresentation.pointListRenderKey(route, 1, 1));
-        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(route, 2, 1)));
-        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(route, 1, 2)));
+        assertEquals(initial, VisitingPresentation.pointListRenderKey(
+                route, 1, Collections.singleton(1)));
+        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(
+                route, 2, Collections.singleton(1))));
+        assertFalse(initial.equals(VisitingPresentation.pointListRenderKey(
+                route, 1, Collections.singleton(2))));
 
         ApiClient.WalkResult active = new ApiClient.WalkResult(true, "", "walk", "ACTIVE",
                 1, 30, true, 0, null, 0, "VISITING", 33, false);

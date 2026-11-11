@@ -5,46 +5,35 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-/** Pure group presentation/navigation rules; never mutates backend walk state. */
+/** Pure free-roam group presentation rules; never mutates backend walk state. */
 final class RouteGroupSupport {
     static final class DisplayRow {
         final int pointOrder;
         final ApiClient.PlaceOption point;
-        final ApiClient.RouteWaypoint waypoint;
-        final boolean activeWaypoint;
+        final ApiClient.RouteChild child;
+        final boolean hasChildren;
+        final boolean expanded;
 
         private DisplayRow(int pointOrder, ApiClient.PlaceOption point,
-                           ApiClient.RouteWaypoint waypoint, boolean activeWaypoint) {
+                           ApiClient.RouteChild child, boolean hasChildren,
+                           boolean expanded) {
             this.pointOrder = pointOrder;
             this.point = point;
-            this.waypoint = waypoint;
-            this.activeWaypoint = activeWaypoint;
+            this.child = child;
+            this.hasChildren = hasChildren;
+            this.expanded = expanded;
         }
 
-        static DisplayRow point(int pointOrder, ApiClient.PlaceOption point) {
-            return new DisplayRow(pointOrder, point, null, false);
+        static DisplayRow point(int pointOrder, ApiClient.PlaceOption point,
+                                boolean hasChildren, boolean expanded) {
+            return new DisplayRow(pointOrder, point, null, hasChildren, expanded);
         }
 
-        static DisplayRow waypoint(int pointOrder, ApiClient.RouteWaypoint waypoint,
-                                   boolean activeWaypoint) {
-            return new DisplayRow(pointOrder, null, waypoint, activeWaypoint);
+        static DisplayRow child(int pointOrder, ApiClient.RouteChild child) {
+            return new DisplayRow(pointOrder, null, child, false, false);
         }
 
-        boolean isWaypoint() { return waypoint != null; }
-    }
-
-    static final class NavigationTarget {
-        final ApiClient.RouteWaypoint waypoint;
-        final ApiClient.RouteWaypointLeg leg;
-        final int legIndex;
-        final int pathIndex;
-        final int remainingMeters;
-
-        NavigationTarget(ApiClient.RouteWaypoint waypoint, ApiClient.RouteWaypointLeg leg,
-                         int legIndex, int pathIndex, int remainingMeters) {
-            this.waypoint = waypoint; this.leg = leg; this.legIndex = legIndex;
-            this.pathIndex = pathIndex; this.remainingMeters = remainingMeters;
-        }
+        boolean isChild() { return child != null; }
     }
 
     private RouteGroupSupport() { }
@@ -52,7 +41,8 @@ final class RouteGroupSupport {
     static ApiClient.RouteGroup groupForPoint(ApiClient.Result route, int pointOrder) {
         if (route == null || route.routeGroups == null) return null;
         for (ApiClient.RouteGroup group : route.routeGroups) {
-            if (group.pointOrder == pointOrder && !group.waypoints.isEmpty()) return group;
+            if (group.pointOrder == pointOrder && group.children != null
+                    && !group.children.isEmpty()) return group;
         }
         return null;
     }
@@ -61,67 +51,54 @@ final class RouteGroupSupport {
         return walk != null && groupForPoint(route, walk.currentPointOrder) != null;
     }
 
-    static List<DisplayRow> displayRows(ApiClient.Result route, int currentPointOrder,
-                                        int activeWaypointOrder) {
+    static List<DisplayRow> displayRows(ApiClient.Result route, Set<Integer> expandedOrders) {
         List<DisplayRow> rows = new ArrayList<>();
         if (route == null || route.points == null) return rows;
-        int startIndex = currentPointOrder > 0
-                ? Math.min(currentPointOrder - 1, route.points.size()) : 0;
-        for (int index = startIndex; index < route.points.size(); index++) {
+        Set<Integer> expanded = expandedOrders == null ? new HashSet<>() : expandedOrders;
+        for (int index = 0; index < route.points.size(); index++) {
             int pointOrder = index + 1;
             ApiClient.PlaceOption point = route.points.get(index);
-            rows.add(DisplayRow.point(pointOrder, point));
             ApiClient.RouteGroup group = groupForPoint(route, pointOrder);
-            if (group == null) continue;
-            for (ApiClient.RouteWaypoint waypoint : group.waypoints) {
-                if (sameLogicalPoint(point, waypoint)) continue;
-                rows.add(DisplayRow.waypoint(pointOrder, waypoint,
-                        pointOrder == currentPointOrder
-                                && waypoint.order == activeWaypointOrder));
+            boolean hasChildren = group != null;
+            boolean isExpanded = hasChildren && expanded.contains(pointOrder);
+            rows.add(DisplayRow.point(pointOrder, point, hasChildren, isExpanded));
+            if (isExpanded) for (ApiClient.RouteChild child : group.children) {
+                if (!sameLogicalPoint(point, child)) {
+                    rows.add(DisplayRow.child(pointOrder, child));
+                }
             }
         }
         return rows;
     }
 
-    private static boolean sameLogicalPoint(ApiClient.PlaceOption point,
-                                            ApiClient.RouteWaypoint waypoint) {
-        if (point.placeId != null && point.placeId.equals(waypoint.placeId)) return true;
-        if (point.catalogId != null && point.catalogId.equals(waypoint.catalogId)) return true;
-        return Double.isFinite(point.lat) && Double.isFinite(point.lon)
-                && Math.abs(point.lat - waypoint.lat) < 0.000001
-                && Math.abs(point.lon - waypoint.lon) < 0.000001;
-    }
-
-    static List<ApiClient.RouteWaypoint> uniqueChildMarkers(ApiClient.Result route) {
-        List<ApiClient.RouteWaypoint> result = new ArrayList<>();
-        if (route == null || route.routeGroups == null) return result;
-        Set<String> seen = new HashSet<>();
-        for (ApiClient.PlaceOption parent : route.points) {
-            if (parent.placeId != null) seen.add("id:" + parent.placeId);
+    static List<ApiClient.RouteChild> visibleChildMarkers(ApiClient.Result route,
+                                                          ApiClient.WalkResult walk) {
+        List<ApiClient.RouteChild> result = new ArrayList<>();
+        if (walk == null || !"VISITING".equals(walk.phase)) return result;
+        ApiClient.RouteGroup group = groupForPoint(route, walk.currentPointOrder);
+        if (group == null) return result;
+        Set<String> parentKeys = new HashSet<>();
+        if (route != null) for (ApiClient.PlaceOption parent : route.points) {
+            if (parent.catalogId != null) parentKeys.add("catalog:" + parent.catalogId);
+            if (parent.placeId != null) parentKeys.add("place:" + parent.placeId);
             if (Double.isFinite(parent.lat) && Double.isFinite(parent.lon)) {
-                seen.add(coordinateKey(parent.lat, parent.lon));
+                parentKeys.add(coordinateKey(parent.lat, parent.lon));
             }
         }
-        for (ApiClient.RouteGroup group : route.routeGroups) {
-            for (ApiClient.RouteWaypoint waypoint : group.waypoints) {
-                String idKey = waypoint.placeId == null ? null : "id:" + waypoint.placeId;
-                String coordinateKey = coordinateKey(waypoint.lat, waypoint.lon);
-                if ((idKey != null && seen.contains(idKey)) || seen.contains(coordinateKey)) continue;
-                if (idKey != null) seen.add(idKey);
-                seen.add(coordinateKey);
-                result.add(waypoint);
-            }
-        }
-        return result;
-    }
-
-    static List<List<ApiClient.GeoCoordinate>> realGeometrySegments(ApiClient.Result route) {
-        List<List<ApiClient.GeoCoordinate>> result = new ArrayList<>();
-        if (route == null || route.routeGroups == null) return result;
-        for (ApiClient.RouteGroup group : route.routeGroups) {
-            for (ApiClient.RouteWaypointLeg leg : group.waypointLegs) {
-                if (leg.path != null && leg.path.size() >= 2) result.add(leg.path);
-            }
+        Set<String> seenChildIds = new HashSet<>();
+        for (ApiClient.RouteChild child : group.children) {
+            if (!child.hasCoordinates()) continue;
+            String catalogKey = child.catalogId == null ? null : "catalog:" + child.catalogId;
+            String placeKey = child.placeId == null ? null : "place:" + child.placeId;
+            String coordinate = coordinateKey(child.lat, child.lon);
+            if ((catalogKey != null && (parentKeys.contains(catalogKey)
+                    || seenChildIds.contains(catalogKey)))
+                    || (placeKey != null && (parentKeys.contains(placeKey)
+                    || seenChildIds.contains(placeKey)))
+                    || parentKeys.contains(coordinate)) continue;
+            if (catalogKey != null) seenChildIds.add(catalogKey);
+            if (placeKey != null) seenChildIds.add(placeKey);
+            result.add(child);
         }
         return result;
     }
@@ -137,61 +114,30 @@ final class RouteGroupSupport {
         if (result.isEmpty() && route.path != null && route.path.size() >= 2) {
             result.add(route.path);
         }
-        result.addAll(realGeometrySegments(route));
         return result;
     }
 
     static int boundaryDistance(ApiClient.Result route, ApiClient.WalkResult walk,
                                 int localParentDistance) {
-        // A grouped visit is bounded by server-owned GeoJSON. Neither distance to the
-        // parent marker nor the previous response's distance describes the new GPS fix.
-        if (hasActiveGroup(route, walk)) return -1;
-        return localParentDistance;
+        ApiClient.RouteGroup group = walk == null ? null
+                : groupForPoint(route, walk.currentPointOrder);
+        return group != null && group.hasVisitZone ? -1 : localParentDistance;
     }
 
-    static NavigationTarget navigationTarget(ApiClient.RouteGroup group, double lat, double lon,
-                                             int previousLegIndex, int previousPathIndex) {
-        if (group == null || group.waypointLegs.isEmpty() || group.waypoints.isEmpty()) return null;
-        int floor = Math.max(0, Math.min(previousLegIndex, group.waypointLegs.size() - 1));
-        int chosen = floor;
-        int chosenIndex = previousPathIndex;
-        int chosenRemaining = Integer.MAX_VALUE;
-        double bestProximity = Double.MAX_VALUE;
-        for (int index = floor; index < group.waypointLegs.size(); index++) {
-            ApiClient.RouteWaypointLeg leg = group.waypointLegs.get(index);
-            if (leg.path == null || leg.path.isEmpty()) continue;
-            List<WalkGuidanceMath.Point> path = guidancePath(leg.path);
-            int pathFloor = index == floor ? previousPathIndex : 0;
-            WalkGuidanceMath.Result progress = WalkGuidanceMath.remainingOnLeg(
-                    path, lat, lon, pathFloor);
-            ApiClient.GeoCoordinate nearest = leg.path.get(progress.nearestIndex);
-            double proximity = WalkGuidanceMath.meters(lat, lon, nearest.lat, nearest.lon);
-            if (proximity < bestProximity) {
-                bestProximity = proximity; chosen = index;
-                chosenIndex = progress.nearestIndex; chosenRemaining = progress.distanceMeters;
-            }
-        }
-        if (chosenRemaining <= 35 && chosen + 1 < group.waypointLegs.size()) {
-            chosen++; chosenIndex = 0;
-            WalkGuidanceMath.Result next = WalkGuidanceMath.remainingOnLeg(
-                    guidancePath(group.waypointLegs.get(chosen).path), lat, lon, 0);
-            chosenRemaining = next.distanceMeters; chosenIndex = next.nearestIndex;
-        }
-        ApiClient.RouteWaypointLeg leg = group.waypointLegs.get(chosen);
-        ApiClient.RouteWaypoint waypoint = waypointForOrder(group, leg.toWaypointOrder);
-        if (waypoint == null) waypoint = group.waypoints.get(Math.min(chosen, group.waypoints.size() - 1));
-        return new NavigationTarget(waypoint, leg, chosen, chosenIndex, chosenRemaining);
+    static String childMarkerKey(ApiClient.Result route, ApiClient.WalkResult walk) {
+        if (route == null || walk == null || !"VISITING".equals(walk.phase)) return "hidden";
+        ApiClient.RouteGroup group = groupForPoint(route, walk.currentPointOrder);
+        if (group == null) return "hidden";
+        return route.routeVersion + ":" + walk.currentPointOrder + ":" + group.children.size();
     }
 
-    private static ApiClient.RouteWaypoint waypointForOrder(ApiClient.RouteGroup group, int order) {
-        for (ApiClient.RouteWaypoint waypoint : group.waypoints) if (waypoint.order == order) return waypoint;
-        return null;
-    }
-
-    private static List<WalkGuidanceMath.Point> guidancePath(List<ApiClient.GeoCoordinate> source) {
-        List<WalkGuidanceMath.Point> result = new ArrayList<>(source.size());
-        for (ApiClient.GeoCoordinate point : source) result.add(new WalkGuidanceMath.Point(point.lat, point.lon));
-        return result;
+    private static boolean sameLogicalPoint(ApiClient.PlaceOption point,
+                                            ApiClient.RouteChild child) {
+        if (point.placeId != null && point.placeId.equals(child.placeId)) return true;
+        if (point.catalogId != null && point.catalogId.equals(child.catalogId)) return true;
+        return child.hasCoordinates() && Double.isFinite(point.lat) && Double.isFinite(point.lon)
+                && Math.abs(point.lat - child.lat) < 0.000001
+                && Math.abs(point.lon - child.lon) < 0.000001;
     }
 
     private static String coordinateKey(double lat, double lon) {

@@ -4,6 +4,9 @@ import static org.junit.Assert.*;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Test;
@@ -19,38 +22,60 @@ public final class RouteGroupsAndroidTest {
                 null, null, null, filters, false).has("routeGroupsEnabled"));
     }
 
-    @Test public void parsesB2GroupsAndLonLatGeometry() throws Exception {
-        ApiClient.Result route = ApiClient.routeFromJson(b2Route(), "moscow");
+    @Test public void parsesFreeRoamChildrenIncludingListOnlyEntries() throws Exception {
+        ApiClient.Result route = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
         assertTrue(route.routeGroupsEnabled);
-        assertEquals(1, route.routeGroups.size());
         ApiClient.RouteGroup group = route.routeGroups.get(0);
         assertEquals(1, group.pointOrder);
         assertEquals("msk005", group.catalogId);
-        assertEquals(2, group.waypoints.size());
-        assertEquals("CONTAINS", group.waypoints.get(0).relation);
-        assertEquals(1, group.waypointLegs.size());
-        ApiClient.GeoCoordinate first = group.waypointLegs.get(0).path.get(0);
-        assertEquals(55.751, first.lat, 0.000001);
-        assertEquals(37.617, first.lon, 0.000001);
+        assertEquals(3, group.children.size());
+        assertEquals("CONTAINS", group.children.get(0).relation);
+        assertEquals("CLUSTER_MEMBER", group.children.get(1).relation);
+        assertFalse(group.children.get(2).hasCoordinates());
+        assertTrue(group.waypoints.isEmpty());
+        assertTrue(group.waypointLegs.isEmpty());
+        assertTrue(group.hasVisitZone);
     }
 
-    @Test public void legacyJsonRemainsUngrouped() throws Exception {
-        JSONObject legacy = baseRoute();
-        ApiClient.Result route = ApiClient.routeFromJson(legacy, "moscow");
+    @Test public void legacyB2GroupsRemainReadableAsChildren() throws Exception {
+        JSONObject legacy = baseRoute().put("routeGroupsEnabled", true)
+                .put("routeGroups", new JSONArray().put(new JSONObject()
+                        .put("pointOrder", 1).put("catalogId", "msk005")
+                        .put("children", new JSONArray())
+                        .put("visitZone", new JSONObject().put("type", "Polygon")
+                                .put("coordinates", new JSONArray()))
+                        .put("waypoints", new JSONArray().put(new JSONObject()
+                                .put("order", 1).put("catalogId", "msk050")
+                                .put("placeId", "child").put("name", "Child")
+                                .put("lat", 55.751).put("lon", 37.617)
+                                .put("relation", "CONTAINS")))
+                        .put("waypointLegs", new JSONArray().put(new JSONObject()
+                                .put("fromWaypointOrder", 0).put("toWaypointOrder", 1)
+                                .put("distanceMeters", 90).put("durationSeconds", 70)
+                                .put("geometry", new JSONArray()
+                                        .put(new JSONArray().put(37.617).put(55.751))
+                                        .put(new JSONArray().put(37.618).put(55.752)))))));
+        ApiClient.RouteGroup group = ApiClient.routeFromJson(legacy, "moscow")
+                .routeGroups.get(0);
+        assertEquals(1, group.children.size());
+        assertEquals("Child", group.children.get(0).name);
+        assertEquals(1, group.waypointLegs.size());
+    }
+
+    @Test public void routeWithoutGroupsRemainsUngrouped() throws Exception {
+        ApiClient.Result route = ApiClient.routeFromJson(baseRoute(), "moscow");
         assertFalse(route.routeGroupsEnabled);
         assertTrue(route.routeGroups.isEmpty());
-        assertEquals(1, route.points.size());
     }
 
-    @Test public void snapshotRoundTripKeepsGroupAndRequiredGeometry() throws Exception {
-        ApiClient.Result source = ApiClient.routeFromJson(b2Route(), "moscow");
+    @Test public void snapshotRoundTripKeepsFullChildrenAndMissingCoordinates() throws Exception {
+        ApiClient.Result source = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
         ApiClient.Result restored = ApiClient.routeFromSnapshot(ApiClient.routeSnapshot(source));
         assertNotNull(restored);
-        assertTrue(restored.routeGroupsEnabled);
-        assertEquals(1, restored.routeGroups.size());
-        assertEquals(1, restored.routeGroups.get(0).waypointLegs.size());
-        assertEquals(55.751, restored.routeGroups.get(0).waypointLegs.get(0).path.get(0).lat,
-                0.000001);
+        assertEquals(3, restored.routeGroups.get(0).children.size());
+        assertEquals("No coordinates", restored.routeGroups.get(0).children.get(2).name);
+        assertFalse(restored.routeGroups.get(0).children.get(2).hasCoordinates());
+        assertTrue(restored.routeGroups.get(0).hasVisitZone);
         assertEquals(1, restored.legGeometries.size());
     }
 
@@ -61,58 +86,100 @@ public final class RouteGroupsAndroidTest {
         assertNull(ApiClient.routeFromSnapshot(snapshot.toString()));
     }
 
-    @Test public void presentationDeduplicatesPinsAndNeverInventsSegments() {
-        ApiClient.Result route = sampleResult();
-        assertEquals(1, RouteGroupSupport.uniqueChildMarkers(route).size());
-        assertEquals("child", RouteGroupSupport.uniqueChildMarkers(route).get(0).placeId);
-        assertEquals(1, RouteGroupSupport.realGeometrySegments(route).size());
+    @Test public void listIsCollapsedByDefaultAndExpansionDoesNotHideNextStop() throws Exception {
+        ApiClient.Result route = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
+        List<RouteGroupSupport.DisplayRow> collapsed = RouteGroupSupport.displayRows(
+                route, Collections.emptySet());
+        assertEquals(2, collapsed.size());
+        assertFalse(collapsed.get(0).isChild());
+        assertTrue(collapsed.get(0).hasChildren);
+        assertEquals("Next logical stop", collapsed.get(1).point.name);
+
+        Set<Integer> expanded = new HashSet<>(Collections.singletonList(1));
+        List<RouteGroupSupport.DisplayRow> rows = RouteGroupSupport.displayRows(route, expanded);
+        assertEquals(5, rows.size());
+        assertTrue(rows.get(1).isChild());
+        assertEquals("Child", rows.get(1).child.name);
+        assertEquals("No coordinates", rows.get(3).child.name);
+        assertEquals("Next logical stop", rows.get(4).point.name);
+    }
+
+    @Test public void multipleGroupsCanStayExpandedIndependently() throws Exception {
+        ApiClient.Result route = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
+        route.routeGroups = Arrays.asList(route.routeGroups.get(0),
+                new ApiClient.RouteGroup(2, "msk036",
+                        Collections.singletonList(new ApiClient.RouteChild(
+                                "msk099", null, "Another child", Double.NaN, Double.NaN,
+                                "CONTAINS")), Collections.emptyList(), Collections.emptyList(),
+                        false));
+        Set<Integer> expanded = new HashSet<>(Arrays.asList(1, 2));
+        List<RouteGroupSupport.DisplayRow> rows = RouteGroupSupport.displayRows(route, expanded);
+        assertEquals(6, rows.size());
+        assertEquals("Another child", rows.get(5).child.name);
+    }
+
+    @Test public void viewModelKeepsExpansionAcrossGpsDrivenRenders() throws Exception {
+        MapActivity.RouteViewModel model = new MapActivity.RouteViewModel();
+        model.expandedGroupOrders.add(1);
+        ApiClient.Result route = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
+        String before = VisitingPresentation.pointListRenderKey(
+                route, 1, model.expandedGroupOrders);
+
+        model.walk = walk(1, "VISITING");
+        String afterGps = VisitingPresentation.pointListRenderKey(
+                route, model.walk.currentPointOrder, model.expandedGroupOrders);
+
+        assertEquals(before, afterGps);
+        assertEquals(Collections.singleton(1), model.expandedGroupOrders);
+    }
+
+    @Test public void childMarkersExistOnlyWhileVisitingCurrentParent() throws Exception {
+        ApiClient.Result route = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
+        ApiClient.WalkResult moving = walk(1, "MOVING");
+        ApiClient.WalkResult visiting = walk(1, "VISITING");
+        ApiClient.WalkResult next = walk(2, "VISITING");
+
+        assertTrue(RouteGroupSupport.visibleChildMarkers(route, moving).isEmpty());
+        List<ApiClient.RouteChild> markers = RouteGroupSupport.visibleChildMarkers(route, visiting);
+        assertEquals(2, markers.size());
+        assertEquals("child", markers.get(0).placeId);
+        assertTrue(RouteGroupSupport.visibleChildMarkers(route, next).isEmpty());
+    }
+
+    @Test public void markersDeduplicateParentButKeepDistinctColocatedChildren() throws Exception {
+        ApiClient.Result route = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
+        ApiClient.RouteGroup original = route.routeGroups.get(0);
+        route.routeGroups = Collections.singletonList(new ApiClient.RouteGroup(
+                1, original.catalogId, Arrays.asList(
+                        new ApiClient.RouteChild("msk005", "parent-copy", "Parent copy",
+                                55.75, 37.61, "CONTAINS"),
+                        new ApiClient.RouteChild("msk080", "same-a", "Same A",
+                                55.753, 37.619, "CONTAINS"),
+                        new ApiClient.RouteChild("msk081", "same-b", "Same B",
+                                55.753, 37.619, "CLUSTER_MEMBER")),
+                Collections.emptyList(), Collections.emptyList(), true));
+
+        List<ApiClient.RouteChild> markers = RouteGroupSupport.visibleChildMarkers(
+                route, walk(1, "VISITING"));
+        assertEquals(2, markers.size());
+        assertEquals("Same A", markers.get(0).name);
+        assertEquals("Same B", markers.get(1).name);
+    }
+
+    @Test public void externalLegGeometryIsDrawnWithoutInternalChildSegments() throws Exception {
+        ApiClient.Result route = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
         assertEquals(1, RouteGroupSupport.drawableSegments(route).size());
+        assertEquals(2, RouteGroupSupport.drawableSegments(route).get(0).size());
     }
 
-    @Test public void backendLegsStaySeparateFromInternalLegs() throws Exception {
-        ApiClient.Result route = ApiClient.routeFromJson(b2Route(), "moscow");
-        assertEquals(2, RouteGroupSupport.drawableSegments(route).size());
-        assertNotSame(RouteGroupSupport.drawableSegments(route).get(0),
-                RouteGroupSupport.drawableSegments(route).get(1));
-    }
-
-    @Test public void navigationProgressChangesChildWithoutChangingLogicalOrder() {
-        ApiClient.Result route = sampleResult();
-        ApiClient.WalkResult walk = new ApiClient.WalkResult(true, "", "w", "ACTIVE",
-                1, 10, false, 0, null, 0, "VISITING", 30, false);
-        ApiClient.RouteGroup group = route.routeGroups.get(0);
-        RouteGroupSupport.NavigationTarget target = RouteGroupSupport.navigationTarget(group,
-                55.751, 37.617, 0, 0);
-        assertNotNull(target);
-        assertEquals("Child", target.waypoint.name);
-        assertEquals(1, walk.currentPointOrder);
-        assertTrue(RouteGroupSupport.hasActiveGroup(route, walk));
-    }
-
-    @Test public void groupedBoundaryNeverUsesStaleServerDistanceForNewGpsFix() {
-        ApiClient.Result route = sampleResult();
-        ApiClient.WalkResult grouped = new ApiClient.WalkResult(true, "", "w", "ACTIVE",
-                1, 10, false, 8, null, 0, "VISITING", 30, false);
-        assertEquals(-1, RouteGroupSupport.boundaryDistance(route, grouped, 2500));
-        grouped = new ApiClient.WalkResult(true, "", "w", "ACTIVE",
-                2, 10, false, 8, null, 0, "MOVING", 0, false);
-        assertEquals(2500, RouteGroupSupport.boundaryDistance(route, grouped, 2500));
-    }
-
-    @Test public void groupedPointListKeepsCurrentChildrenAndNextLogicalStopVisible() {
-        ApiClient.Result route = sampleResult();
-
-        java.util.List<RouteGroupSupport.DisplayRow> rows =
-                RouteGroupSupport.displayRows(route, 1, 2);
-
-        assertEquals(3, rows.size());
-        assertFalse(rows.get(0).isWaypoint());
-        assertEquals("Parent", rows.get(0).point.name);
-        assertTrue(rows.get(1).isWaypoint());
-        assertEquals("Child", rows.get(1).waypoint.name);
-        assertTrue(rows.get(1).activeWaypoint);
-        assertFalse(rows.get(2).isWaypoint());
-        assertEquals("Next logical stop", rows.get(2).point.name);
+    @Test public void groupWithoutGeoJsonUsesParentPointFallback() throws Exception {
+        ApiClient.Result route = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
+        ApiClient.WalkResult visiting = walk(1, "VISITING");
+        assertEquals(-1, RouteGroupSupport.boundaryDistance(route, visiting, 2500));
+        route.routeGroups = Collections.singletonList(new ApiClient.RouteGroup(
+                1, "msk005", route.routeGroups.get(0).children,
+                Collections.emptyList(), Collections.emptyList(), false));
+        assertEquals(2500, RouteGroupSupport.boundaryDistance(route, visiting, 2500));
     }
 
     @Test public void groupedEditErrorIsFriendly() {
@@ -153,14 +220,22 @@ public final class RouteGroupsAndroidTest {
         assertFalse(summary.contains("unknownSecret"));
     }
 
+    private static ApiClient.WalkResult walk(int pointOrder, String phase) {
+        return new ApiClient.WalkResult(true, "", "w", "ACTIVE", pointOrder,
+                10, false, 0, null, 0, phase, 30, false);
+    }
+
     private static JSONObject baseRoute() throws Exception {
         return new JSONObject().put("routeId", "r").put("routeVersion", 1)
                 .put("totalMinutes", 20).put("query", "walk")
                 .put("searchArea", new JSONObject().put("label", "center"))
-                .put("points", new JSONArray().put(new JSONObject()
-                        .put("placeId", "parent").put("catalogId", "msk005")
-                        .put("name", "Parent").put("lat", 55.75).put("lon", 37.61)
-                        .put("visitMinutes", 20)))
+                .put("points", new JSONArray()
+                        .put(new JSONObject().put("placeId", "parent")
+                                .put("catalogId", "msk005").put("name", "Parent")
+                                .put("lat", 55.75).put("lon", 37.61).put("visitMinutes", 20))
+                        .put(new JSONObject().put("placeId", "next")
+                                .put("catalogId", "msk036").put("name", "Next logical stop")
+                                .put("lat", 55.83).put("lon", 37.63).put("visitMinutes", 20)))
                 .put("legs", new JSONArray().put(new JSONObject().put("toOrder", 1)
                         .put("distanceMeters", 100).put("durationSeconds", 80)
                         .put("geometry", new JSONArray()
@@ -168,44 +243,26 @@ public final class RouteGroupsAndroidTest {
                                 .put(new JSONArray().put(37.61).put(55.75)))));
     }
 
-    private static JSONObject b2Route() throws Exception {
+    private static JSONObject freeRoamRoute() throws Exception {
+        JSONArray children = new JSONArray()
+                .put(child("msk050", "child", "Child", 55.751, 37.617, "CONTAINS"))
+                .put(child("msk051", "child2", "Child 2", 55.752, 37.618,
+                        "CLUSTER_MEMBER"))
+                .put(child("msk052", null, "No coordinates", null, null, "CONTAINS"));
         return baseRoute().put("routeGroupsEnabled", true)
                 .put("routeGroups", new JSONArray().put(new JSONObject()
                         .put("pointOrder", 1).put("catalogId", "msk005")
-                        .put("waypoints", new JSONArray()
-                                .put(new JSONObject().put("order", 1).put("catalogId", "msk050")
-                                        .put("placeId", "child").put("name", "Child")
-                                        .put("lat", 55.751).put("lon", 37.617)
-                                        .put("relation", "CONTAINS"))
-                                .put(new JSONObject().put("order", 2).put("catalogId", "msk051")
-                                        .put("placeId", "child2").put("name", "Child 2")
-                                        .put("lat", 55.752).put("lon", 37.618)
-                                        .put("relation", "CLUSTER_MEMBER")))
-                        .put("waypointLegs", new JSONArray().put(new JSONObject()
-                                .put("fromWaypointOrder", 0).put("toWaypointOrder", 1)
-                                .put("distanceMeters", 90).put("durationSeconds", 70)
-                                .put("geometry", new JSONArray()
-                                        .put(new JSONArray().put(37.617).put(55.751))
-                                        .put(new JSONArray().put(37.6175).put(55.7515)))))));
+                        .put("children", children)
+                        .put("waypoints", new JSONArray()).put("waypointLegs", new JSONArray())
+                        .put("visitZone", new JSONObject().put("type", "Polygon")
+                                .put("coordinates", new JSONArray()))));
     }
 
-    private static ApiClient.Result sampleResult() {
-        ApiClient.PlaceOption parent = new ApiClient.PlaceOption("parent", "msk005",
-                "Parent", false, 55.75, 37.61);
-        ApiClient.PlaceOption next = new ApiClient.PlaceOption("next", "msk036",
-                "Next logical stop", false, 55.83, 37.63);
-        ApiClient.Result route = new ApiClient.Result(true, "", "r", 1, 0, null,
-                Arrays.asList(parent, next), Collections.emptyList());
-        ApiClient.RouteWaypoint duplicate = new ApiClient.RouteWaypoint(1, "msk005", "parent",
-                "Parent duplicate", 55.75, 37.61, "CONTAINS");
-        ApiClient.RouteWaypoint child = new ApiClient.RouteWaypoint(2, "msk050", "child",
-                "Child", 55.751, 37.617, "CONTAINS");
-        ApiClient.RouteWaypointLeg leg = new ApiClient.RouteWaypointLeg(0, 2, 80, 60,
-                Arrays.asList(new ApiClient.GeoCoordinate(55.75, 37.61),
-                        new ApiClient.GeoCoordinate(55.751, 37.617)));
-        route.routeGroupsEnabled = true;
-        route.routeGroups = Collections.singletonList(new ApiClient.RouteGroup(1, "msk005",
-                Arrays.asList(duplicate, child), Collections.singletonList(leg)));
-        return route;
+    private static JSONObject child(String catalogId, String placeId, String name,
+                                    Double lat, Double lon, String relation) throws Exception {
+        return new JSONObject().put("catalogId", catalogId)
+                .put("placeId", placeId == null ? JSONObject.NULL : placeId)
+                .put("name", name).put("lat", lat == null ? JSONObject.NULL : lat)
+                .put("lon", lon == null ? JSONObject.NULL : lon).put("relation", relation);
     }
 }

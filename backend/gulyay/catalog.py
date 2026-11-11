@@ -610,6 +610,11 @@ class CatalogPlaceProvider:
     def children_of(self, parent_id: str) -> list[CatalogPlace]:
         return self.catalog.children_of(parent_id)
 
+    def group_children(self, parent_id: str) -> list[CatalogPlace]:
+        """Return the complete active hierarchy for free-roam group presentation."""
+        return [row for row in self.catalog.children_of(parent_id)
+                if row.relation in ALLOWED_RELATIONS]
+
     def group_waypoint_candidates(self, parent_id: str,
                                   preview: QueryPreview) -> list[PlaceCandidate]:
         """Select a small relevant, routable child subset for an opt-in group."""

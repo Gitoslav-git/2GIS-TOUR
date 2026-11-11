@@ -320,15 +320,38 @@ class RouteWaypointLeg(StrictModel):
     geometry: list[tuple[float, float]]
 
 
+class RouteChild(StrictModel):
+    catalogId: str
+    placeId: str | None = None
+    name: str
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+    relation: Literal["CONTAINS", "CLUSTER_MEMBER"]
+
+    @model_validator(mode="after")
+    def validate_coordinates(self) -> "RouteChild":
+        if (self.lat is None) != (self.lon is None):
+            raise ValueError("route child coordinates must be both present or both absent")
+        return self
+
+
 class RouteGroup(StrictModel):
     pointOrder: int = Field(ge=1, le=8)
     catalogId: str
-    waypoints: list[RouteWaypoint] = Field(min_length=1)
-    waypointLegs: list[RouteWaypointLeg] = Field(min_length=1)
-    visitZone: RouteZoneGeometry
+    children: list[RouteChild] = Field(default_factory=list)
+    # Legacy B2 fields remain readable for stored routes created before free-roam groups.
+    waypoints: list[RouteWaypoint] = Field(default_factory=list)
+    waypointLegs: list[RouteWaypointLeg] = Field(default_factory=list)
+    visitZone: RouteZoneGeometry | None = None
 
     @model_validator(mode="after")
     def validate_waypoint_path(self) -> "RouteGroup":
+        if not self.children and not self.waypoints:
+            raise ValueError("route group must contain catalog children")
+        if not self.waypoints:
+            if self.waypointLegs:
+                raise ValueError("walking legs require legacy waypoints")
+            return self
         expected = list(range(1, len(self.waypoints) + 1))
         if [item.order for item in self.waypoints] != expected:
             raise ValueError("route group waypoint orders must be contiguous")

@@ -40,7 +40,10 @@ def feature(catalog_id="msk001", coordinates=None):
 def test_bundled_visit_zones_load_against_catalog_and_keep_unique_ids(tmp_path):
     zones = load_visit_zones(bundled_visit_zones_path(), catalog_ids(tmp_path))
 
-    assert len(zones) == 30
+    assert len(zones) == 35
+    for catalog_id in ("msk019", "msk029", "msk030", "msk031", "msk060"):
+        assert zones.get(catalog_id) is not None
+    assert zones.get("msk025") is None
     assert len(zones.catalog_ids) == len(set(zones.catalog_ids))
     assert zones.get("msk005").geometry["type"] == "Polygon"
     assert zones.get("msk032").geometry["type"] == "Polygon"

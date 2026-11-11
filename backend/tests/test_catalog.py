@@ -110,19 +110,19 @@ def test_seed_import_is_idempotent_and_route_clear_does_not_touch_catalog(tmp_pa
     catalog = PlaceCatalog(database)
     first = catalog.import_seed(bundled_seed_path())
     second = catalog.import_seed(bundled_seed_path())
-    assert first == second == 75
-    assert len(catalog.list_places("moscow")) == 75
+    assert first == second == 74
+    assert len(catalog.list_places("moscow")) == 74
     RouteRepository(database).clear()
-    assert len(catalog.list_places("moscow")) == 75
+    assert len(catalog.list_places("moscow")) == 74
 
 
 def test_moscow_stage_a_children_preserve_ids_hierarchy_and_resolution(tmp_path):
     catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
-    assert catalog.import_seed(bundled_seed_path()) == 75
+    assert catalog.import_seed(bundled_seed_path()) == 74
     places = catalog.list_places("moscow")
     by_id = {place.id: place for place in places}
 
-    assert len(places) == len(by_id) == 75
+    assert len(places) == len(by_id) == 74
     assert tuple(child.id for child in catalog.children_of("msk029")) == (
         "msk068", "msk069",
     )
@@ -150,9 +150,28 @@ def test_moscow_stage_a_reimport_is_idempotent(tmp_path):
     catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
     catalog.import_seed(bundled_seed_path())
     first = {place.id: place for place in catalog.list_places("moscow")}
-    assert catalog.import_seed(bundled_seed_path()) == 75
+    assert catalog.import_seed(bundled_seed_path()) == 74
     second = {place.id: place for place in catalog.list_places("moscow")}
     assert second == first
+
+
+def test_retired_varvarka_is_hidden_in_persistent_catalog(tmp_path):
+    catalog = PlaceCatalog(tmp_path / "catalog.sqlite3")
+    catalog.import_seed(bundled_seed_path())
+    # Reproduce an old Codespaces database containing the retired place.
+    with catalog._lock, catalog._connection:
+        catalog._connection.execute(
+            """INSERT INTO places (id, city_id, name, level, parent_id,
+                       relation, place_type, tags_json, access_cost,
+                       visit_min, visit_max, is_active)
+               VALUES ('msk025', 'moscow', 'Китай-город / Варварка',
+                       'AREA', NULL, NULL, 'historic_area', '[]', 'FREE',
+                       25, 45, 1)"""
+        )
+    assert any(p.id == "msk025" for p in catalog.list_places("moscow"))
+    assert catalog.retire_places(("msk025",)) == 1
+    assert all(p.id != "msk025" for p in catalog.list_places("moscow"))
+    assert catalog.retire_places(("msk025",)) == 0
 
 
 def test_luzhniki_contains_children_keep_existing_complex_conflict(tmp_path):
@@ -341,11 +360,17 @@ def test_bundled_override_updates_only_red_square_stale_coordinates(tmp_path):
     catalog.apply_manual_overrides({"msk001": {"lat": 55.753084, "lon": 37.622133}})
 
     overrides = bundled_manual_overrides()
-    assert set(overrides) == {"msk001"}
+    assert set(overrides) == {"msk001", "msk060"}
     catalog.apply_manual_overrides(overrides)
 
     red_square = catalog.get_by_ids(["msk001"])[0]
     assert (red_square.lat, red_square.lon) == pytest.approx((55.754549, 37.618666))
+
+    museum = catalog.get_by_ids(["msk060"])[0]
+    assert (museum.lat, museum.lon) == pytest.approx((55.736427, 37.593084))
+    assert museum.dgis_place_id is None
+    assert museum.provider_name is None
+    assert museum.allow_coords_only is True
 
 
 def test_unsupported_city_keeps_provider_fallback(tmp_path):

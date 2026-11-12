@@ -2,7 +2,7 @@ name: Verify and build APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -46,7 +46,7 @@ jobs:
           fi
       - name: Validate backend URL
         env:
-          BACKEND_BASE_URL: ${{ vars.BACKEND_BASE_URL }}
+          BACKEND_BASE_URL: ${{ github.ref == 'refs/heads/develop' && 'https://symmetrical-guacamole-vprvqxw4rv4p267j-8000.app.github.dev/' || vars.BACKEND_BASE_URL }}
         run: |
           if [ -z "$BACKEND_BASE_URL" ]; then
             echo "::error::Repository variable BACKEND_BASE_URL is not configured"
@@ -59,13 +59,13 @@ jobs:
           echo "::notice title=Backend target::$BACKEND_BASE_URL"
       - name: Build debug APK
         env:
-          BACKEND_BASE_URL: ${{ vars.BACKEND_BASE_URL }}
+          BACKEND_BASE_URL: ${{ github.ref == 'refs/heads/develop' && 'https://symmetrical-guacamole-vprvqxw4rv4p267j-8000.app.github.dev/' || vars.BACKEND_BASE_URL }}
           DGIS_SDK_VERSION: ${{ vars.DGIS_SDK_VERSION || '13.6.0' }}
           ROUTE_GROUPS_ENABLED: 'true'
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: gulyay-${{ github.run_id }}-debug-apk
+          name: gulyay-${{ github.ref_name }}-${{ github.run_id }}-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30

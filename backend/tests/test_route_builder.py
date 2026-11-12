@@ -3,10 +3,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from gulyay.catalog import CatalogPlaceProvider, PlaceCatalog, bundled_seed_path
 from gulyay.models import (CreateRoute, PlaceCandidate, QueryPreview, RouteLeg,
                            SearchArea, StartLocation)
 from gulyay.route_builder import (DurationConfirmationRequired, RouteNotFound, TimeBudgetExceeded, _candidate_score, _retrieve_candidates, build_route, city_timezone,
                                   rebuild_route_with_points, schedule_status_at)
+from gulyay.visit_zones import VisitZones
 
 
 class FakeGeo:
@@ -693,7 +695,70 @@ def test_large_unused_budget_is_explained_instead_of_hidden():
                         datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")))
     assert route.planningStatus == "DEGRADED"
     assert "DURATION_TARGET" in route.unmetPreferences
-    assert any("Маршрут заполнен" in warning for warning in route.warnings)
+    assert any("Вы просили 3 часа" in warning for warning in route.warnings)
+    assert any("удалось подобрать маршрут на 50 минут" in warning
+               for warning in route.warnings)
+
+
+def test_six_hour_moscow_route_uses_at_least_eighty_percent_when_catalog_allows_it():
+    catalog = PlaceCatalog(":memory:")
+    catalog.import_seed(bundled_seed_path())
+    provider = CatalogPlaceProvider(catalog)
+
+    class MoscowGeo(FakeGeo):
+        def resolve_city_center(self, city_id): return 55.751, 37.618
+
+    geo = MoscowGeo([])
+    try:
+        route = build_route(
+            CreateRoute(cityId="moscow", query="хочу погулять по городу, у меня 6 часов",
+                        routeGroupsEnabled=True),
+            preferences(cityId="moscow", durationMinutes=360,
+                        targetDurationMinutes=360, durationMode="TARGET",
+                        interests=[], allowSinglePlace=False),
+            geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+            catalog=provider, visit_zones=VisitZones({}),
+        )
+    finally:
+        catalog.close()
+
+    assert route.requestedMinutes == 360
+    assert route.durationMode == "TARGET"
+    assert route.totalMinutes >= 288
+    assert route.planningStatus == "SUCCESS"
+    assert "DURATION_TARGET" not in route.unmetPreferences
+    assert len(geo.walking_starts) <= 8
+
+
+def test_unreachable_primary_places_are_replaced_within_eight_checks():
+    from gulyay.geo import GeoRouteNotFound
+
+    places = [candidate(f"Место {index}", f"p{index}", schedule={"is_24x7": True}).model_copy(
+        update={"lat": 54.195 + index * 0.0001},
+    ) for index in range(8)]
+    rejected = {(places[index].lat, places[index].lon) for index in (0, 1)}
+
+    class PartlyReachableGeo(FakeGeo):
+        def walking_leg(self, start, end, from_order, to_order):
+            self.walking_starts.append(start)
+            if end in rejected:
+                raise GeoRouteNotFound()
+            return RouteLeg(fromOrder=from_order, toOrder=to_order, distanceMeters=500,
+                            durationSeconds=600,
+                            geometry=[[start[1], start[0]], [end[1], end[0]]])
+
+    geo = PartlyReachableGeo(places)
+    route = build_route(
+        CreateRoute(cityId="tula", query="хочу погулять 6 часов"),
+        preferences(durationMinutes=360, targetDurationMinutes=360,
+                    durationMode="TARGET", interests=[], allowSinglePlace=False),
+        geo, datetime(2026, 9, 15, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+    )
+
+    assert route.totalMinutes >= 288
+    assert route.planningStatus == "SUCCESS"
+    assert len(route.points) == 6
+    assert len(geo.walking_starts) == 8
 
 
 def test_manual_point_order_is_preserved_and_all_legs_are_rebuilt():

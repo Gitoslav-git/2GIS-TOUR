@@ -6,7 +6,7 @@
 
    ```powershell
    $env:GULYAY_DB_PATH = "$env:TEMP\gulyay-p5-test.sqlite3"
-   $env:GULYAY_ROUTE_RETENTION_MINUTES = "1440"
+   $env:GULYAY_ROUTE_RETENTION_MINUTES = "43200"
    python -m uvicorn gulyay.api:app --app-dir backend --host 0.0.0.0 --port 8000
    ```
 

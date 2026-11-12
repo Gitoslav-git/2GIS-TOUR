@@ -281,7 +281,7 @@ def guest_route_history(x_device_session: UUID | None = Header(default=None),
     if x_device_session is None:
         return failure("UNAUTHORIZED", "Укажите гостевую сессию", 401, request_id)
     items = []
-    for route, updated_at in repository.list_guest_history(x_device_session, limit=3):
+    for route, updated_at in repository.list_guest_history(x_device_session, limit=20):
         latest_walk = repository.latest_walk_for_route(x_device_session, route.routeId)
         items.append(GuestHistoryItem(
             routeId=route.routeId, routeVersion=route.routeVersion, cityId=route.cityId,

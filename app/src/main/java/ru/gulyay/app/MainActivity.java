@@ -1834,7 +1834,7 @@ public final class MainActivity extends Activity {
                     }
                 }
                 if (recoveredTerminalRoute) updateQueryEditActions();
-                int remainingRouteSlots = 3;
+                int remainingRouteSlots = 20;
                 for (ApiClient.GuestHistoryItem item : finalItems) {
                     if (item.routeId.equals(currentRouteId) && !routeFinished) continue;
                     if (remainingRouteSlots-- <= 0) break;
@@ -2351,6 +2351,10 @@ public final class MainActivity extends Activity {
                 result.setText("Экран карты завершился, состояние прогулки проверяется.");
             }
             refreshHomeRouteCard();
+            if (RouteLifecycleRecovery.shouldRefreshHistory(
+                    RouteLifecycleRecovery.HistoryRefreshEvent.MAP_RESULT_CANCELED)) {
+                refreshGuestHistory();
+            }
             return;
         }
         String returnedWalkId = data.getStringExtra(MapActivity.EXTRA_WALK_ID);
@@ -2379,7 +2383,10 @@ public final class MainActivity extends Activity {
             loadPointEditor();
         }
         refreshHomeRouteCard();
-        refreshGuestHistory();
+        if (RouteLifecycleRecovery.shouldRefreshHistory(
+                RouteLifecycleRecovery.HistoryRefreshEvent.MAP_RESULT_OK)) {
+            refreshGuestHistory();
+        }
     }
 
     @Override protected void onResume() {
@@ -2409,6 +2416,10 @@ public final class MainActivity extends Activity {
             resetRouteButton.setEnabled(routeId != null);
         }
         refreshHomeRouteCard();
+        if (RouteLifecycleRecovery.shouldRefreshHistory(
+                RouteLifecycleRecovery.HistoryRefreshEvent.ACTIVITY_RESUMED)) {
+            refreshGuestHistory();
+        }
     }
 
     private boolean currentStartLocationIsUsable() {

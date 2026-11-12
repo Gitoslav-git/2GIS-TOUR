@@ -28,10 +28,13 @@ class RouteRepository:
             Path(resolved).parent.mkdir(parents=True, exist_ok=True)
         self.path = resolved
         try:
-            retention_minutes = int(os.getenv("GULYAY_ROUTE_RETENTION_MINUTES", "1440"))
+            retention_minutes = int(os.getenv("GULYAY_ROUTE_RETENTION_MINUTES", "43200"))
         except ValueError:
-            retention_minutes = 1440
-        self.retention_minutes = max(1, min(10_080, retention_minutes))
+            retention_minutes = 43_200
+        # Guest history is useful after an Android process restart and after a
+        # longer break between walks. Thirty days is the default; the upper
+        # bound still prevents an accidental unbounded SQLite retention policy.
+        self.retention_minutes = max(1, min(129_600, retention_minutes))
         try:
             abandoned_walk_hours = int(os.getenv("GULYAY_ABANDONED_WALK_HOURS", "168"))
         except ValueError:
@@ -112,14 +115,14 @@ class RouteRepository:
         except ValueError:
             return None
 
-    def list_guest_history(self, owner: UUID, limit: int = 3) -> list[tuple[Route, str]]:
-        """Return at most three routes that are still inside guest retention."""
+    def list_guest_history(self, owner: UUID, limit: int = 20) -> list[tuple[Route, str]]:
+        """Return recent routes that are still inside guest retention."""
         self.purge_expired()
         with self._lock:
             rows = self._connection.execute(
                 """SELECT route_json, updated_at FROM routes WHERE owner_session = ?
                    ORDER BY updated_at DESC, rowid DESC LIMIT ?""",
-                (str(owner), max(1, min(3, limit))),
+                (str(owner), max(1, min(30, limit))),
             ).fetchall()
         result: list[tuple[Route, str]] = []
         for route_json, updated_at in rows:

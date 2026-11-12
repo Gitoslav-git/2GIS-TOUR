@@ -48,6 +48,35 @@ public class MainActivityRecoveryTest {
         assertFalse(RouteLifecycleRecovery.shouldReplaceHistoryCards(true, 4, 5));
     }
 
+    @Test public void historyRefreshesAfterCanceledMapStoppedWalkAndRelaunch() {
+        assertTrue(RouteLifecycleRecovery.shouldRefreshHistory(
+                RouteLifecycleRecovery.HistoryRefreshEvent.MAP_RESULT_CANCELED));
+        assertTrue(RouteLifecycleRecovery.shouldRefreshHistory(
+                RouteLifecycleRecovery.HistoryRefreshEvent.MAP_RESULT_OK));
+        assertTrue(RouteLifecycleRecovery.shouldRefreshHistory(
+                RouteLifecycleRecovery.HistoryRefreshEvent.ACTIVITY_RESUMED));
+    }
+
+    @Test public void processDeathKeepsActiveWalkResumableInsteadOfCompletingIt() {
+        assertEquals(RouteLifecycleRecovery.HistoryRouteState.READY,
+                RouteLifecycleRecovery.fromRouteLookup(true, true, "ACTIVE"));
+        assertEquals("Прогулка идёт",
+                RouteLifecycleRecovery.historyStatusLabel("ACTIVE"));
+        assertFalse(RouteLifecycleRecovery.canDeleteHistoryRoute("ACTIVE"));
+    }
+
+    @Test public void degradedRouteWarningIsNotReplacedByGenericSuccessText() {
+        ApiClient.Result route = new ApiClient.Result(
+                true,
+                "Маршрут сокращён. Вы просили 6 часов, "
+                        + "удалось подобрать маршрут на 2 часа 14 минут.",
+                "route", 1);
+        String message = RouteChatPresentation.routeMessage(route);
+        assertTrue(message.contains("Вы просили 6 часов"));
+        assertTrue(message.contains("2 часа 14 минут"));
+        assertFalse(message.startsWith("Готово!"));
+    }
+
     @Test public void staleRouteStateResponseCannotApplyAfterRouteSwitch() {
         assertFalse(RouteLifecycleRecovery.isCurrentRouteStateRequest("route-a", 7,
                 "route-b", 8));

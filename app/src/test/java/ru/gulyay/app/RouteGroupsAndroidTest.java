@@ -68,6 +68,26 @@ public final class RouteGroupsAndroidTest {
         assertTrue(route.routeGroups.isEmpty());
     }
 
+    @Test public void degradedDurationWarningReachesRouteChatPresentation() throws Exception {
+        JSONObject degraded = baseRoute()
+                .put("totalMinutes", 134)
+                .put("requestedMinutes", 360)
+                .put("unusedMinutes", 226)
+                .put("durationSource", "text")
+                .put("planningStatus", "DEGRADED")
+                .put("durationUtilization", 134.0 / 360.0)
+                .put("warnings", new JSONArray().put(
+                        "Вы просили 6 часов, удалось подобрать маршрут на 2 часа 14 минут."));
+
+        ApiClient.Result route = ApiClient.routeFromJson(degraded, "moscow");
+        String message = RouteChatPresentation.routeMessage(route);
+
+        assertTrue(message.contains("Маршрут сокращён"));
+        assertTrue(message.contains("Вы просили 6 часов"));
+        assertTrue(message.contains("2 часа 14 минут"));
+        assertFalse(message.startsWith("Готово!"));
+    }
+
     @Test public void snapshotRoundTripKeepsFullChildrenAndMissingCoordinates() throws Exception {
         ApiClient.Result source = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
         ApiClient.Result restored = ApiClient.routeFromSnapshot(ApiClient.routeSnapshot(source));

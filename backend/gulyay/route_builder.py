@@ -388,10 +388,23 @@ def build_route(payload: CreateRoute, preview: QueryPreview, geo: GeoProvider,
     if any(point.scheduleStatus == "UNKNOWN" for point in route_points):
         warnings.append("Для части мест 2ГИС не вернул расписание")
     if planning_status == "DEGRADED":
-        warnings.append(
-            f"Маршрут заполнен на {round(utilization * 100)}%: "
-            "в пределах доступных проверок не удалось выполнить все пожелания"
-        )
+        if "DURATION_TARGET" in unmet:
+            reason = (
+                "Не все подходящие пешеходные переходы удалось подтвердить "
+                f"в пределах {_max_routing_checks()} проверок 2ГИС."
+                if routing_budget.remaining == 0 or best.budget_limited else
+                "Подходящий более длинный вариант не удалось подтвердить с учётом "
+                "доступности мест и пешеходных переходов."
+            )
+            warnings.append(
+                f"Вы просили {_format_duration_ru(target_minutes)}, "
+                f"удалось подобрать маршрут на {_format_duration_ru(total_minutes)}. {reason}"
+            )
+        else:
+            warnings.append(
+                f"Маршрут заполнен на {round(utilization * 100)}%: "
+                "в пределах доступных проверок не удалось выполнить все пожелания"
+            )
     planning_log(
         trace_id, "route_selected", planId=best.plan.plan_id,
         reason="highest_quality_hard_valid_variant", score=round(best.score, 2),
@@ -567,8 +580,18 @@ def _make_route_plans(candidates: list[PlaceCandidate], preview: QueryPreview,
             score, breakdown = _candidate_sequence_quality(
                 selected, estimated_minutes, preview, start,
             )
+            # The approximate prefix is used for ranking, but provider routing
+            # can reject any of its legs. Keep ordered substitutes in the same
+            # plan so the eight-check budget can replace an unreachable place
+            # instead of returning an unjustifiably short route.
+            selected_ids = {item.placeId for item in selected}
+            materialization_candidates = [
+                *selected,
+                *(item for item in ordered if item.placeId not in selected_ids),
+            ][:_max_routing_checks()]
             plans.append(_RoutePlan(
-                plan_id=f"r{relaxation}-c{cluster_index}", candidates=selected,
+                plan_id=f"r{relaxation}-c{cluster_index}",
+                candidates=materialization_candidates,
                 estimated_minutes=estimated_minutes, relaxation=relaxation,
                 area_relaxed=search_relaxation > 0,
                 score=score, score_breakdown=breakdown,
@@ -762,7 +785,9 @@ def _quality_components(candidates: list[PlaceCandidate], total_minutes: int,
                         area_score: float = 100.0) -> tuple[float, dict[str, float]]:
     target = preview.targetDurationMinutes or preview.durationMinutes
     if preview.durationMode == "MAXIMUM":
-        duration_score = 100.0
+        # MAXIMUM remains a hard ceiling, but equally scoring every duration
+        # made a needlessly short route beat a useful longer one.
+        duration_score = 55.0 + min(1.0, total_minutes / max(1, target)) * 45.0
     else:
         # Duration is deliberately soft: a good 65–80% route is preferable to NO_ROUTE.
         ratio = total_minutes / max(1, target)
@@ -1321,6 +1346,27 @@ def _duration_budget_minutes(preview: QueryPreview) -> int:
         return preview.maxDurationMinutes
     target = preview.targetDurationMinutes or preview.durationMinutes
     return math.ceil(target * 1.15)
+
+
+def _format_duration_ru(minutes: int) -> str:
+    """Format a planner duration for a user-facing Russian warning."""
+    hours, remaining = divmod(max(0, minutes), 60)
+
+    def plural(value: int, one: str, few: str, many: str) -> str:
+        if value % 100 in range(11, 15):
+            return many
+        if value % 10 == 1:
+            return one
+        if value % 10 in range(2, 5):
+            return few
+        return many
+
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours} {plural(hours, 'час', 'часа', 'часов')}")
+    if remaining or not parts:
+        parts.append(f"{remaining} {plural(remaining, 'минута', 'минуты', 'минут')}")
+    return " ".join(parts)
 
 
 def _good_quality_score() -> float:

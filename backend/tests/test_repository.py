@@ -135,7 +135,7 @@ def test_expired_guest_route_is_not_returned(monkeypatch):
     assert repository.get(route_id, owner) is None
 
 
-def test_default_retention_keeps_ready_route_after_six_minutes(monkeypatch):
+def test_default_retention_keeps_ready_route_for_thirty_days(monkeypatch):
     monkeypatch.delenv("GULYAY_ROUTE_RETENTION_MINUTES", raising=False)
     repository = RouteRepository(":memory:")
     owner, route_id = uuid4(), uuid4()
@@ -143,11 +143,25 @@ def test_default_retention_keeps_ready_route_after_six_minutes(monkeypatch):
     repository.save_new(route(route_id), owner, payload)
     with repository._connection:
         repository._connection.execute(
-            "UPDATE routes SET updated_at = datetime('now', '-6 minutes') WHERE route_id = ?",
+            "UPDATE routes SET updated_at = datetime('now', '-29 days') WHERE route_id = ?",
             (str(route_id),),
         )
-    assert repository.retention_minutes >= 1440
+    assert repository.retention_minutes == 43_200
     assert repository.get(route_id, owner) is not None
+
+
+def test_default_retention_purges_ready_route_after_thirty_days(monkeypatch):
+    monkeypatch.delenv("GULYAY_ROUTE_RETENTION_MINUTES", raising=False)
+    repository = RouteRepository(":memory:")
+    owner, route_id = uuid4(), uuid4()
+    payload = CreateRoute(cityId="tula", query="История три часа", deviceSessionId=owner)
+    repository.save_new(route(route_id), owner, payload)
+    with repository._connection:
+        repository._connection.execute(
+            "UPDATE routes SET updated_at = datetime('now', '-31 days') WHERE route_id = ?",
+            (str(route_id),),
+        )
+    assert repository.get(route_id, owner) is None
 
 
 def test_active_walk_route_is_not_purged_by_short_retention(monkeypatch):

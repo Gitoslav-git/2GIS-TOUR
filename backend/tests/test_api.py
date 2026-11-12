@@ -153,7 +153,7 @@ def test_guest_history_returns_successful_empty_list_for_new_guest():
     assert response.json() == {"items": []}
 
 
-def test_guest_history_keeps_only_three_newest_routes_for_its_owner():
+def test_guest_history_returns_more_than_three_recent_routes_for_its_owner():
     app.dependency_overrides[get_intent_provider] = FakeIntent
     app.dependency_overrides[get_geo_provider] = FakeGeo
     session = str(uuid4())
@@ -169,15 +169,15 @@ def test_guest_history_keeps_only_three_newest_routes_for_its_owner():
     history = client.get("/v1/routes/history", headers=headers)
     assert history.status_code == 200
     items = history.json()["items"]
-    assert len(items) == 3
-    assert {item["routeId"] for item in items} == set(created_ids[-3:])
-    # History is intentionally capped and must not be used as a route-existence check.
+    assert len(items) == 4
+    assert {item["routeId"] for item in items} == set(created_ids)
+    # History still must not be used as a route-existence check.
     assert client.get(f"/v1/routes/{created_ids[0]}", headers=headers).status_code == 200
     assert client.get(f"/v1/routes/{created_ids[0]}/walks/latest",
                       headers=headers).status_code == 404
 
 
-def test_latest_walk_is_available_for_route_outside_three_item_history():
+def test_stopped_walk_appears_in_expanded_history_immediately():
     app.dependency_overrides[get_intent_provider] = FakeIntent
     app.dependency_overrides[get_geo_provider] = FakeGeo
     session = str(uuid4())
@@ -202,7 +202,9 @@ def test_latest_walk_is_available_for_route_outside_three_item_history():
 
     history = client.get("/v1/routes/history", headers=headers)
     assert history.status_code == 200
-    assert old_route_id not in {item["routeId"] for item in history.json()["items"]}
+    old_item = next(item for item in history.json()["items"]
+                    if item["routeId"] == old_route_id)
+    assert old_item["walkStatus"] == "STOPPED"
     assert client.get(f"/v1/routes/{old_route_id}", headers=headers).status_code == 200
     latest = client.get(f"/v1/routes/{old_route_id}/walks/latest", headers=headers)
     assert latest.status_code == 200

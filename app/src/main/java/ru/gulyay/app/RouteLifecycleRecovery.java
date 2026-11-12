@@ -3,6 +3,7 @@ package ru.gulyay.app;
 /** Pure recovery decisions shared by MainActivity and its JVM regression tests. */
 final class RouteLifecycleRecovery {
     enum HistoryRouteState { UNCONFIRMED, READY, TERMINAL, REMOVED }
+    enum HistoryRefreshEvent { ACTIVITY_RESUMED, MAP_RESULT_CANCELED, MAP_RESULT_OK }
 
     private RouteLifecycleRecovery() { }
 
@@ -20,6 +21,12 @@ final class RouteLifecycleRecovery {
     static boolean shouldReplaceHistoryCards(boolean historyLoaded, int responseGeneration,
                                              int currentGeneration) {
         return historyLoaded && isCurrentHistoryResponse(responseGeneration, currentGeneration);
+    }
+
+    static boolean shouldRefreshHistory(HistoryRefreshEvent event) {
+        return event == HistoryRefreshEvent.ACTIVITY_RESUMED
+                || event == HistoryRefreshEvent.MAP_RESULT_CANCELED
+                || event == HistoryRefreshEvent.MAP_RESULT_OK;
     }
 
     static boolean isCurrentRouteStateRequest(String requestedRouteId, int requestedGeneration,

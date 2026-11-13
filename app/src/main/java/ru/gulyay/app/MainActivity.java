@@ -14,9 +14,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.graphics.Typeface;
-import android.text.SpannableString;
-import android.text.Spanned;
-import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -27,7 +24,7 @@ import android.widget.AdapterView;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -42,6 +39,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
+    private static final String SUBMIT_LABEL = "Составить маршрут  →";
     private static final int LOCATION_PERMISSION_REQUEST = 75;
     private static final int ROUTE_SCREEN_REQUEST = 76;
     private static final int ROUTE_CHAT_REQUEST = 77;
@@ -53,6 +51,7 @@ public final class MainActivity extends Activity {
     private Spinner city;
     private FrameLayout cityPicker;
     private TextView cityArrow;
+    private ImageView heroImage;
     private EditText query;
     private TextView result;
     private Button submit;
@@ -125,10 +124,24 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         BackendConfig.logSelection();
-        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        getWindow().setStatusBarColor(0xFFFFFFFF);
+        getWindow().setNavigationBarColor(0xFFFFFFFF);
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
-        column.setBackgroundColor(0xFFFAFBFA);
+        column.setBackgroundColor(0xFFFFFFFF);
+
+        ScrollView pageScroll = new ScrollView(this);
+        pageScroll.setFillViewport(true);
+        pageScroll.setClipToPadding(false);
+        pageScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setBackgroundColor(0xFFFFFFFF);
+        pageScroll.addView(page, new ScrollView.LayoutParams(-1, -2));
+        column.addView(pageScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
 
         int p = UiKit.dp(this, 20);
         int screenHeightDp = getResources().getConfiguration().screenHeightDp;
@@ -136,38 +149,46 @@ public final class MainActivity extends Activity {
         boolean veryCompact = screenHeightDp <= 640;
         FrameLayout hero = new FrameLayout(this);
         hero.setBackground(UiKit.hero(this));
-        column.addView(hero, new LinearLayout.LayoutParams(
-                -1, UiKit.dp(this, veryCompact ? 150 : (compact ? 170 : 205))));
-        TextView brand = UiKit.label(this, "● Гуляй", compact ? 27 : 30, 0xFFFFFFFF);
+        page.addView(hero, new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, veryCompact ? 230 : (compact ? 255 : 290))));
+
+        heroImage = new ImageView(this);
+        heroImage.setImageResource(R.drawable.moscow_hero);
+        heroImage.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        heroImage.setAlpha(0.88f);
+        heroImage.setVisibility(View.GONE);
+        hero.addView(heroImage, new FrameLayout.LayoutParams(-1, -1));
+        View heroFade = new View(this);
+        heroFade.setBackground(UiKit.verticalGradient(
+                new int[]{0x00FFFFFF, 0x20FFFFFF, 0xFFFFFFFF}, 0, this));
+        hero.addView(heroFade, new FrameLayout.LayoutParams(-1, -1));
+
+        TextView brand = UiKit.label(this, "Гуляй", compact ? 29 : 32, UiKit.GREEN_DARK);
         brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        brand.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_walk, 0, 0, 0);
+        brand.setCompoundDrawablePadding(UiKit.dp(this, 8));
         FrameLayout.LayoutParams brandParams = new FrameLayout.LayoutParams(-2, -2);
         brandParams.leftMargin = p;
-        brandParams.topMargin = UiKit.dp(this, compact ? 16 : 24);
+        brandParams.topMargin = UiKit.dp(this, compact ? 12 : 18);
         hero.addView(brand, brandParams);
-        TextView subtitle = UiKit.label(this, "Маршрут под настроение", 15, 0xE6FFFFFF);
-        FrameLayout.LayoutParams subtitleParams = new FrameLayout.LayoutParams(-2, -2);
-        subtitleParams.leftMargin = p;
-        subtitleParams.topMargin = UiKit.dp(this, compact ? 54 : 66);
-        hero.addView(subtitle, subtitleParams);
-        Button profile = UiKit.button(this, "☺", 0xE6FFFFFF, UiKit.TEXT);
-        profile.setTextSize(22);
-        profile.setMinWidth(UiKit.dp(this, 52));
-        FrameLayout.LayoutParams profileParams = new FrameLayout.LayoutParams(
-                UiKit.dp(this, 52), UiKit.dp(this, 52), Gravity.TOP | Gravity.END);
-        profileParams.topMargin = UiKit.dp(this, compact ? 13 : 20);
-        profileParams.rightMargin = p;
-        hero.addView(profile, profileParams);
 
         cityPicker = new FrameLayout(this);
-        cityPicker.setBackground(UiKit.rounded(0xEFFFFFFF, 18, this));
+        cityPicker.setElevation(UiKit.dp(this, 3));
+        cityPicker.setBackground(UiKit.rounded(0xF7FFFFFF, 24, this));
         city = new Spinner(this);
         city.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
                 new String[]{"Локация не определена", "Тула", "Владимир", "Москва",
                         "Боровск, Калужская область"}));
-        city.setPadding(UiKit.dp(this, 16), 0, UiKit.dp(this, 48), 0);
+        city.setPadding(UiKit.dp(this, 46), 0, UiKit.dp(this, 42), 0);
         city.setBackgroundColor(0x00000000);
         cityPicker.addView(city, new FrameLayout.LayoutParams(-1, -1));
-        cityArrow = UiKit.label(this, "▼", 18, UiKit.RED_SOFT);
+        ImageView cityPin = new ImageView(this);
+        cityPin.setImageResource(R.drawable.ic_location);
+        FrameLayout.LayoutParams cityPinParams = new FrameLayout.LayoutParams(
+                UiKit.dp(this, 24), UiKit.dp(this, 24), Gravity.START | Gravity.CENTER_VERTICAL);
+        cityPinParams.leftMargin = UiKit.dp(this, 14);
+        cityPicker.addView(cityPin, cityPinParams);
+        cityArrow = UiKit.label(this, "⌄", 22, UiKit.TEXT);
         cityArrow.setGravity(Gravity.CENTER);
         cityArrow.setClickable(true);
         cityArrow.setOnClickListener(view -> city.performClick());
@@ -175,32 +196,33 @@ public final class MainActivity extends Activity {
                 UiKit.dp(this, 48), -1, Gravity.END | Gravity.CENTER_VERTICAL);
         cityPicker.addView(cityArrow, arrowParams);
         FrameLayout.LayoutParams cityParams = new FrameLayout.LayoutParams(
-                -1, UiKit.dp(this, compact ? 48 : 54), Gravity.BOTTOM);
-        cityParams.setMargins(p, 0, p, UiKit.dp(this, compact ? 14 : 20));
+                UiKit.dp(this, compact ? 200 : 220), UiKit.dp(this, 52), Gravity.TOP | Gravity.START);
+        cityParams.setMargins(p, UiKit.dp(this, compact ? 58 : 70), 0, 0);
         hero.addView(cityPicker, cityParams);
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(p, UiKit.dp(this, compact ? 10 : 16), p,
-                UiKit.dp(this, compact ? 5 : 9));
-        column.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
-        TextView heading = UiKit.label(this, "Куда пойдём?", compact ? 22 : 25, UiKit.TEXT);
+        content.setPadding(p, 0, p, UiKit.dp(this, 16));
+        page.addView(content, new LinearLayout.LayoutParams(-1, -2));
+        TextView heading = UiKit.label(this, "Куда отправимся\nсегодня?", compact ? 28 : 32, UiKit.TEXT);
         heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        content.addView(heading);
-        TextView intro = UiKit.label(this,
-                "Расскажите, как хотите провести прогулку", 15, UiKit.MUTED);
-        intro.setPadding(0, UiKit.dp(this, 1), 0, UiKit.dp(this, compact ? 5 : 8));
-        content.addView(intro);
+        heading.setLineSpacing(0, 0.95f);
+        FrameLayout.LayoutParams headingParams = new FrameLayout.LayoutParams(-2, -2,
+                Gravity.START | Gravity.BOTTOM);
+        headingParams.setMargins(p, 0, p, UiKit.dp(this, 12));
+        hero.addView(heading, headingParams);
 
         locationButton = new Button(this);
         locationButton.setText("Обновить геопозицию");
         locationStatus = new TextView(this);
         locationStatus.setText("Определяем город. Если не получится — выберите его в списке.");
         locationStatus.setTextColor(UiKit.MUTED);
-        locationStatus.setTextSize(compact ? 11 : 12);
-        locationStatus.setMaxLines(compact ? 1 : 2);
+        locationStatus.setTextSize(12);
+        locationStatus.setMaxLines(2);
         locationStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        content.addView(locationStatus);
+        locationStatus.setPadding(UiKit.dp(this, 4), UiKit.dp(this, 5),
+                UiKit.dp(this, 4), UiKit.dp(this, 7));
+        content.addView(locationStatus, new LinearLayout.LayoutParams(-1, -2));
         locationButton.setVisibility(View.VISIBLE);
 
         selectedFilters = new LinearLayout(this);
@@ -210,61 +232,96 @@ public final class MainActivity extends Activity {
         selectedFilters.setVisibility(View.GONE);
         content.addView(selectedFilters, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 38)));
 
+        LinearLayout customWalkCard = new LinearLayout(this);
+        customWalkCard.setOrientation(LinearLayout.VERTICAL);
+        customWalkCard.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 14),
+                UiKit.dp(this, 14), UiKit.dp(this, 14));
+        customWalkCard.setBackground(UiKit.gradient(
+                new int[]{0xFFF1FBF5, 0xFFE6F8EB, 0xFFF8FFF9}, 24, this));
+        customWalkCard.setElevation(UiKit.dp(this, 3));
+
+        FrameLayout cardIntro = new FrameLayout(this);
+        LinearLayout cardText = new LinearLayout(this);
+        cardText.setOrientation(LinearLayout.VERTICAL);
+        cardText.setPadding(0, 0, UiKit.dp(this, compact ? 106 : 132), 0);
+        TextView cardTitle = UiKit.label(this, "Своя прогулка", compact ? 23 : 25, UiKit.TEXT);
+        cardTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        cardTitle.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_sparkles, 0, 0, 0);
+        cardTitle.setCompoundDrawablePadding(UiKit.dp(this, 8));
+        cardText.addView(cardTitle);
+        TextView cardSubtitle = UiKit.label(this, "Маршрут по вашим интересам", 15, UiKit.TEXT);
+        cardText.addView(cardSubtitle);
+        TextView cardDescription = UiKit.label(this,
+                "Опишите, что хотите посмотреть,\nа мы соберём прогулку", 14, UiKit.MUTED);
+        cardDescription.setPadding(0, UiKit.dp(this, 8), 0, UiKit.dp(this, 10));
+        cardText.addView(cardDescription);
+        cardIntro.addView(cardText, new FrameLayout.LayoutParams(-1, -2));
+        ImageView routeIllustration = new ImageView(this);
+        routeIllustration.setImageResource(R.drawable.walk_route_illustration);
+        routeIllustration.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        routeIllustration.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        FrameLayout.LayoutParams illustrationParams = new FrameLayout.LayoutParams(
+                UiKit.dp(this, compact ? 120 : 148), UiKit.dp(this, compact ? 102 : 118),
+                Gravity.END | Gravity.BOTTOM);
+        illustrationParams.rightMargin = UiKit.dp(this, -7);
+        cardIntro.addView(routeIllustration, illustrationParams);
+        customWalkCard.addView(cardIntro, new LinearLayout.LayoutParams(-1, -2));
+
         FrameLayout queryBox = new FrameLayout(this);
-        queryBox.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE0E5E1, 20, this));
+        queryBox.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFD1D5DB, 13, this));
         query = new EditText(this);
-        query.setHint("Например: хочу гулять 2 часа по центру и зайти поесть");
-        query.setMinLines(compact ? 2 : 3);
-        query.setMaxLines(compact ? 2 : 3);
-        query.setTextSize(compact ? 14 : 16);
+        query.setHint("Например: красивые места, кофе и прогулка на 2 часа");
+        query.setMinLines(1);
+        query.setMaxLines(2);
+        query.setTextSize(14);
         query.setGravity(Gravity.CENTER_VERTICAL);
-        query.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 8),
-                UiKit.dp(this, compact ? 66 : 76), UiKit.dp(this, 8));
+        query.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_edit, 0, 0, 0);
+        query.setCompoundDrawablePadding(UiKit.dp(this, 10));
+        query.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 7),
+                UiKit.dp(this, 12), UiKit.dp(this, 7));
         query.setBackgroundColor(0x00000000);
         queryBox.addView(query, new FrameLayout.LayoutParams(-1, -1));
-        submit = UiKit.button(this, "▶", UiKit.GREEN_DARK, 0xFFFFFFFF);
-        submit.setTextSize(compact ? 21 : 24);
+        LinearLayout.LayoutParams queryParams = new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, compact ? 54 : 58));
+        customWalkCard.addView(queryBox, queryParams);
+
+        submit = UiKit.button(this, SUBMIT_LABEL, UiKit.GREEN, 0xFFFFFFFF);
+        submit.setTextSize(16);
         submit.setMinWidth(0);
         submit.setMinHeight(0);
         submit.setElevation(0f);
         submit.setStateListAnimator(null);
         submit.setPadding(0, 0, 0, 0);
-        FrameLayout.LayoutParams inlineSubmitParams = new FrameLayout.LayoutParams(
-                UiKit.dp(this, compact ? 46 : 54), UiKit.dp(this, compact ? 46 : 54),
-                Gravity.END | Gravity.CENTER_VERTICAL);
-        inlineSubmitParams.rightMargin = UiKit.dp(this, 8);
-        queryBox.addView(submit, inlineSubmitParams);
-        LinearLayout.LayoutParams queryParams = new LinearLayout.LayoutParams(
-                -1, UiKit.dp(this, veryCompact ? 58 : (compact ? 64 : 82)));
-        queryParams.topMargin = UiKit.dp(this, compact ? 5 : 8);
-        content.addView(queryBox, queryParams);
+        submit.setBackground(UiKit.gradient(new int[]{0xFF0F9F3D, 0xFF20B94D}, 24, this));
+        LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, 52));
+        submitParams.topMargin = UiKit.dp(this, 10);
+        customWalkCard.addView(submit, submitParams);
+        LinearLayout.LayoutParams customCardParams = new LinearLayout.LayoutParams(-1, -2);
+        customCardParams.topMargin = UiKit.dp(this, 2);
+        customCardParams.bottomMargin = UiKit.dp(this, 18);
+        content.addView(customWalkCard, customCardParams);
 
-        TextView filtersTitle = UiKit.label(this, "Быстрые фильтры", 14, UiKit.MUTED);
-        filtersTitle.setPadding(0, UiKit.dp(this, compact ? 6 : 9), 0,
-                UiKit.dp(this, compact ? 3 : 5));
+        TextView filtersTitle = UiKit.label(this, "Быстрые фильтры", compact ? 21 : 23, UiKit.TEXT);
+        filtersTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        filtersTitle.setPadding(0, 0, 0, UiKit.dp(this, 10));
         content.addView(filtersTitle);
-        FrameLayout filtersViewport = new FrameLayout(this);
-        filtersViewport.setBackgroundColor(0xFFFAFBFA);
-        filtersViewport.setClipChildren(true);
-        filtersViewport.setClipToPadding(true);
-        HorizontalScrollView filtersScroll = new HorizontalScrollView(this);
-        filtersScroll.setHorizontalScrollBarEnabled(false);
-        filtersScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        filtersScroll.setClipChildren(true);
-        filtersScroll.setClipToPadding(true);
-        filtersScroll.setPadding(0, UiKit.dp(this, 2), UiKit.dp(this, 12), UiKit.dp(this, 2));
         LinearLayout filters = new LinearLayout(this);
         filters.setOrientation(LinearLayout.HORIZONTAL);
-        filters.setPadding(0, 0, UiKit.dp(this, 4), 0);
-        filtersScroll.addView(filters);
-        durationFilterButton = addFilterButton(filters, "◷  На 2 часа", UiKit.GREEN);
-        childrenFilterButton = addFilterButton(filters, "♟  С детьми", UiKit.GREEN);
-        foodFilterButton = addFilterButton(filters, "⚑  Хочу поесть", 0xFFFF8A22);
+        filters.setBaselineAligned(false);
+        durationFilterButton = addFilterButton(filters, "На 2 часа", UiKit.GREEN);
+        durationFilterButton.setCompoundDrawablesWithIntrinsicBounds(0, R.drawable.ic_clock, 0, 0);
+        childrenFilterButton = addFilterButton(filters, "С детьми", UiKit.GREEN);
+        childrenFilterButton.setCompoundDrawablesWithIntrinsicBounds(0, R.drawable.ic_people, 0, 0);
+        foodFilterButton = addFilterButton(filters, "Хочу поесть", 0xFFFF8A00);
+        foodFilterButton.setCompoundDrawablesWithIntrinsicBounds(0, R.drawable.ic_food, 0, 0);
         unusualFilterButton = addFilterButton(filters, "★  Необычные места", UiKit.GREEN);
+        unusualFilterButton.setVisibility(View.GONE);
         refreshFilterUi();
-        filtersViewport.addView(filtersScroll, new FrameLayout.LayoutParams(-1, -1));
-        content.addView(filtersViewport, new LinearLayout.LayoutParams(
-                -1, UiKit.dp(this, compact ? 42 : 46)));
+        LinearLayout.LayoutParams filtersParams = new LinearLayout.LayoutParams(
+                -1, UiKit.dp(this, compact ? 94 : 104));
+        filtersParams.bottomMargin = UiKit.dp(this, 20);
+        content.addView(filters, filtersParams);
 
         returnToRouteButton = UiKit.button(this, "Вернуться к маршруту", UiKit.SOFT,
                 UiKit.GREEN_DARK);
@@ -289,14 +346,15 @@ public final class MainActivity extends Activity {
         routeCard = new LinearLayout(this);
         routeCard.setOrientation(LinearLayout.HORIZONTAL);
         routeCard.setGravity(Gravity.CENTER_VERTICAL);
-        routeCard.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 9),
+        routeCard.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 10),
                 UiKit.dp(this, 8), UiKit.dp(this, 9));
-        routeCard.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE4E9E5, 16, this));
-        routeCardIcon = UiKit.label(this, "⌁\n●", 18, UiKit.GREEN);
+        routeCard.setBackground(UiKit.gradient(
+                new int[]{0xFFF1FBF5, 0xFFF9FDFA}, 18, this));
+        routeCardIcon = UiKit.label(this, "", 18, UiKit.GREEN);
         routeCardIcon.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         routeCardIcon.setGravity(Gravity.CENTER);
-        routeCardIcon.setLineSpacing(0, 0.8f);
-        routeCardIcon.setBackground(UiKit.rounded(0xFFE9F8EE, 18, this));
+        routeCardIcon.setCompoundDrawablesWithIntrinsicBounds(0, R.drawable.ic_footsteps, 0, 0);
+        routeCardIcon.setBackground(UiKit.rounded(0xFFDDF8E4, 16, this));
         routeCardIcon.setVisibility(View.GONE);
         LinearLayout.LayoutParams routeIconParams = new LinearLayout.LayoutParams(
                 UiKit.dp(this, 48), UiKit.dp(this, 48));
@@ -317,8 +375,8 @@ public final class MainActivity extends Activity {
         routeCardText.addView(routeCardSubtitle);
         routeCardText.addView(routeCardActivity);
         routeCard.addView(routeCardText, new LinearLayout.LayoutParams(0, -2, 1f));
-        routeControlButton = UiKit.button(this, "▶ / ×", UiKit.GREEN, 0xFFFFFFFF);
-        routeControlButton.setTextSize(compact ? 17 : 18);
+        routeControlButton = UiKit.button(this, "⋮", 0x00FFFFFF, UiKit.GREEN_DARK);
+        routeControlButton.setTextSize(24);
         routeControlButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         routeControlButton.setMinWidth(0);
         routeControlButton.setMinHeight(0);
@@ -328,28 +386,27 @@ public final class MainActivity extends Activity {
                 UiKit.dp(this, compact ? 88 : 96), UiKit.dp(this, compact ? 42 : 46)));
         routeCard.setVisibility(View.GONE);
         LinearLayout.LayoutParams routeCardParams = new LinearLayout.LayoutParams(
-                -1, UiKit.dp(this, compact ? 60 : 66));
+                -1, UiKit.dp(this, compact ? 70 : 76));
         routeCardParams.topMargin = UiKit.dp(this, compact ? 4 : 8);
         routeCardParams.bottomMargin = UiKit.dp(this, 4);
         result = new TextView(this);
-        result.setTextSize(14);
+        result.setTextSize(12);
         result.setTextColor(UiKit.MUTED);
-        result.setMaxLines(1);
+        result.setMaxLines(2);
         result.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        result.setPadding(0, UiKit.dp(this, compact ? 3 : 6), 0,
-                UiKit.dp(this, compact ? 3 : 6));
-        content.addView(result, new LinearLayout.LayoutParams(-1,
-                UiKit.dp(this, compact ? 22 : 28)));
+        result.setPadding(UiKit.dp(this, 2), UiKit.dp(this, 5), UiKit.dp(this, 2),
+                UiKit.dp(this, 8));
+        content.addView(result, new LinearLayout.LayoutParams(-1, -2));
 
         TextView historyTitle = UiKit.label(this, "История маршрутов",
-                compact ? 17 : 20, UiKit.TEXT);
+                compact ? 21 : 23, UiKit.TEXT);
         historyTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        historyTitle.setPadding(0, 0, 0, UiKit.dp(this, 8));
         content.addView(historyTitle);
         guestHistoryScroll = new ScrollView(this);
         guestHistoryScroll.setFillViewport(false);
-        guestHistoryScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
-        guestHistoryScroll.setVerticalScrollBarEnabled(true);
-        guestHistoryScroll.setScrollbarFadingEnabled(false);
+        guestHistoryScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        guestHistoryScroll.setVerticalScrollBarEnabled(false);
         LinearLayout historyStack = new LinearLayout(this);
         historyStack.setOrientation(LinearLayout.VERTICAL);
         historyStack.addView(routeCard, routeCardParams);
@@ -362,21 +419,22 @@ public final class MainActivity extends Activity {
                 UiKit.dp(this, 4), UiKit.dp(this, 6));
         historyStack.addView(guestHistoryStatus, new LinearLayout.LayoutParams(-1, -2));
         TextView history = UiKit.label(this,
-                "Гостевая история: до 3 маршрутов, хранение 24 часа. После появления профилей можно будет сохранять маршруты надолго.", 15, UiKit.MUTED);
-        history.setGravity(Gravity.CENTER);
-        history.setBackground(UiKit.rounded(UiKit.SOFT, 16, this));
+                "Маршрут строится с учётом ваших интересов, времени и текущей локации.", 13, UiKit.TEXT);
+        history.setGravity(Gravity.CENTER_VERTICAL);
+        history.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_location, 0, 0, 0);
+        history.setCompoundDrawablePadding(UiKit.dp(this, 10));
+        history.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 8),
+                UiKit.dp(this, 12), UiKit.dp(this, 8));
+        history.setBackground(UiKit.gradient(new int[]{0xFFF1FBF5, 0xFFE9F8EC}, 18, this));
         LinearLayout.LayoutParams historyParams = new LinearLayout.LayoutParams(
-                -1, UiKit.dp(this, compact ? 52 : 68));
-        historyParams.topMargin = UiKit.dp(this, compact ? 4 : 7);
+                -1, UiKit.dp(this, compact ? 62 : 68));
+        historyParams.topMargin = UiKit.dp(this, 14);
         historyStack.addView(history, historyParams);
         guestHistoryScroll.addView(historyStack, new ScrollView.LayoutParams(-1, -2));
-        // History owns only the space left above bottom navigation. Giving the
-        // nested ScrollView that remaining space prevents its last row from
-        // being clipped while keeping the rest of the page fixed.
         LinearLayout.LayoutParams guestHistoryParams = new LinearLayout.LayoutParams(
-                -1, 0, 1f);
+                -1, -2);
         guestHistoryParams.topMargin = UiKit.dp(this, 3);
-        guestHistoryParams.bottomMargin = UiKit.dp(this, 6);
+        guestHistoryParams.bottomMargin = UiKit.dp(this, 8);
         content.addView(guestHistoryScroll, guestHistoryParams);
 
         editPointsButton = new Button(this);
@@ -440,11 +498,14 @@ public final class MainActivity extends Activity {
 
         LinearLayout navigation = new LinearLayout(this);
         navigation.setGravity(Gravity.CENTER);
-        navigation.setPadding(p, UiKit.dp(this, 2), p, UiKit.dp(this, 2));
+        navigation.setElevation(UiKit.dp(this, 8));
+        navigation.setPadding(p, UiKit.dp(this, 3), p, UiKit.dp(this, 3));
         navigation.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE6EAE7, 0, this));
-        Button homeTab = navigationTab("⌂\nГлавная", UiKit.GREEN_DARK);
-        Button profileTab = navigationTab("♙\nПрофиль", UiKit.MUTED);
-        int navigationHeight = UiKit.dp(this, veryCompact ? 48 : 54);
+        Button homeTab = navigationTab("Главная", UiKit.GREEN);
+        homeTab.setCompoundDrawablesWithIntrinsicBounds(0, R.drawable.ic_home, 0, 0);
+        Button profileTab = navigationTab("Профиль", UiKit.MUTED);
+        profileTab.setCompoundDrawablesWithIntrinsicBounds(0, R.drawable.ic_profile, 0, 0);
+        int navigationHeight = UiKit.dp(this, veryCompact ? 56 : 62);
         navigation.addView(homeTab, new LinearLayout.LayoutParams(0, navigationHeight, 1));
         navigation.addView(profileTab, new LinearLayout.LayoutParams(0, navigationHeight, 1));
         column.addView(navigation);
@@ -476,9 +537,6 @@ public final class MainActivity extends Activity {
         // walk, so it must never revive a route as READY. The preferences are
         // the sole durable source of route lifecycle state.
         restoreRouteState();
-        if (routeId == null && savedInstanceState == null) {
-            result.setText("Версия 0.6 поддерживает ограничение пеших переходов и прохождение маршрута.");
-        }
         editPointsButton.setEnabled(routeId != null && !currentRouteHasGroups());
         startWalkButton.setEnabled(routeId != null);
         mapButton.setEnabled(routeId != null);
@@ -554,15 +612,17 @@ public final class MainActivity extends Activity {
 
     private Button addFilterButton(LinearLayout parent, String text, int accent) {
         Button chip = UiKit.button(this, text, UiKit.SOFT, UiKit.TEXT);
-        chip.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
-        chip.setTextSize(13);
+        chip.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        chip.setTextSize(14);
+        chip.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        chip.setCompoundDrawablePadding(UiKit.dp(this, 7));
         chip.setMinHeight(0);
         chip.setMinWidth(0);
         chip.setElevation(0f);
         chip.setStateListAnimator(null);
-        chip.setPadding(UiKit.dp(this, 16), 0, UiKit.dp(this, 16), 0);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -1);
-        params.rightMargin = UiKit.dp(this, 8);
+        chip.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 8), UiKit.dp(this, 8), UiKit.dp(this, 8));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -1, 1f);
+        params.rightMargin = UiKit.dp(this, 7);
         parent.addView(chip, params);
         chip.setOnClickListener(view -> {
             if (chip == durationFilterButton) filterTwoHours = !filterTwoHours;
@@ -586,36 +646,29 @@ public final class MainActivity extends Activity {
         addSelectedFilterChip("♟ С детьми", filterChildren, () -> filterChildren = false, UiKit.GREEN);
         addSelectedFilterChip("⚑ Хочу поесть", filterFood, () -> filterFood = false, 0xFFFF8A22);
         addSelectedFilterChip("★ Необычные места", filterUnusual, () -> filterUnusual = false, UiKit.GREEN);
-        selectedFilters.setVisibility(selectedFilters.getChildCount() == 0 ? View.GONE : View.VISIBLE);
+        // The large cards themselves expose combined active states; duplicate chips would
+        // add visual noise above the custom-walk card.
+        selectedFilters.setVisibility(View.GONE);
     }
 
     private void setFilterAppearance(Button button, boolean selected) {
         if (button == null) return;
         int accent = (Integer) button.getTag();
-        String icon;
         String label;
         if (button == durationFilterButton) {
-            icon = "◷"; label = "На 2 часа";
+            label = "На 2 часа";
         } else if (button == childrenFilterButton) {
-            icon = "♟"; label = "С детьми";
+            label = "С детьми";
         } else if (button == foodFilterButton) {
-            icon = "⚑"; label = "Хочу поесть";
+            label = "Хочу поесть";
         } else {
-            icon = "★"; label = "Необычные места";
-        }
-        String suffix = selected ? "  ✓" : "";
-        SpannableString styled = new SpannableString(icon + "  " + label + suffix);
-        styled.setSpan(new ForegroundColorSpan(accent), 0, icon.length(),
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        if (selected) {
-            styled.setSpan(new ForegroundColorSpan(accent),
-                    styled.length() - 1, styled.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            label = "Необычные места";
         }
         button.setTextColor(UiKit.TEXT);
-        button.setText(styled);
+        button.setText(selected ? label + "  ✓" : label);
         button.setBackground(selected
-                ? UiKit.bordered(0xFFF7FFF9, accent, 16, this)
-                : UiKit.bordered(0xFFF4F7F4, 0xFFFFFFFF, 16, this));
+                ? UiKit.bordered(0xFFE7F8EC, accent, 18, this)
+                : UiKit.gradient(new int[]{0xFFF1FBF5, 0xFFE9F7EC}, 18, this));
     }
 
     private void addSelectedFilterChip(String text, boolean selected, Runnable remove, int accent) {
@@ -774,7 +827,7 @@ public final class MainActivity extends Activity {
                     persistQueryEditMode();
                     updateQueryEditActions();
                     if (activeWalkBeforeChange != null) clearActiveWalkState();
-                    submit.setText("▶");
+                    submit.setText(SUBMIT_LABEL);
                     startWalkButton.setEnabled(true);
                     mapButton.setEnabled(true);
                     currentPoints.clear();
@@ -1123,7 +1176,7 @@ public final class MainActivity extends Activity {
         city.setSelection(0);
         query.setText(preferences.getString("routeQuery", ""));
         result.setText(lastSuccessfulResult);
-        submit.setText("▶");
+        submit.setText(SUBMIT_LABEL);
     }
 
     private void markCurrentRouteFinished(String walkStatus) {
@@ -1451,8 +1504,12 @@ public final class MainActivity extends Activity {
         boolean unknown = city.getSelectedItemPosition() == 0;
         cityArrow.setTextColor(UiKit.MUTED);
         cityPicker.setBackground(unknown
-                ? UiKit.bordered(0xFFFFECEC, 0xFFE7A2A2, 18, this)
-                : UiKit.rounded(0xEFFFFFFF, 18, this));
+                ? UiKit.bordered(0xFFFDF4F4, 0xFFE7A2A2, 24, this)
+                : UiKit.rounded(0xF7FFFFFF, 24, this));
+        if (heroImage != null) {
+            heroImage.setVisibility(city.getSelectedItemPosition() == cityPosition("moscow")
+                    ? View.VISIBLE : View.GONE);
+        }
     }
 
     private void markRouteLocationDirty() {
@@ -1464,7 +1521,7 @@ public final class MainActivity extends Activity {
 
     private void showLocationRebuildIfNeeded() {
         if (routeId == null || !routeLocationDirty) return;
-        submit.setText("▶");
+        submit.setText(SUBMIT_LABEL);
         locationStatus.append(" Перестройте маршрут, чтобы учесть новый старт.");
     }
 
@@ -1629,7 +1686,7 @@ public final class MainActivity extends Activity {
         returnToRouteButton.setVisibility(View.GONE);
         routeCard.setVisibility(hasRoute && !(routeFinished && walkStateVerified)
                 ? View.VISIBLE : View.GONE);
-        submit.setText("▶");
+        submit.setText(SUBMIT_LABEL);
         if (hasRoute) renderRouteCard(null);
     }
 
@@ -1846,19 +1903,46 @@ public final class MainActivity extends Activity {
 
     private void addGuestHistoryCard(ApiClient.GuestHistoryItem item) {
         LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
+        card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 7), UiKit.dp(this, 14), UiKit.dp(this, 7));
-        card.setBackground(UiKit.bordered(0xFFFFFFFF, 0xFFE4E9E5, 14, this));
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = UiKit.label(this, cityName(item.cityId) + ": " + item.title, 14, UiKit.TEXT);
+        card.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 9), UiKit.dp(this, 9), UiKit.dp(this, 9));
+        card.setBackground(UiKit.gradient(new int[]{0xFFF1FBF5, 0xFFFBFDFB}, 18, this));
+        card.setElevation(UiKit.dp(this, 1));
+
+        TextView icon = UiKit.label(this, "", 16, UiKit.GREEN);
+        icon.setGravity(Gravity.CENTER);
+        icon.setCompoundDrawablesWithIntrinsicBounds(0, R.drawable.ic_footsteps, 0, 0);
+        icon.setBackground(UiKit.rounded(0xFFDDF8E4, 15, this));
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(
+                UiKit.dp(this, 50), UiKit.dp(this, 50));
+        iconParams.rightMargin = UiKit.dp(this, 12);
+        card.addView(icon, iconParams);
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = UiKit.label(this, item.title, 15, UiKit.TEXT);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD); title.setMaxLines(1);
         title.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
         if ("COMPLETED".equals(item.walkStatus)) title.setText("✓  " + title.getText());
-        TextView delete = UiKit.label(this, "Удалить", 12, UiKit.RED);
-        delete.setPadding(UiKit.dp(this, 8), 0, 0, 0);
+        text.addView(title);
+        TextView subtitle = UiKit.label(this, cityName(item.cityId) + " • "
+                + formatDuration(item.totalMinutes) + " • " + historyStatusLabel(item.walkStatus),
+                12, UiKit.MUTED);
+        subtitle.setMaxLines(1);
+        subtitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        text.addView(subtitle);
+        card.addView(text, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.VERTICAL);
+        actions.setGravity(Gravity.CENTER);
+        ImageView chevron = new ImageView(this);
+        chevron.setImageResource(R.drawable.ic_chevron_right);
+        actions.addView(chevron, new LinearLayout.LayoutParams(
+                UiKit.dp(this, 24), UiKit.dp(this, 24)));
+        TextView delete = UiKit.label(this, "Удалить", 10, UiKit.RED);
+        delete.setPadding(UiKit.dp(this, 5), UiKit.dp(this, 3), UiKit.dp(this, 5), 0);
         boolean canDelete = RouteLifecycleRecovery.canDeleteHistoryRoute(item.walkStatus);
         delete.setAlpha(canDelete ? 1f : 0.45f);
         delete.setContentDescription(canDelete ? "Удалить маршрут" : "Нельзя удалить активную прогулку");
@@ -1866,16 +1950,11 @@ public final class MainActivity extends Activity {
             if (canDelete) confirmDeleteGuestHistoryRoute(item);
             else result.setText("Сначала завершите или остановите прогулку.");
         });
-        header.addView(delete, new LinearLayout.LayoutParams(-2, -2));
-        card.addView(header, new LinearLayout.LayoutParams(-1, -2));
-        TextView subtitle = UiKit.label(this, "Гостевой маршрут • " + item.pointCount + " мест • "
-                + item.totalMinutes + " мин", 12, UiKit.MUTED);
-        subtitle.setText(historyStatusLabel(item.walkStatus) + " • " + item.pointCount
-                + " мест • " + item.totalMinutes + " мин");
-        subtitle.setMaxLines(1); card.addView(subtitle);
+        actions.addView(delete, new LinearLayout.LayoutParams(-2, -2));
+        card.addView(actions, new LinearLayout.LayoutParams(UiKit.dp(this, 58), -1));
         card.setOnClickListener(view -> openGuestHistoryRoute(item));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 66));
-        params.bottomMargin = UiKit.dp(this, 6); guestHistoryList.addView(card, params);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 76));
+        params.bottomMargin = UiKit.dp(this, 8); guestHistoryList.addView(card, params);
     }
 
     private void confirmDeleteGuestHistoryRoute(ApiClient.GuestHistoryItem item) {
@@ -2295,7 +2374,7 @@ public final class MainActivity extends Activity {
         query.setText("");
         placeSearch.setText("");
         pointEditor.setVisibility(View.GONE);
-        submit.setText("▶");
+        submit.setText(SUBMIT_LABEL);
         editPointsButton.setEnabled(false);
         startWalkButton.setEnabled(false);
         startWalkButton.setVisibility(View.GONE);

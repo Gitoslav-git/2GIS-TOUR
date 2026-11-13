@@ -9,11 +9,12 @@ import android.widget.Button;
 import android.widget.TextView;
 
 final class UiKit {
-    static final int GREEN = 0xFF19C463;
-    static final int GREEN_DARK = 0xFF0AA84F;
-    static final int TEXT = 0xFF151918;
-    static final int MUTED = 0xFF737B78;
-    static final int SOFT = 0xFFF1F4F1;
+    static final int GREEN = 0xFF16A34A;
+    static final int GREEN_DARK = 0xFF0E5A3C;
+    static final int MINT = 0xFFA7E3BC;
+    static final int TEXT = 0xFF1F2937;
+    static final int MUTED = 0xFF6B7280;
+    static final int SOFT = 0xFFF1FBF5;
     static final int MAP = 0xFFE7EFE9;
     static final int RED = 0xFFFF5757;
     static final int RED_SOFT = 0xFFE36A6A;
@@ -40,9 +41,21 @@ final class UiKit {
     static GradientDrawable hero(Context context) {
         GradientDrawable drawable = new GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
-                new int[]{0xFF8AB99C, 0xFF3E6E58, 0xFF173E31});
-        drawable.setCornerRadii(new float[]{0, 0, 0, 0,
-                dp(context, 30), dp(context, 30), dp(context, 30), dp(context, 30)});
+                new int[]{0xFFF1FBF5, 0xFFDDF3E5, 0xFFFFFFFF});
+        return drawable;
+    }
+
+    static GradientDrawable gradient(int[] colors, float radiusDp, Context context) {
+        GradientDrawable drawable = new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT, colors);
+        drawable.setCornerRadius(dp(context, radiusDp));
+        return drawable;
+    }
+
+    static GradientDrawable verticalGradient(int[] colors, float radiusDp, Context context) {
+        GradientDrawable drawable = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM, colors);
+        drawable.setCornerRadius(dp(context, radiusDp));
         return drawable;
     }
 

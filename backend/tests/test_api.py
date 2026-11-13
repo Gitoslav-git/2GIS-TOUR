@@ -142,6 +142,7 @@ def test_pilot_cities_are_explicit():
         {"cityId": "vladimir", "name": "Владимир"},
         {"cityId": "moscow", "name": "Москва"},
         {"cityId": "borovsk", "name": "Боровск, Калужская область"},
+        {"cityId": "nizhny_novgorod", "name": "Нижний Новгород"},
     ]}
 
 

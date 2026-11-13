@@ -130,6 +130,18 @@ def test_borovsk_city_name_is_accepted_for_borovsk_request():
     assert result.json()["cityId"] == "borovsk"
 
 
+def test_nizhny_novgorod_city_name_is_accepted_for_selected_city():
+    app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
+        parsed(cityText="Нижний Новгород", durationMinutes=120))
+    result = request(
+        cityId="nizhny_novgorod",
+        query="Построй прогулку по Нижнему Новгороду на 2 часа",
+    )
+    assert result.status_code == 200
+    assert result.json()["cityId"] == "nizhny_novgorod"
+    assert result.json()["durationMinutes"] == 120
+
+
 def test_filter_takes_precedence_over_text_and_false_is_explicit():
     app.dependency_overrides[get_intent_provider] = lambda: FakeIntentProvider(
         parsed(durationMinutes=120, includeFood=True, withChildren=True))

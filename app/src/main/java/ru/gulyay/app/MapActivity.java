@@ -1588,6 +1588,7 @@ public final class MapActivity extends ComponentActivity {
         if ("moscow".equals(cityId)) return "Москве";
         if ("vladimir".equals(cityId)) return "Владимиру";
         if ("borovsk".equals(cityId)) return "Боровску";
+        if ("nizhny_novgorod".equals(cityId)) return "Нижнему Новгороду";
         return "Туле";
     }
 
@@ -3734,6 +3735,7 @@ public final class MapActivity extends ComponentActivity {
         if ("moscow".equals(cityId)) return new double[]{55.7558, 37.6173};
         if ("vladimir".equals(cityId)) return new double[]{56.1291, 40.4075};
         if ("borovsk".equals(cityId)) return new double[]{55.2073, 36.4833};
+        if ("nizhny_novgorod".equals(cityId)) return new double[]{56.3269, 44.0059};
         return new double[]{54.1930, 37.6178};
     }
 

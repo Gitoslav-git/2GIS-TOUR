@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from gulyay.catalog import (CatalogPlaceProvider, PlaceCatalog,
-                            bundled_seed_path)
+                            bundled_seed_path, bundled_seed_paths)
 from gulyay.models import (Filters, PlaceCandidate, QueryPreview, Route, RouteLeg,
                            RoutePoint, SearchArea)
 from gulyay.route_groups import (attach_route_groups, logical_group_candidates,
@@ -37,9 +37,9 @@ def preview(**updates):
     return QueryPreview.model_validate(values)
 
 
-def parent_route(catalog_id="msk001"):
+def parent_route(catalog_id="msk001", city_id="moscow"):
     return Route(
-        routeId=uuid4(), routeVersion=1, status="READY", cityId="moscow",
+        routeId=uuid4(), routeVersion=1, status="READY", cityId=city_id,
         query="walk", filters=Filters(),
         searchArea=SearchArea(label="center", lat=55.75, lon=37.61,
                               radiusMeters=3500, source="city"),
@@ -181,6 +181,26 @@ def test_bundled_red_square_and_kremlin_groups_expose_all_children():
             assert response["routeGroups"][0]["waypoints"] == []
 
 
+def test_nizhny_kremlin_children_stay_optional_inside_route_group():
+    catalog = PlaceCatalog(":memory:")
+    nizhny_seed = next(path for path in bundled_seed_paths()
+                       if path.name == "nizhny_novgorod_places_v0_1.csv")
+    catalog.import_seed(nizhny_seed)
+    provider = CatalogPlaceProvider(catalog)
+    route = parent_route("nn001", "nizhny_novgorod")
+
+    grouped = attach_route_groups(
+        route, [parent_candidate("nn001")],
+        preview(cityId="nizhny_novgorod"), GroupGeo(), provider, VisitZones({}),
+    )
+
+    assert grouped.points == route.points
+    assert grouped.totalMinutes == route.totalMinutes
+    assert len(grouped.routeGroups) == 1
+    assert grouped.routeGroups[0].visitZone is None
+    assert [child.catalogId for child in grouped.routeGroups[0].children] == [
+        "nn002", "nn003", "nn004", "nn005", "nn006", "nn007",
+    ]
 def test_refresh_recovers_catalog_ids_and_reorders_complete_groups():
     catalog = PlaceCatalog(":memory:")
     catalog.import_seed(bundled_seed_path())

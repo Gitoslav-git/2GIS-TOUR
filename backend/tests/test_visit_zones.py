@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from gulyay.catalog import PlaceCatalog, bundled_seed_path
+from gulyay.catalog import PlaceCatalog, bundled_seed_path, bundled_seed_paths
 from gulyay.visit_zones import (VisitZoneValidationError,
                                 bundled_visit_zones_path,
                                 distance_to_geometry_meters, load_visit_zones)
@@ -108,6 +108,21 @@ def test_missing_zone_is_optional_for_point_fallback(tmp_path):
 
     assert zones.get("msk069") is None
     assert "msk069" not in zones
+
+
+def test_nizhny_novgorod_has_no_fake_zones_and_uses_point_fallback(tmp_path):
+    catalog = PlaceCatalog(tmp_path / "all-cities.sqlite3")
+    for seed_path in bundled_seed_paths():
+        catalog.import_seed(seed_path)
+    all_ids = {
+        place.id
+        for city_id in ("moscow", "tula", "vladimir", "borovsk", "nizhny_novgorod")
+        for place in catalog.list_places(city_id)
+    }
+    zones = load_visit_zones(bundled_visit_zones_path(), all_ids)
+
+    assert not any(catalog_id.startswith("nn") for catalog_id in zones.catalog_ids)
+    assert zones.get("nn001") is None
 
 
 def test_distance_supports_polygon_boundary_and_outside():

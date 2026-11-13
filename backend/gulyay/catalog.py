@@ -170,6 +170,7 @@ class PlaceCatalog:
             "tula": "Тула",
             "vladimir": "Владимир",
             "borovsk": "Боровск",
+            "nizhny_novgorod": "Нижний Новгород",
             **(city_names or {}),
         }
         known_ids = {row[0] for row in self._connection.execute("SELECT id FROM places")}

@@ -14,6 +14,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.graphics.Typeface;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -26,10 +28,13 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,6 +45,10 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final String SUBMIT_LABEL = "Составить маршрут  →";
+    private static final String[] CITY_LABELS = {
+            "Локация не определена", "Тула", "Владимир", "Москва",
+            "Боровск, Калужская область", "Нижний Новгород"
+    };
     private static final int LOCATION_PERMISSION_REQUEST = 75;
     private static final int ROUTE_SCREEN_REQUEST = 76;
     private static final int ROUTE_CHAT_REQUEST = 77;
@@ -51,6 +60,7 @@ public final class MainActivity extends Activity {
     private Spinner city;
     private FrameLayout cityPicker;
     private TextView cityArrow;
+    private PopupWindow cityMenu;
     private ImageView heroImage;
     private EditText query;
     private TextView result;
@@ -155,9 +165,13 @@ public final class MainActivity extends Activity {
         heroImage = new ImageView(this);
         heroImage.setImageResource(R.drawable.moscow_hero);
         heroImage.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        heroImage.setAlpha(0.88f);
+        heroImage.setAlpha(1f);
         heroImage.setVisibility(View.GONE);
         hero.addView(heroImage, new FrameLayout.LayoutParams(-1, -1));
+        View heroLeftScrim = new View(this);
+        heroLeftScrim.setBackground(UiKit.gradient(
+                new int[]{0xB8FFFFFF, 0x48FFFFFF, 0x00FFFFFF}, 0, this));
+        hero.addView(heroLeftScrim, new FrameLayout.LayoutParams(-1, -1));
         View heroFade = new View(this);
         heroFade.setBackground(UiKit.verticalGradient(
                 new int[]{0x00FFFFFF, 0x20FFFFFF, 0xFFFFFFFF}, 0, this));
@@ -177,10 +191,12 @@ public final class MainActivity extends Activity {
         cityPicker.setBackground(UiKit.rounded(0xF7FFFFFF, 24, this));
         city = new Spinner(this);
         city.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"Локация не определена", "Тула", "Владимир", "Москва",
-                        "Боровск, Калужская область"}));
+                CITY_LABELS));
         city.setPadding(UiKit.dp(this, 46), 0, UiKit.dp(this, 42), 0);
         city.setBackgroundColor(0x00000000);
+        city.setClickable(false);
+        city.setFocusable(false);
+        city.setLongClickable(false);
         cityPicker.addView(city, new FrameLayout.LayoutParams(-1, -1));
         ImageView cityPin = new ImageView(this);
         cityPin.setImageResource(R.drawable.ic_location);
@@ -191,10 +207,16 @@ public final class MainActivity extends Activity {
         cityArrow = UiKit.label(this, "⌄", 22, UiKit.TEXT);
         cityArrow.setGravity(Gravity.CENTER);
         cityArrow.setClickable(true);
-        cityArrow.setOnClickListener(view -> city.performClick());
+        cityArrow.setOnClickListener(view -> toggleCityMenu());
         FrameLayout.LayoutParams arrowParams = new FrameLayout.LayoutParams(
                 UiKit.dp(this, 48), -1, Gravity.END | Gravity.CENTER_VERTICAL);
         cityPicker.addView(cityArrow, arrowParams);
+        View cityTapTarget = new View(this);
+        cityTapTarget.setClickable(true);
+        cityTapTarget.setFocusable(true);
+        cityTapTarget.setContentDescription("Открыть список городов");
+        cityTapTarget.setOnClickListener(view -> toggleCityMenu());
+        cityPicker.addView(cityTapTarget, new FrameLayout.LayoutParams(-1, -1));
         FrameLayout.LayoutParams cityParams = new FrameLayout.LayoutParams(
                 UiKit.dp(this, compact ? 200 : 220), UiKit.dp(this, 52), Gravity.TOP | Gravity.START);
         cityParams.setMargins(p, UiKit.dp(this, compact ? 58 : 70), 0, 0);
@@ -510,6 +532,17 @@ public final class MainActivity extends Activity {
         navigation.addView(profileTab, new LinearLayout.LayoutParams(0, navigationHeight, 1));
         column.addView(navigation);
         setContentView(column);
+        View windowRoot = getWindow().getDecorView();
+        ViewCompat.setOnApplyWindowInsetsListener(windowRoot, (view, insets) -> {
+            boolean keyboardVisible = insets.getInsets(
+                    WindowInsetsCompat.Type.ime()).bottom > 0;
+            int navigationVisibility = keyboardVisible ? View.GONE : View.VISIBLE;
+            if (navigation.getVisibility() != navigationVisibility) {
+                navigation.setVisibility(navigationVisibility);
+            }
+            return insets;
+        });
+        ViewCompat.requestApplyInsets(windowRoot);
 
         if (savedInstanceState != null) {
             city.setSelection(savedInstanceState.getInt("city"));
@@ -545,10 +578,6 @@ public final class MainActivity extends Activity {
         routeCard.setOnClickListener(view -> returnToCurrentRoute());
         routeControlButton.setOnClickListener(view -> showRouteControlMenu());
         locationButton.setOnClickListener(view -> toggleLocation());
-        city.setOnTouchListener((view, event) -> {
-            if (event.getAction() == MotionEvent.ACTION_DOWN) cityTouchInProgress = true;
-            return false;
-        });
         city.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
                                                   int position, long id) {
@@ -608,6 +637,86 @@ public final class MainActivity extends Activity {
             }
         }
         return super.dispatchTouchEvent(event);
+    }
+
+    private void toggleCityMenu() {
+        if (cityMenu != null && cityMenu.isShowing()) {
+            cityMenu.dismiss();
+            return;
+        }
+        showCityMenu();
+    }
+
+    private void showCityMenu() {
+        if (cityPicker == null || city == null || cityPicker.getWindowToken() == null) return;
+        LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        rows.setPadding(UiKit.dp(this, 6), UiKit.dp(this, 6),
+                UiKit.dp(this, 6), UiKit.dp(this, 6));
+        rows.setBackground(UiKit.rounded(0xFFFFFFFF, 20, this));
+        int selectedPosition = city.getSelectedItemPosition();
+        for (int position = 0; position < CITY_LABELS.length; position++) {
+            final int cityPosition = position;
+            boolean selected = position == selectedPosition;
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(UiKit.dp(this, 14), 0, UiKit.dp(this, 10), 0);
+            row.setBackground(selected
+                    ? UiKit.rounded(0xFFE8F8ED, 14, this)
+                    : new ColorDrawable(Color.TRANSPARENT));
+            row.setContentDescription(CITY_LABELS[position]
+                    + (selected ? ", выбрано" : ""));
+
+            TextView label = UiKit.label(this, CITY_LABELS[position], 15, UiKit.TEXT);
+            label.setGravity(Gravity.CENTER_VERTICAL);
+            label.setSingleLine(true);
+            label.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            row.addView(label, new LinearLayout.LayoutParams(0, -1, 1f));
+
+            TextView check = UiKit.label(this, selected ? "✓" : "", 24, UiKit.GREEN);
+            check.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            check.setGravity(Gravity.CENTER);
+            check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            row.addView(check, new LinearLayout.LayoutParams(
+                    UiKit.dp(this, 34), -1));
+            row.setOnClickListener(view -> {
+                if (city.getSelectedItemPosition() != cityPosition) {
+                    cityTouchInProgress = true;
+                    city.setSelection(cityPosition);
+                } else {
+                    citySelectedManually = cityPosition != 0;
+                }
+                if (cityMenu != null) cityMenu.dismiss();
+            });
+            rows.addView(row, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 52)));
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        scroll.addView(rows, new ScrollView.LayoutParams(-1, -2));
+        int availableWidth = getResources().getDisplayMetrics().widthPixels - UiKit.dp(this, 24);
+        int popupWidth = Math.min(UiKit.dp(this, 360), availableWidth);
+        int[] pickerLocation = new int[2];
+        cityPicker.getLocationOnScreen(pickerLocation);
+        int availableHeight = getResources().getDisplayMetrics().heightPixels
+                - pickerLocation[1] - cityPicker.getHeight() - UiKit.dp(this, 24);
+        int desiredHeight = UiKit.dp(this, CITY_LABELS.length * 52 + 12);
+        int popupHeight = Math.max(UiKit.dp(this, 156),
+                Math.min(desiredHeight, availableHeight));
+        cityMenu = new PopupWindow(scroll, popupWidth, popupHeight, true);
+        cityMenu.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        cityMenu.setOutsideTouchable(true);
+        cityMenu.setClippingEnabled(true);
+        cityMenu.setElevation(UiKit.dp(this, 10));
+        cityMenu.setOnDismissListener(() -> {
+            cityMenu = null;
+            cityArrow.setText("⌄");
+        });
+        cityArrow.setText("⌃");
+        cityMenu.showAsDropDown(cityPicker, 0, UiKit.dp(this, 8));
     }
 
     private Button addFilterButton(LinearLayout parent, String text, int accent) {
@@ -1463,6 +1572,7 @@ public final class MainActivity extends Activity {
         if (position == 2) return "vladimir";
         if (position == 3) return "moscow";
         if (position == 4) return "borovsk";
+        if (position == 5) return "nizhny_novgorod";
         return null;
     }
 
@@ -1471,6 +1581,7 @@ public final class MainActivity extends Activity {
         if ("vladimir".equals(cityId)) return 2;
         if ("moscow".equals(cityId)) return 3;
         if ("borovsk".equals(cityId)) return 4;
+        if ("nizhny_novgorod".equals(cityId)) return 5;
         return 0;
     }
 
@@ -1478,11 +1589,13 @@ public final class MainActivity extends Activity {
         if ("moscow".equals(cityId)) return "Москва";
         if ("vladimir".equals(cityId)) return "Владимир";
         if ("borovsk".equals(cityId)) return "Боровск";
+        if ("nizhny_novgorod".equals(cityId)) return "Нижний Новгород";
         return "Тула";
     }
 
     static String cityIdForLocation(double lat, double lon) {
         if (locationMatchesCity("borovsk", lat, lon)) return "borovsk";
+        if (locationMatchesCity("nizhny_novgorod", lat, lon)) return "nizhny_novgorod";
         if (locationMatchesCity("moscow", lat, lon)) return "moscow";
         if (locationMatchesCity("vladimir", lat, lon)) return "vladimir";
         if (locationMatchesCity("tula", lat, lon)) return "tula";
@@ -1494,6 +1607,7 @@ public final class MainActivity extends Activity {
         if ("vladimir".equals(cityId)) { centerLat = 56.1291; centerLon = 40.4075; }
         if ("moscow".equals(cityId)) { centerLat = 55.7558; centerLon = 37.6173; limitKm = 80.0; }
         if ("borovsk".equals(cityId)) { centerLat = 55.2073; centerLon = 36.4833; limitKm = 25.0; }
+        if ("nizhny_novgorod".equals(cityId)) { centerLat = 56.3269; centerLon = 44.0059; }
         double latKm = (lat - centerLat) * 111.32;
         double lonKm = (lon - centerLon) * 111.32 * Math.cos(Math.toRadians(centerLat));
         return Math.sqrt(latKm * latKm + lonKm * lonKm) <= limitKm;
@@ -2128,6 +2242,7 @@ public final class MainActivity extends Activity {
         if ("vladimir".equals(routeCityId)) return "Владимир";
         if ("moscow".equals(routeCityId)) return "Москва";
         if ("borovsk".equals(routeCityId)) return "Боровск";
+        if ("nizhny_novgorod".equals(routeCityId)) return "Нижний Новгород";
         return "город";
     }
 
@@ -2136,6 +2251,7 @@ public final class MainActivity extends Activity {
         if ("vladimir".equals(routeCityId)) return "Владимиру";
         if ("moscow".equals(routeCityId)) return "Москве";
         if ("borovsk".equals(routeCityId)) return "Боровске";
+        if ("nizhny_novgorod".equals(routeCityId)) return "Нижнем Новгороде";
         return "городе";
     }
 
@@ -2513,6 +2629,10 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (cityMenu != null) {
+            cityMenu.dismiss();
+            cityMenu = null;
+        }
         if (locationTimeout != null) {
             uiHandler.removeCallbacks(locationTimeout);
             locationTimeout = null;

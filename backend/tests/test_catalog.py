@@ -323,6 +323,52 @@ def test_borovsk_seed_uses_multicity_catalog_and_catalog_first_route_retrieval(t
     assert route.points
 
 
+def test_nizhny_novgorod_seed_preserves_hierarchy_and_is_idempotent(tmp_path):
+    catalog = PlaceCatalog(tmp_path / "shared.sqlite3")
+    nizhny_seed = next(path for path in bundled_seed_paths()
+                       if path.name == "nizhny_novgorod_places_v0_1.csv")
+
+    assert catalog.import_seed(nizhny_seed) == 50
+    assert catalog.import_seed(nizhny_seed) == 50
+    assert catalog.has_city("nizhny_novgorod")
+    assert catalog.city_name("nizhny_novgorod") == "Нижний Новгород"
+
+    places = catalog.list_places("nizhny_novgorod")
+    by_id = {place.id: place for place in places}
+    assert len(places) == len(by_id) == 50
+    assert sum(place.parent_id is None for place in places) == 23
+    assert sum(place.parent_id is not None for place in places) == 27
+    assert by_id["nn002"].parent_id == "nn001"
+    assert by_id["nn002"].relation == "CONTAINS"
+    assert tuple(child.id for child in catalog.children_of("nn001")) == (
+        "nn002", "nn003", "nn004", "nn005", "nn006", "nn007",
+    )
+    assert all(place.allow_coords_only for place in places)
+    assert all(place.dgis_place_id is None for place in places)
+    assert catalog.resolved_count("nizhny_novgorod") == 50
+    assert catalog.unresolved("nizhny_novgorod") == []
+
+    catalog_provider = CatalogPlaceProvider(catalog)
+    assert catalog_provider.has_sufficient_resolved("nizhny_novgorod")
+    geo = TrackingGeo()
+    geo.resolve_city_center = lambda city_id: (56.3269, 44.0059)
+    geo.resolve_search_area = lambda city_id, location_hint, center: SearchArea(
+        label="Нижний Новгород", lat=56.3269, lon=44.0059,
+        radiusMeters=12000, source="city",
+    )
+    route = build_route(
+        CreateRoute(cityId="nizhny_novgorod", query="Прогулка на 2 часа"),
+        preview(cityId="nizhny_novgorod", durationMinutes=120), geo,
+        datetime(2026, 10, 5, 12, tzinfo=ZoneInfo("Europe/Moscow")),
+        catalog=catalog_provider,
+    )
+    assert geo.attraction_searches == 0
+    assert route.cityId == "nizhny_novgorod"
+    assert route.points
+    assert all(point.catalogId and point.catalogId.startswith("nn")
+               for point in route.points)
+
+
 @pytest.mark.parametrize("change,expected", [
     ({"tags": "HISTORY,UNKNOWN"}, "неизвестные tags"),
     ({"relation": "OWNS", "parent_id": "root"}, "неизвестный relation"),
@@ -341,7 +387,8 @@ def test_committed_enrichment_makes_fresh_catalog_runtime_ready(tmp_path):
         catalog.import_seed(path)
     catalog_provider = CatalogPlaceProvider(catalog)
     assert all(catalog_provider.has_sufficient_resolved(city)
-               for city in ("moscow", "tula", "vladimir", "borovsk"))
+               for city in ("moscow", "tula", "vladimir", "borovsk",
+                            "nizhny_novgorod"))
     moscow = {place.id: place for place in catalog.list_places("moscow")}
     assert (moscow["msk001"].lat, moscow["msk001"].lon) == pytest.approx(
         (55.754549, 37.618666)

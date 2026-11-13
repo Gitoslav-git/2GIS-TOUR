@@ -22,6 +22,13 @@ public final class RouteGroupsAndroidTest {
                 null, null, null, filters, false).has("routeGroupsEnabled"));
     }
 
+    @Test public void nizhnyNovgorodSelectionUsesBackendCityId() throws Exception {
+        JSONObject payload = ApiClient.createRoutePayload(
+                "nizhny_novgorod", "Прогулка на 2 часа", "session",
+                null, null, null, new JSONObject(), true);
+        assertEquals("nizhny_novgorod", payload.getString("cityId"));
+    }
+
     @Test public void parsesFreeRoamChildrenIncludingListOnlyEntries() throws Exception {
         ApiClient.Result route = ApiClient.routeFromJson(freeRoamRoute(), "moscow");
         assertTrue(route.routeGroupsEnabled);

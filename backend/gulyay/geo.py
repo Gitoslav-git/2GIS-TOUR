@@ -119,6 +119,7 @@ CITY_NAMES = {
     "vladimir": "Владимир",
     "moscow": "Москва",
     "borovsk": "Боровск",
+    "nizhny_novgorod": "Нижний Новгород",
 }
 PLACES_URL = "https://catalog.api.2gis.com/3.0/items"
 PLACES_BY_ID_URL = "https://catalog.api.2gis.com/3.0/items/byid"
@@ -162,6 +163,7 @@ CITY_MAIN_LANDMARK_QUERIES: dict[str, tuple[str, ...]] = {
     "vladimir": ("Золотые ворота", "Успенский собор"),
     "moscow": ("Красная площадь", "Московский Кремль"),
     "borovsk": ("Пафнутьево-Боровский монастырь", "Боровские фрески"),
+    "nizhny_novgorod": ("Нижегородский кремль", "Чкаловская лестница"),
 }
 
 CONCEPT_WORDS: dict[str, tuple[str, ...]] = {

@@ -181,6 +181,15 @@ public class MainActivityRecoveryTest {
         assertFalse(PositionSubmissionPolicy.isFresh(10_000L, 45_001L, 0L));
     }
 
+    @Test public void nizhnyNovgorodCoordinatesResolveToBackendCityId() {
+        assertEquals("nizhny_novgorod",
+                MainActivity.cityIdForLocation(56.3269, 44.0059));
+        assertTrue(MainActivity.locationMatchesCity(
+                "nizhny_novgorod", 56.3269, 44.0059));
+        assertFalse(MainActivity.locationMatchesCity(
+                "nizhny_novgorod", 55.7558, 37.6173));
+    }
+
     @Test public void positionPolicyKeepsTenSecondCadence() {
         assertEquals(0L, PositionSubmissionPolicy.delayUntilSlot(10_000L, 0L, 0L));
         assertEquals(10_000L,

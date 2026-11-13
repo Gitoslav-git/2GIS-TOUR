@@ -125,6 +125,21 @@ def test_borovsk_city_center_is_resolved_by_exact_city_name():
     assert provider.resolve_city_center("borovsk") == (55.2073, 36.4833)
 
 
+def test_nizhny_novgorod_city_center_is_resolved_by_exact_city_name():
+    def nizhny_novgorod(request):
+        assert request.url.params.get("q") == "Нижний Новгород"
+        return httpx.Response(200, json={
+            "meta": {"code": 200},
+            "result": {"items": [{
+                "id": "nizhny-novgorod-city", "name": "Нижний Новгород",
+                "point": {"lat": 56.3269, "lon": 44.0059},
+            }]},
+        })
+
+    provider = DgisGeoProvider("p", "r", httpx.MockTransport(nizhny_novgorod))
+    assert provider.resolve_city_center("nizhny_novgorod") == (56.3269, 44.0059)
+
+
 def test_large_routing_geometry_is_bounded_and_keeps_ends():
     coordinates = ", ".join(
         f"{36.48 + index * 0.00001:.5f} {55.20 + index * 0.00001:.5f}"

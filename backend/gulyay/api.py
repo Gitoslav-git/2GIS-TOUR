@@ -46,7 +46,8 @@ from .version import __version__ as APP_VERSION
 app = FastAPI(title="Гуляй API", version=APP_VERSION)
 CITIES = (City(cityId="tula", name="Тула"), City(cityId="vladimir", name="Владимир"),
           City(cityId="moscow", name="Москва"),
-          City(cityId="borovsk", name="Боровск, Калужская область"))
+          City(cityId="borovsk", name="Боровск, Калужская область"),
+          City(cityId="nizhny_novgorod", name="Нижний Новгород"))
 ROUTE_REPOSITORY = RouteRepository()
 PLACE_CATALOG = PlaceCatalog()
 for seed_path in bundled_seed_paths():

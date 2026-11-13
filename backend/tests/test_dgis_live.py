@@ -9,7 +9,9 @@ from gulyay.models import QueryPreview
 pytestmark = pytest.mark.integration
 
 
-@pytest.mark.parametrize("city_id", ["tula", "vladimir", "moscow", "borovsk"])
+@pytest.mark.parametrize("city_id", [
+    "tula", "vladimir", "moscow", "borovsk", "nizhny_novgorod",
+])
 def test_live_places_and_walking_route_for_pilot_city(city_id):
     if not os.getenv("DGIS_PLACES_API_KEY") or not os.getenv("DGIS_ROUTING_API_KEY"):
         pytest.skip("2GIS server keys are not configured")

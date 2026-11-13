@@ -1350,7 +1350,8 @@ final class ApiClient {
     private static String routeSummary(JSONObject response, String cityId) throws Exception {
         String city = cityId.equals("tula") ? "Тула" :
                 (cityId.equals("moscow") ? "Москва" :
-                (cityId.equals("borovsk") ? "Боровск" : "Владимир"));
+                (cityId.equals("borovsk") ? "Боровск" :
+                (cityId.equals("nizhny_novgorod") ? "Нижний Новгород" : "Владимир")));
         int requested = response.optInt("requestedMinutes", response.getInt("totalMinutes"));
         int unused = response.optInt("unusedMinutes", Math.max(0, requested - response.getInt("totalMinutes")));
         boolean explicitDuration = !"default".equals(response.optString("durationSource", "default"));
